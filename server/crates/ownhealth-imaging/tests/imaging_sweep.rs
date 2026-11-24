@@ -921,3 +921,41 @@ async fn the_release_keeps_the_zip_while_another_row_of_the_profile_names_its_by
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_study_of_a_deleted_profile_a_restore_brought_back_leaves_orthanc_and_is_not_rebuilt() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.upload("sam", &study_files(&Study::new(U2, SAM), "DICOM")).await?;
+    assert_eq!(e.import().await?, 2);
+    // a restore of a backup taken before Alex's delete brings his rows back with a shredded key, while
+    // the Orthanc volume was kept
+    let mut conn = e.rt.pool.acquire().await?;
+    ownhealth_core::keys::shred(&mut conn, alex).await?;
+    drop(conn);
+    assert!(e.recorded(U1).await?.is_some());
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["removed_studies"], 1, "{swept}");
+    assert!(
+        e.orthanc.patients_under(U1).is_empty(),
+        "a closed profile's pixels stayed in Orthanc"
+    );
+    assert_eq!(e.orthanc.instances_under(U2), 6);
+    // and Orthanc lacking it now queues no rebuild of its zips
+    let again = e.sweep().await?;
+    assert_eq!(again["rebuild_profiles"], 0, "{again}");
+    let mut conn = e.rt.pool.acquire().await?;
+    assert!(rebuild::enqueue(&mut conn, alex).await?.is_some());
+    drop(conn);
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(rebuilt["studies"], 0, "{rebuilt}");
+    assert!(
+        e.orthanc.patients_under(U1).is_empty(),
+        "the rebuild sent a closed study"
+    );
+    Ok(())
+}

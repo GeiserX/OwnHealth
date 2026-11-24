@@ -265,7 +265,7 @@ Elsewhere, drop and recreate the database, and empty the blob folder (`OWNHEALTH
 
 Some untagged builds wrote keyed backups before the keyring or listed profile UUIDs without key IDs. Restore these backups with the build that wrote them, then take a new backup with this version.
 
-**Images.** Orthanc's storage is not in the backup. With the `imaging` profile on, the app finds the recorded studies Orthanc lacks when it starts and sends them back from the stored uploads (the `imaging.rebuild` job). Until that job ends, opening such a study answers that its images are coming back. A study whose upload no longer opens (its profile was deleted since the backup) stays without images. Point `OWNHEALTH_ORTHANC_URL` only at OwnHealth's own Orthanc service: the app deletes every study in it that its record does not name, at every start and every hour.
+**Images.** Orthanc's storage is not in the backup. With the `imaging` profile on, the app finds the recorded studies Orthanc lacks when it starts and sends them back from the stored uploads (the `imaging.rebuild` job). Until that job ends, opening such a study answers that its images are coming back. A study of a profile deleted since the backup stays closed, even when Orthanc's volume was kept: the viewer refuses it, the rebuild leaves it out, and the sweep deletes it from Orthanc. Delete that profile again to remove its records. Point `OWNHEALTH_ORTHANC_URL` only at OwnHealth's own Orthanc service: the app deletes every study in it that its record does not name, at every start and every hour.
 
 Restore with the OwnHealth version that made the backup (`app_version` in the manifest), then upgrade. A newer rule pack can change a `state_hash` on purpose, and the check would report it as a difference.
 

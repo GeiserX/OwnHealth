@@ -1624,3 +1624,31 @@ async fn a_retracted_report_uploaded_again_brings_its_study_back() -> R {
     assert_eq!(carmen, "retracted");
     Ok(())
 }
+
+/// Slice 43: a restore of a backup taken before a profile's delete brings its rows back with a
+/// shredded key. Its studies stay closed even when Orthanc's volume was kept: no open, and a link made
+/// before passes nothing.
+#[tokio::test]
+async fn a_study_of_a_deleted_profile_a_restore_brought_back_stays_closed() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let cap = w.open(&cookie, "carmen", CARMEN_MR).await?; // Alex is her caregiver
+    let series = dw(&cap, &format!("studies/{CARMEN_MR}/series"));
+    assert_eq!(w.viewer_get(&series, None).await?.0, StatusCode::OK);
+    let mut c = w.db.pool.acquire().await?;
+    ownhealth_core::keys::shred(&mut c, w.fam.profile("carmen")).await?;
+    drop(c);
+    w.orthanc.clear();
+    let (s, _, body) = w.viewer_get(&series, None).await?;
+    assert_eq!((s, code(&body).as_str()), (StatusCode::FORBIDDEN, "study_closed"));
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "carmen", CARMEN_MR).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_closed")),
+        "{v}"
+    );
+    assert!(w.orthanc.seen().is_empty());
+    // Alex's own study, whose profile keeps its key, still opens
+    w.open(&cookie, "alex", ALEX_CT).await?;
+    Ok(())
+}

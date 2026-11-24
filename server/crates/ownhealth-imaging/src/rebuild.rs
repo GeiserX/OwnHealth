@@ -100,8 +100,9 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     };
     let orthanc = Orthanc::new(config).map_err(retry)?;
     let recorded: Vec<(String, String, Value)> = sqlx::query_as(
-        "select study_instance_uid, orthanc_id, fhir from imaging_study \
-         where profile_id = $1 and orthanc_id is not null order by study_instance_uid",
+        "select s.study_instance_uid, s.orthanc_id, s.fhir from imaging_study s \
+         where s.profile_id = $1 and s.orthanc_id is not null and not exists (select 1 from profile_key k \
+         where k.profile_id = s.profile_id and k.wrapped_dek is null) order by s.study_instance_uid",
     )
     .bind(profile_id)
     .fetch_all(&ctx.pool)

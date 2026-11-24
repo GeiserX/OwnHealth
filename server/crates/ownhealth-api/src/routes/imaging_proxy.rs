@@ -381,6 +381,13 @@ fn retracted() -> ApiError {
     refused("study_retracted", "This study was retracted.")
 }
 
+fn closed() -> ApiError {
+    refused(
+        "study_closed",
+        "This study's images stay closed: its profile was deleted, and a restore brought back only its records.",
+    )
+}
+
 fn not_bound() -> ApiError {
     refused(
         "study_not_bound",
@@ -545,22 +552,32 @@ async fn bound_study(conn: &mut PgConnection, profile_id: Uuid, uid: &str) -> Re
             "This profile has no study with that UID.",
         )),
         Some((s, _)) if s == "retracted" => Err(retracted()),
+        Some((s, _)) if s == CLOSED => Err(closed()),
         Some((_, None)) => Err(not_bound()),
         Some((_, Some(id))) => Ok(id),
     }
 }
 
-/// The study's status and Orthanc id in that profile (`study_instance_uid` is unique).
+/// The status [`study_row`] gives a study of a profile whose key a delete shredded: a restore of a
+/// backup taken before that delete brought its row back, and its images stay closed (slice 43).
+const CLOSED: &str = "closed";
+
+/// The study's status ([`CLOSED`] when its profile's key is shredded) and Orthanc id in that profile
+/// (`study_instance_uid` is unique).
 async fn study_row(
     conn: &mut PgConnection,
     profile_id: Uuid,
     uid: &str,
 ) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
-    sqlx::query_as("select status, orthanc_id from imaging_study where profile_id = $1 and study_instance_uid = $2")
-        .bind(profile_id)
-        .bind(uid)
-        .fetch_optional(conn)
-        .await
+    sqlx::query_as(
+        "select case when exists (select 1 from profile_key k where k.profile_id = s.profile_id \
+         and k.wrapped_dek is null) then 'closed' else s.status end, s.orthanc_id \
+         from imaging_study s where s.profile_id = $1 and s.study_instance_uid = $2",
+    )
+    .bind(profile_id)
+    .bind(uid)
+    .fetch_optional(conn)
+    .await
 }
 
 /// The principal of a live session, by id: the same rules as `sessions::resolve_session` (not revoked,
@@ -636,6 +653,7 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Autho
     match study_row(&mut conn, link.profile_id, &link.study_uid).await? {
         None => Err(study_not_available()),
         Some((s, _)) if s == "retracted" => Err(retracted()),
+        Some((s, _)) if s == CLOSED => Err(closed()),
         Some((_, id)) if id.as_deref() != Some(link.orthanc_id.as_str()) => Err(study_not_available()),
         Some(_) => Ok(Authorized { link, touch }),
     }

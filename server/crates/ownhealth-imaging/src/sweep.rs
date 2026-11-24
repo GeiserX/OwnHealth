@@ -8,7 +8,9 @@
 //!    its reply, and no job of it runs again) is drained: its new instances are taken back.
 //! 2. Every Orthanc study that no `imaging_study.orthanc_id` names is deleted. A retracted study keeps
 //!    its row, so it keeps its pixels: the viewer refuses it, and a restore of the row finds it whole.
-//!    A study that another profile's record names is never touched.
+//!    A study that another profile's record names is never touched. A row of a profile whose key a
+//!    delete shredded names nothing: a restore of a backup taken before the delete brings the row
+//!    back, and its study goes from Orthanc, as the viewer refuses it.
 //! 3. A recorded study keeps only the series its record counts (`fhir.series`). A series an import
 //!    added and then could not record (a retry whose check after the send failed) is deleted.
 //! 4. A recorded study that Orthanc lacks, or holds without a series its record counts (a restore of
@@ -184,8 +186,12 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc, held: &[String], failed: &mu
     drop(journal);
 
     // 2. what the record names, and what Orthanc holds
+    // A row of a profile whose key a delete shredded names nothing: a restore of a backup taken before
+    // that delete brought it back, and its images stay closed.
     let rows: Vec<(String, Uuid, String, Value)> = sqlx::query_as(
-        "select orthanc_id, profile_id, study_instance_uid, fhir from imaging_study where orthanc_id is not null",
+        "select s.orthanc_id, s.profile_id, s.study_instance_uid, s.fhir from imaging_study s \
+         where s.orthanc_id is not null and not exists (select 1 from profile_key k \
+         where k.profile_id = s.profile_id and k.wrapped_dek is null)",
     )
     .fetch_all(&ctx.pool)
     .await?;
@@ -252,10 +258,13 @@ async fn remove_unnamed(ctx: &JobContext, orthanc: &Orthanc, id: &str) -> Result
     };
     let mut tx = ctx.pool.begin().await?;
     lock_study(&mut tx, &info.study_instance_uid).await?;
-    let still: bool = sqlx::query_scalar("select exists (select 1 from imaging_study where orthanc_id = $1)")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let still: bool = sqlx::query_scalar(
+        "select exists (select 1 from imaging_study s where s.orthanc_id = $1 and not exists \
+         (select 1 from profile_key k where k.profile_id = s.profile_id and k.wrapped_dek is null))",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
     if !still {
         orthanc.delete_study(id).await.map_err(retry)?;
     }
