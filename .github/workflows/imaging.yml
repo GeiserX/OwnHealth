@@ -75,15 +75,14 @@ jobs:
           OWNHEALTH_APP_DB_PASSWORD=$(openssl rand -hex 32)
           OWNHEALTH_ORTHANC_PASSWORD=$OWNHEALTH_ORTHANC_PASSWORD
           ENV
-          # Use the deployment profile's Orthanc config and Postgres. Publish only to the runner
-          # so the same debug binary as the regular e2e job can talk to both.
+          # Use the deployment profile's Orthanc and Postgres as compose.yaml ships them: the override
+          # sets no image, so a PR that bumps either one is measured on the new image. It only
+          # publishes both to the runner, so this checkout's debug binary can talk to them.
           cat > "$RUNNER_TEMP/imaging-compose.yml" <<'YAML'
           services:
             db:
-              image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
               ports: ["127.0.0.1:55444:5432"]
             orthanc:
-              image: orthancteam/orthanc:26.11.1@sha256:25738bcd515926ac8d33cacf09729a410a32c0a65d6cb8e61bd86fce81a4cd30
               ports: ["127.0.0.1:18244:8042"]
           YAML
           docker compose -f compose.yaml -f "$RUNNER_TEMP/imaging-compose.yml" \
