@@ -1545,3 +1545,64 @@ fn a_planned_or_active_immunization_is_never_recorded_as_given() -> R {
     assert!(c.sections.iter().all(|s| s.not_read.is_empty()), "{:?}", c.sections);
     Ok(())
 }
+
+/// A medicine of `ccd-1.xml` by a word of its name.
+fn ccd1_medicine(c: &Converted, word: &str) -> anyhow::Result<Value> {
+    resources(c, "MedicationStatement")
+        .into_iter()
+        .find(|r| {
+            r["medicationCodeableConcept"]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains(word))
+        })
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no {word}"))
+}
+
+/// A Medications section with one medicine that has `extra` as more children.
+fn medicine_with(extra: &str) -> Vec<u8> {
+    document(&format!(
+        r##"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.1.1"/><title>MEDICATIONS</title>
+          <text><content ID="med-n">{}</content></text>
+          <entry><substanceAdministration classCode="SBADM" moodCode="EVN">
+            <templateId root="2.16.840.1.113883.10.20.22.4.16"/><id root="1.2.3.4" extension="med-x"/>
+            <text><reference value="#med-n"/>{}</text>
+            <statusCode code="active"/>
+            <consumable><manufacturedProduct><manufacturedMaterial>
+              <code code="573621" codeSystem="2.16.840.1.113883.6.88" displayName="albuterol 0.09 MG/ACTUAT [Proventil]"/>
+            </manufacturedMaterial></manufacturedProduct></consumable>
+            {extra}
+          </substanceAdministration></entry></section></component>"##,
+        "narrative ".repeat(300),
+        "inline ".repeat(400),
+    ))
+}
+
+/// T7: an as-needed precondition ("when wheezing", CCD 1's albuterol) becomes the dosage's
+/// asNeededCodeableConcept; a precondition that names nothing is listed as not read.
+#[test]
+fn an_as_needed_precondition_is_kept_or_listed() -> R {
+    let c = convert(&fixture("ccd-1.xml"))?;
+    let albuterol = ccd1_medicine(&c, "albuterol")?;
+    let as_needed = &albuterol["dosage"][0]["asNeededCodeableConcept"];
+    assert_eq!(as_needed["coding"][0]["code"], "56018004", "{albuterol}");
+    assert_eq!(as_needed["text"], "Wheezing");
+    let atenolol = ccd1_medicine(&c, "atenolol")?;
+    assert!(
+        atenolol["dosage"][0].get("asNeededCodeableConcept").is_none(),
+        "{atenolol}"
+    );
+
+    let empty = r#"<precondition typeCode="PRCN"><criterion><templateId root="2.16.840.1.113883.10.20.22.4.25"/>
+        <code code="ASSERTION" codeSystem="2.16.840.1.113883.5.4"/></criterion></precondition>"#;
+    let c = convert(&medicine_with(empty))?;
+    let med = resources(&c, "MedicationStatement")[0];
+    assert!(med["dosage"][0].get("asNeededCodeableConcept").is_none(), "{med}");
+    let s = c
+        .sections
+        .iter()
+        .find(|s| s.kind == Some(Section::Medications))
+        .ok_or_else(|| anyhow::anyhow!("no medications section"))?;
+    assert_eq!(s.not_read, ["criterion 2.16.840.1.113883.10.20.22.4.25"]);
+    Ok(())
+}

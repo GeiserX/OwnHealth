@@ -37,7 +37,9 @@
 //! - An entered-in-error allergy or problem has no `clinicalStatus` (FHIR R4 ait-2, con-5). A problem
 //!   whose status observation says active while its effectiveTime has an end is listed for review
 //!   with that reason, never imported as active or as resolved (con-4).
-//! - A supply order or a dispense inside a Medication Activity is listed as not read.
+//! - A supply order or a dispense inside a Medication Activity is listed as not read. Its first
+//!   precondition that names something ("as needed for wheezing") is the dosage's
+//!   `asNeededCodeableConcept`; any other is listed as not read.
 //! - Only an Immunization Activity in `EVN` mood that is not active is a vaccine given; a planned one
 //!   (`INT`), another mood or an active one is listed as not read.
 //! - A Results organizer is a DiagnosticReport with the Observations as its results; a Vital Signs
@@ -1152,6 +1154,17 @@ impl<'a, 'i> Conv<'a, 'i> {
                 .and_then(quantity)
                 .map(|q| json!([{"doseQuantity": q}])),
         );
+        // "as needed for wheezing" (Precondition for Substance Administration 4.25): the first
+        // criterion that names something; any other is listed as not read
+        let mut as_needed = None;
+        let mut unread = Vec::new();
+        for criterion in children(sa, "precondition").flat_map(|p| children(p, "criterion")) {
+            match self.concept(child(criterion, "value")) {
+                Some(cc) if as_needed.is_none() => as_needed = Some(cc),
+                _ => unread.push(describe(criterion)),
+            }
+        }
+        put(&mut dosage, "asNeededCodeableConcept", as_needed);
         if !dosage.is_empty() {
             r.insert(
                 if request { "dosageInstruction" } else { "dosage" }.into(),
@@ -1169,6 +1182,7 @@ impl<'a, 'i> Conv<'a, 'i> {
         for supply in children(sa, "entryRelationship").flat_map(|er| children(er, "supply")) {
             rep.not_read.push(describe(supply));
         }
+        rep.not_read.extend(unread);
     }
 
     /// A vaccine given (an Immunization Activity in `EVN` mood that is not still active). A planned
