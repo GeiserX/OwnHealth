@@ -1500,3 +1500,48 @@ fn a_restricted_parent_section_or_body_labels_every_record_inside_it() -> R {
     assert_eq!(label_codes(&c, "Composition"), vec![vec!["R".to_string()]]);
     Ok(())
 }
+
+/// An Immunization Activity in `mood` with `status`.
+fn immunization_section(mood: &str, status: &str) -> String {
+    format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.2.1"/><title>IMMUNIZATIONS</title>
+          <entry><substanceAdministration classCode="SBADM" moodCode="{mood}" negationInd="false">
+            <templateId root="2.16.840.1.113883.10.20.22.4.52"/><id root="1.2.3" extension="imm-{mood}-{status}"/>
+            <statusCode code="{status}"/><effectiveTime value="20261201"/>
+            <consumable><manufacturedProduct><templateId root="2.16.840.1.113883.10.20.22.4.54"/><manufacturedMaterial>
+              <code code="88" codeSystem="2.16.840.1.113883.12.292" displayName="Influenza virus vaccine"/>
+            </manufacturedMaterial></manufacturedProduct></consumable>
+          </substanceAdministration></entry></section></component>"#
+    )
+}
+
+/// T8: only a given vaccine (`EVN`, not active) is a completed Immunization. A planned one (`INT`)
+/// and one still active are listed as not read, never recorded as given.
+#[test]
+fn a_planned_or_active_immunization_is_never_recorded_as_given() -> R {
+    for (mood, status) in [
+        ("INT", "active"),
+        ("INT", "completed"),
+        ("EVN", "active"),
+        ("PRP", "completed"),
+    ] {
+        let c = convert(&document(&immunization_section(mood, status)))?;
+        assert!(resources(&c, "Immunization").is_empty(), "{mood} {status}");
+        let s = c
+            .sections
+            .iter()
+            .find(|s| s.kind == Some(Section::Immunizations))
+            .ok_or_else(|| anyhow::anyhow!("no immunizations section"))?;
+        assert_eq!(
+            s.not_read,
+            ["substanceAdministration 2.16.840.1.113883.10.20.22.4.52"],
+            "{mood} {status}"
+        );
+    }
+    let c = convert(&document(&immunization_section("EVN", "completed")))?;
+    let given = resources(&c, "Immunization");
+    assert_eq!(given.len(), 1);
+    assert_eq!(given[0]["status"], "completed");
+    assert!(c.sections.iter().all(|s| s.not_read.is_empty()), "{:?}", c.sections);
+    Ok(())
+}

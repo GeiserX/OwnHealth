@@ -6,7 +6,7 @@
 //! | Allergies (`6`, `6.1`) | Allergy Concern Act, one per Allergy-Intolerance Observation | AllergyIntolerance |
 //! | Problems (`5`, `5.1`) | Problem Concern Act, one per Problem Observation | Condition |
 //! | Medications (`1`, `1.1`) | Medication Activity | MedicationStatement (`EVN`) or MedicationRequest (`INT`) |
-//! | Immunizations (`2`, `2.1`) | Immunization Activity | Immunization |
+//! | Immunizations (`2`, `2.1`) | Immunization Activity (`EVN`, not active) | Immunization |
 //! | Results (`3`, `3.1`) | Result Organizer and its Result Observations | DiagnosticReport plus Observations |
 //! | Vital Signs (`4`, `4.1`) | Vital Signs Organizer and its observations | Observations |
 //!
@@ -38,6 +38,8 @@
 //!   whose status observation says active while its effectiveTime has an end is listed for review
 //!   with that reason, never imported as active or as resolved (con-4).
 //! - A supply order or a dispense inside a Medication Activity is listed as not read.
+//! - Only an Immunization Activity in `EVN` mood that is not active is a vaccine given; a planned one
+//!   (`INT`), another mood or an active one is listed as not read.
 //! - A Results organizer is a DiagnosticReport with the Observations as its results; a Vital Signs
 //!   organizer only groups, so its observations come alone.
 //! - Every section, entry or part the converter does not read is listed in the section's report, and
@@ -818,10 +820,7 @@ impl<'a, 'i> Conv<'a, 'i> {
                         self.medication(el, &at, &mut rep);
                         true
                     }
-                    (Section::Immunizations, "substanceAdministration") => {
-                        self.immunization(el, &at, &mut rep);
-                        true
-                    }
+                    (Section::Immunizations, "substanceAdministration") => self.immunization(el, &at, &mut rep),
                     (Section::Results, "organizer") => self.results(el, &at, &mut rep),
                     (Section::Results, "observation") => {
                         self.observation(el, None, "laboratory", &at, &mut rep).is_some()
@@ -1172,7 +1171,13 @@ impl<'a, 'i> Conv<'a, 'i> {
         }
     }
 
-    fn immunization(&mut self, sa: Node<'_, '_>, at: &str, rep: &mut SectionReport) {
+    /// A vaccine given (an Immunization Activity in `EVN` mood that is not still active). A planned
+    /// one (`INT`), any other mood and an active one are no record of a vaccine given: false, so the
+    /// section lists it as not read.
+    fn immunization(&mut self, sa: Node<'_, '_>, at: &str, rep: &mut SectionReport) -> bool {
+        if attr(sa, "moodCode") != Some("EVN") || status_of(sa) == Some("active") {
+            return false;
+        }
         let negated = is_true(sa, "negationInd");
         let material = Self::material(sa);
         let id = self.new_id("Immunization", &[sa], sa);
@@ -1229,6 +1234,7 @@ impl<'a, 'i> Conv<'a, 'i> {
             dose.map(|d| json!([{"doseNumberPositiveInt": d}])),
         );
         self.push(Some(rep), at, Value::Object(r));
+        true
     }
 
     /// A Results organizer: its observations, then a DiagnosticReport that lists them.
