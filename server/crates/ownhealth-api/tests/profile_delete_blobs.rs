@@ -2465,6 +2465,13 @@ async fn deleting_a_profile_with_imaging_on_queues_the_orthanc_sweep() -> R {
         password: ownhealth_core::ids::token_hex(16),
     });
     env.rt = Runtime::with_pool(env.settings.clone(), env.db.pool.clone())?;
+    // an hourly sweep is running: it read the record before this delete, so the delete queues its own
+    sqlx::query(
+        "insert into job (kind, payload, dedupe_key, state, attempts) \
+         values ('imaging.sweep', '{}', 'imaging.sweep', 'running', 1)",
+    )
+    .execute(&env.db.pool)
+    .await?;
     let mut me = env.as_user(env.user("sam")).await?;
     let r = me.delete("/api/profiles/sam?confirm=sam").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
