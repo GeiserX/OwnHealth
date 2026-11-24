@@ -53,7 +53,7 @@ jobs:
         ports:
           - 18216:8080
       launcher:
-        image: smartonfhir/smart-launcher-2@sha256:72bd3e3c682ce4c74e6dddb605d89acad7c8aae446ae38079e8dfe8455b84793
+        image: smartonfhir/smart-launcher-2@sha256:72bd3e3c682ce4c74e6dddb605d89acad7c8aae446ae38079e8dfe8455b84793 # latest, pushed 2025-02-13
         env:
           FHIR_SERVER_R4: http://fhir:8080/fhir
           # The first pull refreshes because the access token is already within its 60-second margin.
