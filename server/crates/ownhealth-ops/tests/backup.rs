@@ -1393,6 +1393,7 @@ async fn round_nine_a_restore_without_a_checkpoint_is_refused_with_the_way_to_st
     let refused = err_text(ownhealth_ops::restore(&settings, &l.archive).await);
     for needed in [
         "target database is not empty",
+        "rerun it with the same snapshot, keyring and options",
         "drop and recreate the database",
         "empty the blob folder",
         "run the same restore again",

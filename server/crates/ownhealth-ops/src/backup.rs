@@ -1491,10 +1491,11 @@ pub async fn restore_with(settings: &Settings, archive: &Path, allow_missing_key
     if tables > 0 && !resuming {
         return Err(ops_error(
             "the target database is not empty: restore needs a fresh instance (new volume, app not started). \
-             It holds no checkpoint of this restore, so a restore that stopped here cannot resume: it starts \
-             over. If this target holds only that stopped restore, drop and recreate the database and empty \
-             the blob folder (or use new volumes), keep the app stopped, and run the same restore again \
-             (deploy/README.md, \"Restore\"). Nothing was loaded",
+             It holds no checkpoint that matches this restore. If an earlier run of this restore saved a \
+             checkpoint, rerun it with the same snapshot, keyring and options. Otherwise a restore that \
+             stopped here cannot resume: it starts over. If this target holds only that stopped restore, \
+             drop and recreate the database and empty the blob folder (or use new volumes), keep the app \
+             stopped, and run the same restore again (deploy/README.md, \"Restore\"). Nothing was loaded",
         ));
     }
     // Check every blob before the database is loaded: a corrupt or missing one found after pg_restore
