@@ -12,7 +12,7 @@ const observations = [
 	{ id: 'labnorte-creatinine', code: '2160-0', name: 'Creatinine', value: 0.91, unit: 'mg/dL' }
 ];
 
-test.use({ baseURL: app, colorScheme: 'dark', trace: 'off' });
+test.use({ baseURL: app, colorScheme: 'dark', trace: 'retain-on-failure', screenshot: 'only-on-failure' });
 test.skip(!launcher, 'Start the pinned SMART launcher and its FHIR server for this spec.');
 
 function sql(query: string): string {
@@ -121,11 +121,14 @@ test('launches with PKCE and offline access, refreshes, and imports the patient 
 			}))
 		])
 	});
-	expect(sql(`
+	const imported = sql(`
 		select loinc || '=' || trim_scale(value_num)
 		from observation where document_id = '${documentId}' and profile_id = '${profile}' and status = 'current'
 		order by loinc
-	`).split('\n')).toEqual(observations.map(({ code, value }) => `${code}=${value}`).sort());
+	`).split('\n');
+	expect(imported).toEqual(observations.map(({ code, value }) => `${code}=${value}`).sort());
+	const rotated = sql(`select k.updated_at from source s join secret k on k.id = s.secret_id where s.id = '${source}'`);
+	console.log(`SMART source ${source}: last run ok, refresh token rotated at ${rotated}, imported ${imported.join(', ')}`);
 
 	const shots = process.env.OWNHEALTH_E2E_SMART_SHOTS;
 	const card = page.getByRole('article', { name: label });

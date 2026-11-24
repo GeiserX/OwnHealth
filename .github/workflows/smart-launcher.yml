@@ -97,15 +97,29 @@ jobs:
             --max-time 5 --output /dev/null "$OWNHEALTH_E2E_SMART_FHIR/metadata"
           curl --fail --silent --show-error --retry 20 --retry-all-errors --retry-delay 2 \
             --max-time 5 --output /dev/null "$OWNHEALTH_E2E_SMART_LAUNCHER/v/r4/fhir/.well-known/smart-configuration"
-          nohup bash e2e/serve.sh > "$RUNNER_TEMP/ownhealth-smart.log" 2>&1 < /dev/null &
+          mkdir -p "$RUNNER_TEMP/smart-evidence"
+          nohup bash e2e/serve.sh > "$RUNNER_TEMP/smart-evidence/ownhealth-smart.log" 2>&1 < /dev/null &
           curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 2 \
             --max-time 5 --output /dev/null "http://127.0.0.1:$OWNHEALTH_E2E_PORT/readyz"
       - name: Launch with offline access, refresh, and import
         working-directory: ui
-        run: pnpm exec playwright test e2e/smart-launch.spec.ts --workers=1 --grep 'launches with PKCE'
+        env:
+          OWNHEALTH_E2E_SMART_SHOTS: ${{ runner.temp }}/smart-evidence/shots
+        run: |
+          pnpm exec playwright test e2e/smart-launch.spec.ts --workers=1 --grep 'launches with PKCE' \
+            --output "$RUNNER_TEMP/smart-evidence/launch"
       - name: Require the wrong PKCE verifier exchange to fail
         if: ${{ !cancelled() && steps.start.outcome == 'success' }}
         working-directory: ui
         run: |
-          pnpm exec playwright test e2e/smart-launch.spec.ts --workers=1 --grep 'wrong PKCE verifier'
-          grep -Eq 'a connector code exchange failed.*\(401, invalid_grant\)' "$RUNNER_TEMP/ownhealth-smart.log"
+          pnpm exec playwright test e2e/smart-launch.spec.ts --workers=1 --grep 'wrong PKCE verifier' \
+            --output "$RUNNER_TEMP/smart-evidence/wrong-verifier"
+          grep -E 'a connector code exchange failed.*\(401, invalid_grant\)' "$RUNNER_TEMP/smart-evidence/ownhealth-smart.log"
+      - name: Keep the server log, the screenshots, and the traces of a failed test
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smart-launcher-evidence
+          path: ${{ runner.temp }}/smart-evidence
+          if-no-files-found: ignore
+          retention-days: 7
