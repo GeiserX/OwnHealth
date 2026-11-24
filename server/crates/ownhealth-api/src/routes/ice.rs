@@ -1,5 +1,6 @@
 //! The profile owner's emergency card. The downloads carry the QR codes. The sharing list keeps
-//! only the card's status and public access log.
+//! only the card's status and public access log. The owner can leave any record out, so a long
+//! record still fits one wallet-size QR; sensitive records stay out unless picked.
 
 use std::collections::BTreeSet;
 
@@ -78,22 +79,16 @@ fn no_store(status: StatusCode, body: Value) -> axum::response::Response {
 async fn options(State(rt): State<Runtime>, caller: Caller, Path(slug): Path<String>) -> R {
     let mut tx = rt.pool.begin().await?;
     let perm = owner(&mut tx, &caller, &slug).await?;
-    let items: Vec<_> = if perm.may_share_sensitive("read:records") {
-        ice::items(&mut tx, perm.profile.id, true)
-            .await?
-            .into_iter()
-            .filter(|item| item.sensitive)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let items = ice::items(&mut tx, perm.profile.id, perm.may_share_sensitive("read:records")).await?;
     let mut audit = event(&caller, &perm, "ice.options");
     audit.src_ids = Some(items.iter().map(|item| item.src_id.clone()).collect());
     write_audit(&mut tx, &audit).await?;
     tx.commit().await?;
     let items: Vec<_> = items
         .into_iter()
-        .map(|item| json!({"id": item.id, "kind": ice::KINDS[item.section as usize], "name": item.name}))
+        .map(|item| {
+            json!({"id": item.id, "kind": ice::KINDS[item.section as usize], "name": item.name, "sensitive": item.sensitive})
+        })
         .collect();
     Ok(no_store(
         StatusCode::OK,
@@ -109,11 +104,11 @@ struct Contact {
 
 impl Contact {
     fn line(&self) -> R<String> {
-        let name = self.name.trim();
+        let name = ice::words(&self.name);
         let phone = self.phone.trim();
         if name.is_empty()
             || name.chars().count() > 50
-            || name.chars().any(char::is_control)
+            || self.name.chars().any(char::is_control)
             || phone.len() > 32
             || phone.bytes().filter(u8::is_ascii_digit).count() < 3
             || !phone.bytes().all(|b| b.is_ascii_digit() || b" +().-".contains(&b))
@@ -134,6 +129,9 @@ struct CardIn {
     contacts: Vec<Contact>,
     #[serde(default)]
     sensitive_ids: BTreeSet<Uuid>,
+    /// Records to keep off the card. An id that is no longer on the record is ignored.
+    #[serde(default)]
+    left_out: BTreeSet<Uuid>,
 }
 
 async fn issue(State(rt): State<Runtime>, caller: Caller, Path(slug): Path<String>, Body(input): Body<CardIn>) -> R {
@@ -178,6 +176,7 @@ async fn issue(State(rt): State<Runtime>, caller: Caller, Path(slug): Path<Strin
     }
     let shown: Vec<_> = items
         .iter()
+        .filter(|item| !input.left_out.contains(&item.id))
         .filter(|item| !item.sensitive || input.sensitive_ids.contains(&item.id))
         .collect();
     let plain = ice::text(&lang, &shown, &contacts);
@@ -221,7 +220,7 @@ async fn issue(State(rt): State<Runtime>, caller: Caller, Path(slug): Path<Strin
     // same transaction as the replacement.
     sqlx::query(
         "with ended as (
-            update shl set revoked_at = clock_timestamp(), revoked_reason = 'person'
+            update shl set revoked_at = clock_timestamp(), revoked_reason = 'replaced'
             where profile_id = $1 and flag in ('I', 'LU') and revoked_at is null and expires_at > now()
             returning id
          ) delete from shl_file f using ended e where f.shl_id = e.id",

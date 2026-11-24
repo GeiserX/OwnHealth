@@ -3,6 +3,10 @@
 -- profile DEK. It has no cached JWE. Revocation and expiry delete the file row and its sealed key.
 alter table shl drop constraint shl_flag_check;
 alter table shl add constraint shl_flag_check check (flag in ('', 'P', 'I', 'LU'));
+-- A new emergency card ends the previous one with reason `replaced`.
+alter table shl drop constraint shl_revoked_reason_check;
+alter table shl add constraint shl_revoked_reason_check
+  check (revoked_reason in ('person', 'locked', 'access_changed', 'replaced'));
 
 alter table shl_file alter column jwe drop not null;
 alter table shl_file add column ice_key bytea;

@@ -37,6 +37,7 @@
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -490,9 +491,11 @@ async fn direct_file(
     State(rt): State<Runtime>,
     meta: Meta,
     Path(id): Path<String>,
-    Query(input): Query<DirectIn>,
+    input: Result<Query<DirectIn>, QueryRejection>,
 ) -> Response {
-    let mut response = cors(match serve_direct(&rt, &id, &meta, input).await {
+    // A query that does not parse is a missing recipient: the same 400, with CORS and no-store.
+    let recipient = input.ok().and_then(|Query(input)| input.recipient);
+    let mut response = cors(match serve_direct(&rt, &id, &meta, recipient).await {
         Ok(r) => r,
         Err(e) => e.into_response(),
     });
@@ -504,13 +507,13 @@ async fn direct_file(
 
 /// The U flag means the printed URL opens the file directly. Each access reads the current IPS
 /// with the card's original scope and a fresh JWE nonce. The key never changes during its lifetime.
-async fn serve_direct(rt: &Runtime, id: &str, meta: &Meta, input: DirectIn) -> Result<Response, ApiError> {
+async fn serve_direct(rt: &Runtime, id: &str, meta: &Meta, recipient_in: Option<String>) -> Result<Response, ApiError> {
     if rt.settings.share_url.is_none() {
         return Err(gone());
     }
     let mut tx = rt.pool.begin().await?;
     let link = live(&mut tx, id, true).await?.ok_or_else(gone)?;
-    let recipient = recipient(&json!(input.recipient))
+    let recipient = recipient(&json!(recipient_in))
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg("recipient")))?;
     if let Some(res) = rate_limited(&mut tx, link.id).await? {
         return Ok(res);

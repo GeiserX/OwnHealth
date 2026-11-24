@@ -5,6 +5,7 @@ mod support;
 use axum::http::StatusCode;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use ownhealth_core::access::{scope_set, set_grant, set_locks, today_utc};
 use ownhealth_core::jose;
 use ownhealth_core::provenance::{SrcIn, SrcRef};
 use ownhealth_core::records::{RecordIn, RecordOptions, add_record};
@@ -59,6 +60,19 @@ async fn emergency_facts(env: &Env) -> R {
         let record = RecordIn::from_json(kind, fields)?;
         add_record(&mut c, &record, &src, RecordOptions::new("person")).await?;
     }
+    Ok(())
+}
+
+async fn record(env: &Env, kind: &str, mut fields: Value) -> R {
+    let profile = env.profile("alex");
+    fields["profile_id"] = json!(profile);
+    let record = RecordIn::from_json(kind, fields)?;
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(profile),
+        ..SrcIn::manual(None)
+    });
+    let mut c = env.pool().acquire().await?;
+    add_record(&mut c, &record, &src, RecordOptions::new("person")).await?;
     Ok(())
 }
 
@@ -274,5 +288,240 @@ async fn an_owner_needs_step_up_and_cannot_pick_a_locked_sensitive_record() -> R
     let denied = alex.post(CARD, &json!({"sensitive_ids":[private]})).await?;
     assert_eq!(denied.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(denied.code(), "ice_picks");
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_the_owner_can_read_the_options_or_issue_a_card() -> R {
+    let env = Env::new(true).await?;
+    // alex is lucia's guardian and carmen's caregiver; sam only views alex
+    let mut alex = env.as_user(env.user("alex")).await?;
+    for slug in ["lucia", "carmen"] {
+        let path = format!("/api/profiles/{slug}/ice");
+        assert_eq!(alex.get(&path).await?.code(), "ice_owner", "GET {slug}");
+        let made = alex.post(&path, &json!({})).await?;
+        assert_eq!(made.status, StatusCode::FORBIDDEN, "POST {slug}");
+        assert_eq!(made.code(), "ice_owner");
+    }
+    let mut sam = env.as_user(env.user("sam")).await?;
+    assert_eq!(sam.get(CARD).await?.status, StatusCode::FORBIDDEN);
+    assert_eq!(sam.post(CARD, &json!({})).await?.status, StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lock_on_records_or_summary_closes_the_card() -> R {
+    let env = Env::new(true).await?;
+    record(&env, "allergy", json!({"substance": "Penicillin"})).await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    for lock in ["read:records", "read:summary"] {
+        let mut c = env.pool().acquire().await?;
+        set_locks(&mut c, env.profile("alex"), &scope_set([lock])).await?;
+        drop(c);
+        let options = alex.get(CARD).await?;
+        assert_eq!(options.status, StatusCode::FORBIDDEN, "GET with {lock} locked");
+        assert_eq!(options.code(), "ice_closed");
+        let made = alex.post(CARD, &json!({"lang": "en"})).await?;
+        assert_eq!(made.status, StatusCode::FORBIDDEN, "POST with {lock} locked");
+        assert_eq!(made.code(), "ice_closed");
+        assert!(made.json.get("pdf").is_none() && made.json.get("png").is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn losing_ownership_ends_the_card_and_erases_its_key() -> R {
+    let mut env = Env::new(true).await?;
+    env.settings.share_url = Some(SHARE.into());
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let card = issue(&mut alex, json!({"online": true})).await?;
+    let path = direct(&link(&card)?)?;
+    let mut outside = env.anon();
+    assert_eq!(outside.get(&path).await?.status, StatusCode::OK);
+    let mut c = env.pool().acquire().await?;
+    set_grant(
+        &mut c,
+        env.user("alex"),
+        env.profile("alex"),
+        "guardian",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(outside.get(&path).await?.status, StatusCode::NOT_FOUND);
+    let files: i64 = sqlx::query_scalar("select count(*) from shl_file")
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(files, 0, "the sealed card key outlived the owner's grant");
+    let reason: Option<String> = sqlx::query_scalar("select revoked_reason from shl where flag = 'LU'")
+        .fetch_one(&mut *c)
+        .await?;
+    assert_eq!(reason.as_deref(), Some("access_changed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_guardian_of_the_profile_cannot_see_revoke_or_hear_of_the_card() -> R {
+    let mut env = Env::new(true).await?;
+    env.settings.share_url = Some(SHARE.into());
+    let mut c = env.pool().acquire().await?;
+    set_grant(
+        &mut c,
+        env.user("sam"),
+        env.profile("alex"),
+        "guardian",
+        None,
+        None,
+        None,
+    )
+    .await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let card = issue(&mut alex, json!({"online": true})).await?;
+    let id = card["id"].as_str().unwrap_or_default().to_owned();
+    let path = direct(&link(&card)?)?;
+    let mut outside = env.anon();
+    assert_eq!(outside.get(&path).await?.status, StatusCode::OK);
+    let mut sam = env.as_user(env.user("sam")).await?;
+    let list = sam.get("/api/profiles/alex/shl").await?;
+    assert_eq!(list.status, StatusCode::OK);
+    let items = list.json["items"].as_array().cloned().unwrap_or_default();
+    assert!(
+        items.iter().all(|item| item["id"] != id.as_str()),
+        "a guardian listed the card"
+    );
+    let log = sam.get(&format!("/api/profiles/alex/shl/{id}/access")).await?;
+    assert!(log.json["items"].as_array().is_none_or(Vec::is_empty), "{}", log.json);
+    assert_eq!(
+        sam.delete(&format!("/api/profiles/alex/shl/{id}")).await?.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(outside.get(&path).await?.status, StatusCode::OK);
+    let notices: i64 =
+        sqlx::query_scalar("select count(*) from notification_outbox where user_id = $1 and kind = 'ice.access'")
+            .bind(env.user("sam"))
+            .fetch_one(&mut *c)
+            .await?;
+    assert_eq!(notices, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopped_refuted_and_inactive_records_stay_off_the_card() -> R {
+    let env = Env::new(true).await?;
+    for (kind, fields) in [
+        ("medication", json!({"name": "Warfarin", "stopped": "2025-01-01"})),
+        ("medication", json!({"name": "Digoxin", "med_status": "stopped"})),
+        (
+            "allergy",
+            json!({"substance": "Latex", "verification_status": "refuted"}),
+        ),
+        ("allergy", json!({"substance": "Peanut", "clinical_status": "inactive"})),
+        ("allergy", json!({"substance": "Penicillin"})),
+    ] {
+        record(&env, kind, fields).await?;
+    }
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let card = issue(&mut alex, json!({"lang": "en"})).await?;
+    assert_eq!(scans(&card)?, vec!["ICE\nAllergies: Penicillin".to_owned()]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_card_expires_at_00_00_utc_after_the_chosen_days() -> R {
+    let env = Env::new(true).await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let card = issue(&mut alex, json!({"days": 1})).await?;
+    let tomorrow = today_utc() + chrono::Days::new(1);
+    assert_eq!(card["expires_at"], json!(format!("{tomorrow}T00:00:00Z")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reissuing_an_offline_card_marks_the_first_one_replaced() -> R {
+    let env = Env::new(true).await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let first = issue(&mut alex, json!({"lang": "en"})).await?;
+    let second = issue(&mut alex, json!({"lang": "en"})).await?;
+    let list = alex.get("/api/profiles/alex/shl").await?;
+    let items = list.json["items"].as_array().cloned().unwrap_or_default();
+    let of = |card: &Value| {
+        items
+            .iter()
+            .find(|item| item["id"] == card["id"])
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(of(&second)["state"], "active");
+    assert_eq!(
+        of(&first)["state"],
+        "revoked",
+        "the replaced offline card stayed active"
+    );
+    assert_eq!(of(&first)["reason"], "replaced");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_malformed_direct_query_answers_with_cors_and_no_store() -> R {
+    let mut env = Env::new(true).await?;
+    env.settings.share_url = Some(SHARE.into());
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let card = issue(&mut alex, json!({"online": true})).await?;
+    let base = direct(&link(&card)?)?;
+    let base = base.split('?').next().unwrap_or_default().to_owned();
+    let mut outside = env.anon();
+    for query in ["?recipient=%ZZ&recipient=x", "?recipient=a&recipient=b", ""] {
+        let r = outside.get(&format!("{base}{query}")).await?;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(r.code(), "bad_request", "{query}");
+        assert_eq!(r.header("access-control-allow-origin"), "*", "{query}");
+        assert_eq!(r.header("cache-control"), "no-store", "{query}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bidi_controls_never_reach_the_offline_qr() -> R {
+    let env = Env::new(true).await?;
+    record(&env, "allergy", json!({"substance": "Penicillin\u{202e}"})).await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let contacts = json!([{"name": "Ana\u{2067} Ortega\u{200f}", "phone": "+34 555 010 020"}]);
+    let card = issue(&mut alex, json!({"lang": "en", "contacts": contacts})).await?;
+    assert_eq!(
+        scans(&card)?,
+        vec!["ICE\nAllergies: Penicillin\nEmergency contacts: Ana Ortega +34 555 010 020".to_owned()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_record_too_long_for_one_qr_fits_once_the_owner_leaves_items_out() -> R {
+    let env = Env::new(true).await?;
+    for i in 0..40 {
+        record(
+            &env,
+            "medication",
+            json!({"name": format!("Medicine number {i:02}"), "strength": "10 mg"}),
+        )
+        .await?;
+    }
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let full = alex.post(CARD, &json!({"lang": "en"})).await?;
+    assert_eq!(full.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(full.code(), "ice_full");
+    let options = alex.get(CARD).await?;
+    let items = options.json["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(items.len(), 40, "every medicine is offered: {}", options.json);
+    assert!(
+        items
+            .iter()
+            .all(|item| item["sensitive"] == false && item["kind"] == "medicine")
+    );
+    let left_out: Vec<Value> = items[20..].iter().map(|item| item["id"].clone()).collect();
+    let card = issue(&mut alex, json!({"lang": "en", "left_out": left_out})).await?;
+    let text = scans(&card)?.join("\n");
+    assert!(text.contains("Medicine number 19 10 mg"), "{text}");
+    assert!(!text.contains("Medicine number 20"), "{text}");
     Ok(())
 }

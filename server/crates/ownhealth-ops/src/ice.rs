@@ -58,7 +58,8 @@ const LABELS: &[(&str, Labels)] = &[
         },
     ),
 ];
-pub const TOO_FULL: &str = "The emergency information is too long for a wallet-size QR code.";
+pub const TOO_FULL: &str =
+    "The emergency information is too long for a wallet-size QR code. Leave out some records and try again.";
 
 pub fn missing_langs(languages: &[&str]) -> Vec<String> {
     langs::missing(&langs::codes(LABELS), languages)
@@ -117,9 +118,17 @@ pub async fn items(conn: &mut PgConnection, profile: Uuid, may_pick: bool) -> Re
     .await?)
 }
 
-fn words(text: &str) -> String {
+/// Control characters, and the bidirectional marks, embeddings, overrides and isolates (Unicode
+/// category Cf) that would reorder the lines a phone shows after a scan.
+pub fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The text with whitespace runs made single spaces and hidden characters left out.
+pub fn words(text: &str) -> String {
     text.split_whitespace()
-        .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
+        .map(|word| word.chars().filter(|c| !hidden(*c)).collect::<String>())
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")

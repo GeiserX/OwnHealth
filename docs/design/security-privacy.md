@@ -309,7 +309,7 @@ What we do on our side:
 
 **ICE card, v1.0.**
 
-- The owner creates a wallet PDF and a lock-screen PNG after step-up. The offline QR holds current allergies, conditions, medicines, and the contacts entered for that card. It includes a sensitive record only when the owner selects it individually.
+- The owner creates a wallet PDF and a lock-screen PNG after step-up. The offline QR holds current allergies, conditions, medicines, and the contacts entered for that card. It includes a sensitive record only when the owner selects it individually. The owner can leave any record off the card, so a long record still fits one wallet-size QR.
 - Anyone with a copy can read the offline QR. The printed expiry tells a reader when to stop relying on the card. Revocation and expiry cannot erase copies already saved or printed.
 - The optional second QR carries a SMART Health Link with flags `LU`. Opening it builds the current IPS under the original categories, which exclude sensitive records. Every file served adds an entry to the access log, the audit log, and the owners' notification outbox.
 - The live ICE key is the sole exception to the rule that a key exists only in the link. The server seals it under the profile DEK, bound to the profile and card IDs. Each file uses the same key with a fresh JWE nonce. Revocation and expiry end access and remove the sealed key. Reissue retires the old QR and creates a new URL and key.
