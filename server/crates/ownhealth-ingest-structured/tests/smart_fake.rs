@@ -3052,3 +3052,40 @@ async fn a_version_read_does_not_stand_in_for_a_failed_current_read() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_grant_for_one_intent_searches_that_intent() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/MedicationRequest.s?intent=order".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let order = |id: &str, intent: &str, name: &str| {
+        json!({"resourceType": "MedicationRequest", "id": id, "status": "active", "intent": intent,
+               "medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm",
+                                                         "code": id, "display": name}]},
+               "subject": {"reference": "Patient/sam-rivera"}, "authoredOn": "2026-09-01"})
+    };
+    w.fake.book().extra.extend([
+        order("an-order", "order", "Ordered drug"),
+        order("a-plan", "plan", "Planned drug"),
+    ]);
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(
+        w.searched_since(0).await,
+        ["Patient/sam-rivera", "MedicationRequest?intent=order"]
+            .map(String::from)
+            .into()
+    );
+    let mut c = w.db.pool.acquire().await?;
+    let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
+    let names: Vec<_> = meds
+        .iter()
+        .filter_map(|m| m["name"].as_str())
+        .filter(|name| ["Ordered drug", "Planned drug"].contains(name))
+        .collect();
+    assert_eq!(names, ["Ordered drug"]);
+    Ok(())
+}

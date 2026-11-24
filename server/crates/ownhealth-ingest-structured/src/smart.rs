@@ -878,14 +878,33 @@ pub async fn pull_with(
         {
             let categories = condition_categories(scope);
             if !categories.is_empty() {
-                planned.extend(categories.into_iter().map(|category| (rtype, params, Some(category))));
+                planned.extend(
+                    categories
+                        .into_iter()
+                        .map(|category| (rtype, params, Some(("category", category)))),
+                );
                 continue;
             }
         }
         if let [("category", code)] = params {
             let token = format!("{OBSERVATION_CATEGORY}|{code}");
             if granted(scope, rtype, Op::Search, &[("category", &token)]) {
-                planned.push((rtype, params, Some(token)));
+                planned.push((rtype, params, Some(("category", token))));
+                continue;
+            }
+        }
+        // a grant for some of a parameter's values (MedicationRequest intent=order of order,plan):
+        // one search per granted value
+        if let [(key, values)] = params
+            && values.contains(',')
+        {
+            let each: Vec<_> = values
+                .split(',')
+                .filter(|value| granted(scope, rtype, Op::Search, &[(*key, value)]))
+                .map(|value| (rtype, params, Some((*key, value.to_owned()))))
+                .collect();
+            if !each.is_empty() {
+                planned.extend(each);
                 continue;
             }
         }
@@ -961,11 +980,15 @@ pub async fn pull_with(
     }
     g.entries.push((Some(format!("{base}/Patient/{patient}")), p));
     let read_medication = granted(scope, "Medication", Op::Read, &[]);
-    for (rtype, params, category) in planned {
-        let qualified = category.as_deref().map(|token| [("category", token)]);
-        let params: &[(&str, &str)] = match qualified.as_ref() {
-            Some(category) => category,
-            None if rtype == "MedicationRequest" && read_medication => &MEDICATION_REQUEST_WITH_INCLUDE,
+    for (rtype, params, narrowed) in planned {
+        let one = narrowed
+            .as_ref()
+            .map(|(key, value)| [(*key, value.as_str()), MEDICATION_INCLUDE]);
+        let with_include = rtype == "MedicationRequest" && read_medication;
+        let params: &[(&str, &str)] = match one.as_ref() {
+            Some(one) if with_include => one,
+            Some(one) => &one[..1],
+            None if with_include => &MEDICATION_REQUEST_WITH_INCLUDE,
             None => params,
         };
         search(&mut r, &mut g, caps, (&base, &patient, scope), rtype, params).await?;
