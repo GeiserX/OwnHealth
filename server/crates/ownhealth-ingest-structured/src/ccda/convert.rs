@@ -1470,9 +1470,6 @@ impl<'a, 'i> Conv<'a, 'i> {
 
     /// Read an observation's value by its CDA type, distinguishing absent and unread values.
     fn value(&mut self, v: Node<'_, '_>) -> ObservationValue {
-        if attr(v, "nullFlavor").is_some() {
-            return ObservationValue::Missing;
-        }
         let kind = xsi_type(v).unwrap_or(if attr(v, "code").is_some() {
             "CD"
         } else if attr(v, "value").is_some() {
@@ -1539,11 +1536,15 @@ impl<'a, 'i> Conv<'a, 'i> {
             "TS" => attr(v, "value")
                 .and_then(fhir_datetime)
                 .map(|date| ("valueDateTime", Value::String(date))),
-            "RTO" | "RTO_PQ_PQ" => return ObservationValue::Unsupported,
+            // A ratio is not read; the arms below list it unless it is null.
+            "RTO" | "RTO_PQ_PQ" => None,
             _ => self.narrative_of(v).map(|text| ("valueString", Value::String(text))),
         };
         match field {
             Some((key, value)) => ObservationValue::Read(key, value),
+            // Checked after the type: a coded value outside the value set is `nullFlavor="OTH"`
+            // with its translation or original text, and that is still the result.
+            None if attr(v, "nullFlavor").is_some() => ObservationValue::Missing,
             None if v.attributes().any(|a| a.namespace().is_none())
                 || elements(v).any(|el| attr(el, "nullFlavor").is_none()) =>
             {

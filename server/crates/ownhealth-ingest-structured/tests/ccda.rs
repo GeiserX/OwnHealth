@@ -1873,3 +1873,49 @@ fn round_5_an_unsupported_structured_result_value_is_listed_as_unread() -> R {
     }
     Ok(())
 }
+
+/// R5-M1: a nullFlavor on a coded result value says the code is outside the value set, not that
+/// there is no value. The translation and original text are still the result.
+#[test]
+fn round_6_a_coded_result_value_with_a_null_flavor_keeps_its_translation() -> R {
+    let mut entries = String::new();
+    for (id, value) in [
+        (
+            "local",
+            r#"<value xsi:type="CD" nullFlavor="OTH"><originalText>Positive</originalText><translation code="POS" codeSystem="1.2.3.4.5" displayName="Positive (local)"/></value>"#,
+        ),
+        ("null-ratio", r#"<value xsi:type="RTO_PQ_PQ" nullFlavor="NI"/>"#),
+        ("null-code", r#"<value xsi:type="CD" nullFlavor="UNK"/>"#),
+    ] {
+        entries.push_str(&format!(
+            r#"<entry><observation classCode="OBS" moodCode="EVN">
+              <id root="1.2.3" extension="{id}"/><code code="13457-7" codeSystem="2.16.840.1.113883.6.1"/>
+              <statusCode code="completed"/><effectiveTime value="20240101"/>{value}
+            </observation></entry>"#
+        ));
+    }
+    let c = convert(&document(&format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>RESULTS</title>
+          {entries}</section></component>"#
+    )))?;
+    assert!(c.sections[0].not_read.is_empty(), "{:?}", c.sections[0].not_read);
+    let observations = resources(&c, "Observation");
+    assert_eq!(observations.len(), 3);
+    assert_eq!(
+        observations[0]["valueCodeableConcept"],
+        json!({
+            "coding": [{"system": "urn:oid:1.2.3.4.5", "code": "POS", "display": "Positive (local)"}],
+            "text": "Positive"
+        })
+    );
+    for obs in [observations[1], observations[2]] {
+        assert!(
+            !obs.as_object()
+                .ok_or_else(|| anyhow::anyhow!("expected an Observation object: {obs}"))?
+                .keys()
+                .any(|key| key.starts_with("value")),
+            "{obs}"
+        );
+    }
+    Ok(())
+}
