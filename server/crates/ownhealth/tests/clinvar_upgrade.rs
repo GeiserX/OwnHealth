@@ -17,8 +17,10 @@ use sqlx::types::Uuid;
 const CLINVAR: i32 = 1120;
 
 /// Later migrations the seed's code writes to, each only adding nullable columns: 1202 adds the
-/// `oauth_grant_id` that `sources::begin_run` stamps on every run (the devices demo opens one).
-const SEED_NEEDS: &[i32] = &[1202];
+/// `oauth_grant_id` that `sources::begin_run` stamps on every run (the devices demo opens one), and
+/// 1250 the `not_assessed_n` and `arg_bytes` that `audit::write_audit` writes (the demo's family
+/// share logs its consent change; 1250 also starts the audit chain, which links that event).
+const SEED_NEEDS: &[i32] = &[1202, 1250];
 
 async fn hashes(
     conn: &mut PgConnection,
