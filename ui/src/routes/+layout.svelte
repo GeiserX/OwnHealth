@@ -39,14 +39,18 @@
 			}
 		} catch (e) {
 			app.unauthenticated = e instanceof ApiError && e.status === 401;
-			// no session: the next login opens the unread notices again
-			if (app.unauthenticated) localStorage.removeItem(NOTICES_SHOWN);
 			app.error = e instanceof Error ? e.message : String(e);
 			loadError = e;
 		} finally {
 			app.loading = false;
 		}
 	}
+
+	// No session, found by this load or by any call of a page (api/core.ts): the next login opens the
+	// unread notices again.
+	$effect(() => {
+		if (app.unauthenticated) localStorage.removeItem(NOTICES_SHOWN);
+	});
 
 	onMount(() => {
 		document.documentElement.lang = i18n.lang;

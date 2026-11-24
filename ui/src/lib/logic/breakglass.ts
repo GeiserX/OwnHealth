@@ -1,6 +1,6 @@
 // Break-glass on screen (routes/break_glass.rs): where a request stands, the notices grouped per
 // request, and who the owner may name. Pure, so the tests can run it without a browser.
-import type { BreakGlassRequest, Notice, NoticeKind, NoticeUses } from '../api/types';
+import type { BreakGlassRequest, Notice, NoticeKind, NoticeUses, Notices } from '../api/types';
 
 type Req = Pick<BreakGlassRequest, 'status' | 'activates_at' | 'owner_feed_at' | 'waiting_for_calendar' | 'expires_at' | 'ended_at'>;
 
@@ -149,6 +149,46 @@ export function groupNotices(items: readonly Notice[], uses: readonly NoticeUses
 
 /** The badge: how many requests have something unread. */
 export const unreadGroups = (groups: readonly NoticeGroup[]): number => groups.filter((g) => g.unread > 0).length;
+
+/** What the notices panel shows: the last answer, the last error, and whether it is open. */
+export interface NoticeView {
+	data: Notices | null;
+	error: unknown;
+	open: boolean;
+}
+
+/**
+ * The notices' load, kept free of runes so the tests can run it. An answer counts only when it is the
+ * newest load and the person it was read for is still the one signed in: a load that started before
+ * Mark all as read, or for the last person, and ends late is dropped. After every answer that counts,
+ * unread notices open the panel once per login: `store` keeps the user id of the login they opened
+ * for (NOTICES_SHOWN), so a first load that failed opens them at the next one that works.
+ */
+export function noticeLoader(
+	v: NoticeView,
+	user: () => string,
+	fetch: () => Promise<Notices>,
+	store: Pick<Storage, 'getItem' | 'setItem'>
+): () => Promise<void> {
+	let seq = 0;
+	return async () => {
+		const n = ++seq;
+		const u = user();
+		if (!u) return;
+		const current = () => n === seq && u === user();
+		try {
+			const d = await fetch();
+			if (!current()) return;
+			v.data = d;
+			v.error = null;
+			if (!unreadGroups(groupNotices(d.items, d.uses)) || store.getItem(NOTICES_SHOWN) === u) return;
+			store.setItem(NOTICES_SHOWN, u);
+			v.open = true;
+		} catch (e) {
+			if (current()) v.error = e;
+		}
+	};
+}
 
 type Member = {
 	user_id: string;
