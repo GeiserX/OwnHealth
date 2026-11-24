@@ -21,14 +21,16 @@
 //!
 //! SMART Health Links received (slice 23; the work is in `ownhealth_ingest_structured::shl_receive`)
 //! use the same route: `text` holds `shlink:/…`, alone or after a viewer URL, with these fields too:
-//! `passcode` (once, for a link with the P flag; it goes only into the manifest request body) and
+//! `passcode` (once, for a link with the P flag; it goes only into its manifest request body, and a
+//! link without the flag never sends it) and
 //! `held` (`<sha256> <content type>`, the files an earlier answer stored, sent back with the yes for
 //! their card issuers so the link is not asked twice).
 //!
 //! - 200 `{"status": "needs_approval", "hosts": [{"host", "issuers": []}], "link": {"host", "label",
 //!   "expires", "passcode", "direct"}}`: the link's host, before anything is fetched.
 //! - 200 the same with the issuer hosts of the cards the link holds, and `"held": [{"sha",
-//!   "content_type"}]`: the files were fetched and stored, no issuer was contacted.
+//!   "content_type"}]`: the files were fetched and stored, no issuer was contacted. Held files sent
+//!   back keep the type each file has: one sent back under another is refused as `held`.
 //! - 200 `{"status": "imported", "link", "document_id", "created", "identity", "cards", "summary",
 //!   "documents": [{"document_id", "created", "content_type"}], "not_imported": [{"content_type",
 //!   "reason"}]}`. `document_id` is the first document, or null when no file was imported.
@@ -54,8 +56,9 @@ use crate::routes::auth::{Fail, R};
 const MAX_BODY: usize = 20 * 1024 * 1024;
 /// A text field (the profile, a host, pasted text) holds at most 1 MiB.
 const MAX_FIELD: usize = 1024 * 1024;
-/// At most this many `approve` fields: one issuer host per card, and the host of a link.
-const MAX_APPROVED: usize = shc::MAX_CARDS + 1;
+/// At most this many `approve` fields: the host of a link, and one issuer host for each card of each of
+/// its card files (a pasted card needs fewer).
+const MAX_APPROVED: usize = shl_receive::MAX_FILES * shc::MAX_CARDS + 1;
 
 pub fn router() -> Router<Runtime> {
     Router::new().route("/shc", post(receive).layer(DefaultBodyLimit::max(MAX_BODY)))
@@ -246,8 +249,9 @@ struct LinkForm<'a> {
     held: Vec<Held>,
 }
 
-/// One SMART Health Link: the host question, the fetch with the passcode, the cards' issuer
-/// questions, then the import, in a transaction that checks the permission again.
+/// One SMART Health Link: the host question, the fetch with the passcode (the permission is checked
+/// again before the fetched files are stored), the cards' issuer questions, then the import, in a
+/// transaction that checks the permission once more.
 async fn receive_link(rt: &Runtime, caller: &Caller, profile: &str, form: LinkForm<'_>) -> R<Json<Value>> {
     let chosen = {
         let mut conn = rt.pool.acquire().await?;
@@ -267,16 +271,32 @@ async fn receive_link(rt: &Runtime, caller: &Caller, profile: &str, form: LinkFo
         })));
     }
     let route = issuer_route(rt.settings.dev_auth, rt.settings.dev_shc_issuers.as_deref());
-    let held = if form.held.is_empty() {
-        shl_receive::fetch(&link, form.passcode, &rt.blobs, chosen, &route)
-            .await?
-            .map_err(|r| shl_refused(&r))?
+    let resumed = !form.held.is_empty();
+    let held = if !resumed {
+        let files = shl_receive::download(&link, form.passcode, &route)
+            .await
+            .map_err(|r| shl_refused(&r))?;
+        // checked again right before the files are written under the profile: the grant may have
+        // changed during the fetch, and a refusal here leaves nothing stored
+        {
+            let mut conn = rt.pool.acquire().await?;
+            caller
+                .require(&mut conn, &chosen.to_string(), None, Some("import"))
+                .await?;
+        }
+        shl_receive::keep_all(&rt.blobs, chosen, files).await?
     } else {
         form.held
     };
     let opened = {
         let (link, held, blobs) = (link.clone(), held.clone(), rt.blobs.clone());
-        tokio::task::spawn_blocking(move || shl_receive::open(&link, &held, &blobs, chosen))
+        // files sent back keep the type the file itself has, whatever the form says
+        let open = if resumed {
+            shl_receive::reopen
+        } else {
+            shl_receive::open
+        };
+        tokio::task::spawn_blocking(move || open(&link, &held, &blobs, chosen))
             .await
             .map_err(|e| Error::Other(e.into()))?
             .map_err(stopped)?

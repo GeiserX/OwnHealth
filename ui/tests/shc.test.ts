@@ -135,6 +135,9 @@ test('a link is told from a card, alone or after a viewer URL', () => {
 	assert.ok(isLink('shlink:/eyJ1cmwiOiJodHRwczovL3NobC5leGFtcGxlIn0'));
 	assert.ok(isLink('https://viewer.example.org/#shlink:/eyJ1cmwiOiJ4In0'));
 	assert.ok(!isLink('shc:/5676290952432060346029243740446031'));
+	// a card envelope (JSON) stays a card even when one of its strings holds a link
+	assert.ok(!isLink('{"verifiableCredential": ["a.b.c"], "note": "shlink:/eyJ1cmwiOiJ4In0"}'));
+	assert.ok(!isLink('\n  {"verifiableCredential": [], "note": "shlink:/x"}'));
 });
 
 test('the attempts left read right for one and for none, and none closes the question', () => {

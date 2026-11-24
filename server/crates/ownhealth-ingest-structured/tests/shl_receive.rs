@@ -159,8 +159,9 @@ async fn spawn(f: &Fake) -> anyhow::Result<u16> {
     Ok(port)
 }
 
-/// The test link host and the test issuer, both served from the loopback site; every other URL goes
-/// out as in production.
+/// The test link host and the test issuer, both served from the loopback site. A `localhost` URL goes
+/// through the production egress guard, which refuses it (the private-address test); any other URL
+/// fails the test here, so nothing reaches the internet.
 fn local(port: u16) -> impl Fn(&str) -> (String, Egress) + Send + Sync {
     move |url: &str| {
         for origin in [SHL, ISS] {
@@ -175,7 +176,10 @@ fn local(port: u16) -> impl Fn(&str) -> (String, Egress) + Send + Sync {
                 return (format!("http://127.0.0.1:{port}{rest}"), egress);
             }
         }
-        shc::public(url)
+        if url.starts_with("https://localhost:") {
+            return shc::public(url);
+        }
+        panic!("the test reached for {url}, which no fake serves")
     }
 }
 
@@ -818,6 +822,159 @@ async fn the_manifest_content_type_wins_over_the_files_own_cty() -> R {
             content_type: shl::API_ACCESS.into(),
             reason: "api_access"
         }]
+    );
+    Ok(())
+}
+
+// ----------------------------------------------------------- round 2 checks ----
+
+#[tokio::test]
+async fn a_passcode_goes_only_to_a_link_with_the_p_flag() -> R {
+    let env = Env::new().await?;
+    let f = Fake {
+        manifest: manifest_with(json!([{"contentType": "application/fhir+json", "embedded": fhir_jwe()}])),
+        ..Fake::default()
+    };
+    // an API client sends a passcode with a link that has no P flag: the manifest request has none
+    let link = link(&format!("{SHL}/m"), Some("L"))?;
+    let held = fetch(&f, &link, Some(PIN), &env, uuid::Uuid::new_v4()).await??;
+    assert_eq!(held.len(), 1);
+    let reqs = f.requests();
+    assert_eq!(reqs.len(), 1, "{reqs:?}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&reqs[0].3)?,
+        json!({"recipient": "OwnHealth"})
+    );
+    assert!(!reqs[0].3.contains(PIN));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_file_location_that_is_gone_asks_to_read_the_link_again_and_the_manifest_404_stays_inactive() -> R {
+    let env = Env::new().await?;
+    let link = link(&format!("{SHL}/m"), None)?;
+    // the first file's location answers once; the second location was already used (single use)
+    let f = Fake {
+        manifest: manifest_with(json!([
+            {"contentType": "application/fhir+json", "location": format!("{SHL}/f/1")},
+            {"contentType": "application/fhir+json", "location": format!("{SHL}/f/2")}
+        ])),
+        files: vec![("/f/1".into(), fhir_jwe()), ("/f/2".into(), fhir_jwe())],
+        ..Fake::default()
+    };
+    if let Ok(mut served) = f.served.lock() {
+        served.insert("/f/2".into());
+    }
+    let got = fetch(&f, &link, None, &env, uuid::Uuid::new_v4()).await?;
+    assert_eq!(got, Err(Refusal::LocationExpired));
+    assert_eq!(Refusal::LocationExpired.code(), "location_expired");
+    // the manifest's own 404 is still an inactive link
+    assert_eq!(
+        fetch(&Fake::default(), &link, None, &env, uuid::Uuid::new_v4()).await?,
+        Err(Refusal::Inactive)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn two_card_files_of_one_issuer_fetch_its_keys_once() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?;
+    let (key, jwk) = signing_key();
+    let kid = jwk["kid"].as_str().unwrap_or_default().to_string();
+    let file = |n: usize| {
+        let cards: Vec<String> = (0..n).map(|_| card(&key, &kid)).collect();
+        jwe(
+            json!({"verifiableCredential": cards}).to_string().as_bytes(),
+            Some("application/smart-health-card"),
+        )
+    };
+    let f = Fake {
+        manifest: manifest_with(json!([
+            {"contentType": "application/smart-health-card", "embedded": file(1)},
+            {"contentType": "application/smart-health-card", "embedded": file(2)}
+        ])),
+        jwks: Some(json!({"keys": [jwk]})),
+        ..Fake::default()
+    };
+    let port = spawn(&f).await?;
+    let link = link(&format!("{SHL}/m"), None)?;
+    let held = shl::fetch(&link, None, &env.blobs, profile.id, &local(port)).await??;
+    let opened = shl::open(&link, &held, &env.blobs, profile.id).map_err(|s| anyhow::anyhow!("{s:?}"))?;
+    let approved = [SHL_HOST.to_string(), ISS_HOST.to_string()];
+    let CardsChecked::Verified(cards) = shl::check(&opened, &approved, &local(port), now()).await else {
+        panic!("not verified");
+    };
+    // each card stays with its own file
+    assert_eq!(cards.iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(
+        f.count("GET", "/.well-known/jwks.json"),
+        1,
+        "the issuer's keys were fetched again per file"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_held_file_sent_back_under_another_type_is_refused() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let profile = alex(&mut tx).await?.id;
+    let link = link(&format!("{SHL}/m"), None)?;
+    let (key, jwk) = signing_key();
+    let cards = json!({"verifiableCredential": [card(&key, jwk["kid"].as_str().unwrap_or_default())]});
+    // a FHIR file and a card file as the manifest typed them, sent back with each type swapped
+    let fhir = stored(&env, profile, &jwe(bundle().to_string().as_bytes(), None), shl::FHIR)?;
+    let card_file = stored(
+        &env,
+        profile,
+        &jwe(cards.to_string().as_bytes(), None),
+        shl::SMART_HEALTH_CARD,
+    )?;
+    let as_type = |h: &Held, t: &str| Held {
+        sha: h.sha.clone(),
+        content_type: t.into(),
+    };
+    for relabelled in [
+        as_type(&fhir, shl::SMART_HEALTH_CARD),
+        as_type(&card_file, shl::FHIR),
+        as_type(&fhir, ""),
+    ] {
+        assert_eq!(
+            shl::reopen(&link, std::slice::from_ref(&relabelled), &env.blobs, profile),
+            Err(Stop::Link(Refusal::Held)),
+            "{relabelled:?}"
+        );
+    }
+    // sent back as they were typed, both open as they did the first time
+    let opened = shl::reopen(&link, &[fhir.clone(), card_file.clone()], &env.blobs, profile)
+        .map_err(|s| anyhow::anyhow!("{s:?}"))?;
+    assert!(
+        matches!(&opened[..], [Opened::Fhir { .. }, Opened::Cards { .. }]),
+        "{opened:?}"
+    );
+    // a type we do not import only keeps the file out, as the manifest may say
+    let skipped = shl::reopen(&link, &[as_type(&fhir, shl::API_ACCESS)], &env.blobs, profile)
+        .map_err(|s| anyhow::anyhow!("{s:?}"))?;
+    assert!(
+        matches!(
+            &skipped[..],
+            [Opened::Skipped {
+                reason: "api_access",
+                ..
+            }]
+        ),
+        "{skipped:?}"
+    );
+    // a U link's file has no manifest type: what the client sends is ignored, its JWE cty decides
+    let direct = shl::parse(&shlink(&format!("{SHL}/u"), Some("U")), now())?;
+    let u = stored(&env, profile, &fhir_jwe(), "")?;
+    let opened = shl::reopen(&direct, &[as_type(&u, shl::API_ACCESS)], &env.blobs, profile)
+        .map_err(|s| anyhow::anyhow!("{s:?}"))?;
+    assert!(
+        matches!(&opened[..], [Opened::Fhir { held, .. }] if held.content_type == shl::FHIR),
+        "{opened:?}"
     );
     Ok(())
 }

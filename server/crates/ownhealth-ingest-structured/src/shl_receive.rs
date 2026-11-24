@@ -11,27 +11,32 @@
 //!    never asked about it.
 //! 2. The person approves the link's host (the route asks), and types the passcode once when the
 //!    link has the `P` flag. Nothing is fetched before that.
-//! 3. [`fetch`] POSTs the manifest request through `net::post_json` (a `U` link: one GET of the file,
-//!    with `recipient` in the query) under the connector egress guard: https, public addresses
+//! 3. [`download`] POSTs the manifest request through `net::post_json` (a `U` link: one GET of the
+//!    file, with `recipient` in the query) under the connector egress guard: https, public addresses
 //!    only, no redirects, [`MAX_BYTES`] per answer. Each file, embedded or at its location (fetched
-//!    once), is stored as a blob of the profile BEFORE it is decrypted (bytes first), and comes back
-//!    as a [`Held`]: its sha256 and its content type.
+//!    once; a location that answers 404 or 410 asks to read the link again), is held in memory.
+//!    The route checks again that the person may import, then [`keep_all`] stores each file as a
+//!    blob of the profile BEFORE it is decrypted (bytes first); each comes back as a [`Held`]: its
+//!    sha256 and its content type. ([`fetch`] is both steps at once.)
 //!    A file stays stored when a later step refuses the import (it is the profile's, under its key,
-//!    and goes with the profile): sent back as `held`, it opens again without a second request.
+//!    and goes with the profile): sent back as `held`, it opens again without a second request,
+//!    through [`reopen`], which keeps to the type the file has.
 //! 4. [`open`] decrypts the held files with the link's key (`jose::decrypt`) and sorts them:
 //!    `application/fhir+json` is read as FHIR, `application/smart-health-card` goes to slice 22
 //!    (`shc::read`), and `application/smart-api-access` (or a type we do not know) is counted as not
 //!    imported, with its reason.
 //! 5. [`check`] asks about the issuer host of every card before any key is fetched (slice 22's
 //!    rule); the route then sends the held files back with the person's yes, so the link is not
-//!    asked twice. Then it verifies the cards with `shc::check`.
+//!    asked twice. Then it verifies the cards with `shc::verify`, with one issuer key cache and one
+//!    time limit for the whole link.
 //! 6. [`store`] keeps everything for one profile: each FHIR file is one document on channel `shl`
 //!    whose rows go through `fhir::import_resources`; each card file goes to `shc::store`. Each
 //!    document's `flags.shl` names the host, label and stored received file of the first link it
 //!    came through; the same file received through another link later keeps that provenance.
 //!
-//! The passcode goes to the link's server in the request body and nowhere else: never into a URL,
-//! a log line, an error, a row or a blob. The key never leaves this request either.
+//! The passcode goes to the link's server in the request body of a `P` link and nowhere else: never
+//! into a URL, a log line, an error, a row or a blob, and never to a link without the `P` flag. The
+//! key never leaves this request either.
 
 use std::time::Duration;
 
@@ -51,7 +56,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::fhir;
-use crate::shc::{self, Ask, Card, Checked, Route};
+use crate::shc::{self, Ask, Card, Route};
 
 /// `document_source.channel` of a file received through a link.
 pub const CHANNEL: &str = "shl";
@@ -63,12 +68,15 @@ pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_FILES: usize = 10;
 /// Every fetch of one import stops after this.
 pub const FETCH_LIMIT: Duration = Duration::from_secs(60);
+/// The check of every card of one link stops after this, whatever the number of its card files:
+/// twice slice 22's limit for one card file, as the issuers' keys are fetched once for the link.
+pub const VERIFY_LIMIT: Duration = Duration::from_secs(2 * shc::VERIFY_LIMIT.as_secs());
 /// "files array": the three content types a manifest file may have.
 pub const FHIR: &str = "application/fhir+json";
 pub const SMART_HEALTH_CARD: &str = "application/smart-health-card";
 pub const API_ACCESS: &str = "application/smart-api-access";
 /// Every reason code, as the UI lists them (ui/src/lib/logic/shc.ts SHL_REASONS).
-pub const REASONS: [&str; 15] = [
+pub const REASONS: [&str; 16] = [
     "link",
     "private_host",
     "expired",
@@ -84,6 +92,7 @@ pub const REASONS: [&str; 15] = [
     "decrypt",
     "not_fhir",
     "held",
+    "location_expired",
 ];
 /// Why a file of a link was not imported (ui/src/lib/logic/shc.ts SHL_NOT_IMPORTED).
 pub const NOT_IMPORTED: [&str; 2] = ["api_access", "unknown_type"];
@@ -122,8 +131,13 @@ pub enum Refusal {
     Decrypt,
     #[error("a FHIR file of the link cannot be read")]
     NotFhir,
-    #[error("a file received before is no longer stored")]
+    /// Also a file sent back under another type than the file has.
+    #[error("a file received before is not stored as it was sent back")]
     Held,
+    /// A file's location answered 404 or 410 while the manifest answered: the location expired or
+    /// was used, and reading the link again gives a fresh one.
+    #[error("a file of the link is no longer at the address the link's server gave; read the link again")]
+    LocationExpired,
 }
 
 impl Refusal {
@@ -145,6 +159,7 @@ impl Refusal {
             Refusal::Decrypt => "decrypt",
             Refusal::NotFhir => "not_fhir",
             Refusal::Held => "held",
+            Refusal::LocationExpired => "location_expired",
         }
     }
 
@@ -181,6 +196,7 @@ fn samples() -> Vec<Refusal> {
         Refusal::Decrypt,
         Refusal::NotFhir,
         Refusal::Held,
+        Refusal::LocationExpired,
     ]
 }
 
@@ -238,9 +254,10 @@ impl Link {
     }
 }
 
-/// True when the text holds a link (`shlink:/`, alone or after a viewer URL).
+/// True when the text holds a link (`shlink:/`, alone or after a viewer URL). Text that starts with
+/// `{` is a card envelope (JSON), whatever its strings hold, and stays with the card receiver.
 pub fn is_link(text: &str) -> bool {
-    text.contains("shlink:/")
+    !text.trim_start().starts_with('{') && text.contains("shlink:/")
 }
 
 /// Read a link from pasted text at `now`: `shlink:/<payload>`, optionally "prefixed with a viewer
@@ -277,9 +294,10 @@ pub fn parse(text: &str, now: DateTime<Utc>) -> std::result::Result<Link, Refusa
         .ok_or(Refusal::Link("the key is not 32 bytes"))?;
     let exp = match p.get("exp") {
         None | Some(Value::Null) => None,
+        // "exp": seconds since the epoch, which may have a fraction; kept to the millisecond
         Some(v) => Some(
             v.as_f64()
-                .and_then(|s| DateTime::from_timestamp(s as i64, 0))
+                .and_then(|s| DateTime::from_timestamp_millis((s * 1000.0) as i64))
                 .ok_or(Refusal::Link("exp is not a date"))?,
         ),
     };
@@ -405,24 +423,39 @@ async fn put_blocking(blobs: &BlobStore, profile: Uuid, bytes: Vec<u8>) -> std::
         .map_err(|e| Error::Other(e.into()))
 }
 
-/// Store one received file as a blob of `profile` (bytes first).
-async fn keep(
-    blobs: &BlobStore,
-    profile: Uuid,
+/// A file of the link as it arrived, not stored yet: its bytes and the content type the manifest
+/// gave it (empty for a `U` link). Its Debug shows only the size.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Fetched {
     bytes: Vec<u8>,
-    content_type: &str,
-) -> std::result::Result<Held, Error> {
-    let sha = put_blocking(blobs, profile, bytes).await?;
-    Ok(Held {
-        sha,
-        content_type: base_type(content_type),
-    })
+    content_type: String,
 }
 
-/// Fetch the link's files for `profile` and store each as a blob before anything decrypts it. Call
-/// this only for a link whose host the person approved. `passcode` is sent in the manifest request
-/// body and nowhere else. Every request goes through `route`; the whole fetch stops after
-/// [`FETCH_LIMIT`].
+impl std::fmt::Debug for Fetched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fetched")
+            .field("bytes", &self.bytes.len())
+            .field("content_type", &self.content_type)
+            .finish()
+    }
+}
+
+/// Store each fetched file as a blob of `profile` (bytes first), before anything decrypts it. The
+/// route calls this right after it checked again that the person may import for `profile`.
+pub async fn keep_all(blobs: &BlobStore, profile: Uuid, files: Vec<Fetched>) -> std::result::Result<Vec<Held>, Error> {
+    let mut held = Vec::with_capacity(files.len());
+    for f in files {
+        let sha = put_blocking(blobs, profile, f.bytes).await?;
+        held.push(Held {
+            sha,
+            content_type: base_type(&f.content_type),
+        });
+    }
+    Ok(held)
+}
+
+/// Fetch the link's files for `profile` and store each as a blob before anything decrypts it
+/// ([`download`], then [`keep_all`]). Call this only for a link whose host the person approved.
 pub async fn fetch(
     link: &Link,
     passcode: Option<&str>,
@@ -442,38 +475,65 @@ pub async fn fetch_within(
     route: &Route,
     limit: Duration,
 ) -> std::result::Result<std::result::Result<Vec<Held>, Refusal>, Error> {
-    let passcode = passcode.filter(|p| !p.is_empty());
-    if link.needs_passcode() && passcode.is_none() {
-        return Ok(Err(Refusal::PasscodeNeeded));
-    }
-    match tokio::time::timeout(limit, fetch_all(link, passcode, blobs, profile, route)).await {
-        Ok(got) => got,
-        Err(_) => Ok(Err(Refusal::Fetch("timeout".into()))),
+    match download_within(link, passcode, route, limit).await {
+        Ok(files) => Ok(Ok(keep_all(blobs, profile, files).await?)),
+        Err(r) => Ok(Err(r)),
     }
 }
 
-async fn fetch_all(
+/// Fetch the link's files into memory, at most [`MAX_FILES`] of [`MAX_BYTES`] each; nothing is
+/// stored. Call this only for a link whose host the person approved. `passcode` is sent in the
+/// manifest request body of a `P` link and nowhere else; any other link never sends it. Every
+/// request goes through `route`; the whole fetch stops after [`FETCH_LIMIT`].
+pub async fn download(
     link: &Link,
     passcode: Option<&str>,
-    blobs: &BlobStore,
-    profile: Uuid,
     route: &Route,
-) -> std::result::Result<std::result::Result<Vec<Held>, Refusal>, Error> {
+) -> std::result::Result<Vec<Fetched>, Refusal> {
+    download_within(link, passcode, route, FETCH_LIMIT).await
+}
+
+async fn download_within(
+    link: &Link,
+    passcode: Option<&str>,
+    route: &Route,
+    limit: Duration,
+) -> std::result::Result<Vec<Fetched>, Refusal> {
+    let passcode = passcode.filter(|p| !p.is_empty());
+    if link.needs_passcode() && passcode.is_none() {
+        return Err(Refusal::PasscodeNeeded);
+    }
+    // "passcode": only a link with the P flag has one; the passcode a client sends with any other
+    // link goes nowhere
+    let passcode = passcode.filter(|_| link.needs_passcode());
+    match tokio::time::timeout(limit, download_all(link, passcode, route)).await {
+        Ok(got) => got,
+        Err(_) => Err(Refusal::Fetch("timeout".into())),
+    }
+}
+
+async fn download_all(
+    link: &Link,
+    passcode: Option<&str>,
+    route: &Route,
+) -> std::result::Result<Vec<Fetched>, Refusal> {
     if link.direct() {
         // "U": SHALL NOT make a request for the manifest; a GET of url with the recipient
         let Ok(mut url) = url::Url::parse(&link.url) else {
-            return Ok(Err(Refusal::Link("the url is not a URL")));
+            return Err(Refusal::Link("the url is not a URL"));
         };
         url.query_pairs_mut().append_pair("recipient", RECIPIENT);
         let (to, egress) = routed(route, url.as_str());
-        let got = match net::get(&to, &egress, &[("accept", "application/jose")]).await {
-            Ok(got) => got,
-            Err(e) => return Ok(Err(net_refusal(e))),
-        };
+        let got = net::get(&to, &egress, &[("accept", "application/jose")])
+            .await
+            .map_err(net_refusal)?;
         if let Some(r) = status_refusal(got.status) {
-            return Ok(Err(r));
+            return Err(r);
         }
-        return Ok(Ok(vec![keep(blobs, profile, got.body, "").await?]));
+        return Ok(vec![Fetched {
+            bytes: got.body,
+            content_type: String::new(),
+        }]);
     }
     // "SMART Health Link Manifest Request"
     let mut body = json!({"recipient": RECIPIENT});
@@ -481,41 +541,40 @@ async fn fetch_all(
         body["passcode"] = json!(p);
     }
     let (to, egress) = routed(route, &link.url);
-    let got = match net::post_json(&to, &egress, &[("accept", "application/json")], &body).await {
-        Ok(got) => got,
-        Err(e) => return Ok(Err(net_refusal(e))),
-    };
+    let got = net::post_json(&to, &egress, &[("accept", "application/json")], &body)
+        .await
+        .map_err(net_refusal)?;
     if got.status == 401 {
         // "remainingAttempts": the number of attempts left before the link is disabled
         let left = serde_json::from_slice::<Value>(&got.body)
             .ok()
             .and_then(|v| v.get("remainingAttempts").and_then(Value::as_i64));
-        return Ok(Err(Refusal::Passcode(left)));
+        return Err(Refusal::Passcode(left));
     }
     if let Some(r) = status_refusal(got.status) {
-        return Ok(Err(r));
+        return Err(r);
     }
     let Ok(manifest) = serde_json::from_slice::<Value>(&got.body) else {
-        return Ok(Err(Refusal::Manifest("it is not JSON")));
+        return Err(Refusal::Manifest("it is not JSON"));
     };
     if manifest.get("status").and_then(Value::as_str) == Some("no-longer-valid") {
-        return Ok(Err(Refusal::Inactive));
+        return Err(Refusal::Inactive);
     }
     let files = match manifest.get("files") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(files)) => files.clone(),
-        Some(_) => return Ok(Err(Refusal::Manifest("files is not a list"))),
+        Some(_) => return Err(Refusal::Manifest("files is not a list")),
     };
     if files.is_empty() {
-        return Ok(Err(Refusal::NoFiles));
+        return Err(Refusal::NoFiles);
     }
     if files.len() > MAX_FILES {
-        return Ok(Err(Refusal::TooMany));
+        return Err(Refusal::TooMany);
     }
-    let mut held = Vec::new();
+    let mut out = Vec::new();
     for f in &files {
         let Some(content_type) = f.get("contentType").and_then(Value::as_str) else {
-            return Ok(Err(Refusal::Manifest("a file has no contentType")));
+            return Err(Refusal::Manifest("a file has no contentType"));
         };
         let bytes = if let Some(embedded) = f.get("embedded").and_then(Value::as_str) {
             embedded.as_bytes().to_vec()
@@ -523,23 +582,30 @@ async fn fetch_all(
             // ".files.location links": short-lived and intended for single use, so each is fetched
             // once; it may be on another public host than the manifest
             let (to, egress) = routed(route, location);
-            let got = match net::get(&to, &egress, &[("accept", "application/jose")]).await {
-                Ok(got) => got,
-                Err(e) => return Ok(Err(net_refusal(e))),
-            };
+            let got = net::get(&to, &egress, &[("accept", "application/jose")])
+                .await
+                .map_err(net_refusal)?;
+            // a location that is gone expired or was used, while the manifest answered: the link
+            // may well be active, and reading it again gives fresh locations
+            if matches!(got.status, 404 | 410) {
+                return Err(Refusal::LocationExpired);
+            }
             if let Some(r) = status_refusal(got.status) {
-                return Ok(Err(r));
+                return Err(r);
             }
             got.body
         } else {
-            return Ok(Err(Refusal::Manifest("a file has neither embedded nor location")));
+            return Err(Refusal::Manifest("a file has neither embedded nor location"));
         };
         if bytes.len() > MAX_BYTES {
-            return Ok(Err(Refusal::Fetch("too_large".into())));
+            return Err(Refusal::Fetch("too_large".into()));
         }
-        held.push(keep(blobs, profile, bytes, content_type).await?);
+        out.push(Fetched {
+            bytes,
+            content_type: content_type.to_string(),
+        });
     }
-    Ok(Ok(held))
+    Ok(out)
 }
 
 // ------------------------------------------------------------------- opening ----
@@ -572,6 +638,25 @@ fn sniff(plaintext: &[u8]) -> &'static str {
 /// stored, or does not open with this key, refuses the whole import: a file that opens with the
 /// link's key came from the link, whoever sent its sha back.
 pub fn open(link: &Link, held: &[Held], blobs: &BlobStore, profile: Uuid) -> std::result::Result<Vec<Opened>, Stop> {
+    open_files(link, held, blobs, profile, false)
+}
+
+/// [`open`] for files an earlier answer stored and the client sent back (`held`). Their types come
+/// from the form, so the server keeps to the type each file has: a `U` link's file is typed again
+/// from its JWE `cty` or its content, as the first answer did; a manifest file sent back as FHIR or
+/// as a card file must be one (its content says so), and one sent back with no type is refused. A
+/// type we do not import only keeps the file out, as the manifest may say.
+pub fn reopen(link: &Link, held: &[Held], blobs: &BlobStore, profile: Uuid) -> std::result::Result<Vec<Opened>, Stop> {
+    open_files(link, held, blobs, profile, true)
+}
+
+fn open_files(
+    link: &Link,
+    held: &[Held],
+    blobs: &BlobStore,
+    profile: Uuid,
+    resumed: bool,
+) -> std::result::Result<Vec<Opened>, Stop> {
     if held.len() > MAX_FILES {
         return Err(Refusal::TooMany.into());
     }
@@ -591,13 +676,24 @@ pub fn open(link: &Link, held: &[Held], blobs: &BlobStore, profile: Uuid) -> std
             _ => Refusal::Decrypt,
         })?;
         // the manifest's contentType; for a U link the JWE cty; else what the content says
+        let said = if resumed && link.direct() {
+            String::new()
+        } else {
+            base_type(&h.content_type)
+        };
+        if resumed && !link.direct() {
+            let imported = [FHIR, SMART_HEALTH_CARD].contains(&said.as_str());
+            if said.is_empty() || (imported && said != sniff(&opened.plaintext)) {
+                return Err(Refusal::Held.into());
+            }
+        }
         let cty = opened
             .header
             .get("cty")
             .and_then(Value::as_str)
             .map(base_type)
             .unwrap_or_default();
-        let content_type = [h.content_type.clone(), cty]
+        let content_type = [said, cty]
             .into_iter()
             .find(|t| !t.is_empty())
             .unwrap_or_else(|| sniff(&opened.plaintext).to_string());
@@ -646,9 +742,22 @@ pub enum CardsChecked {
     Verified(Vec<Vec<Card>>),
 }
 
-/// Ask about every issuer host of the link's cards first, then verify each card file with
-/// `shc::check` (slice 22's rules: one question per host, nothing fetched before the yes).
+/// Ask about every issuer host of the link's cards first, then verify every card of every card file
+/// with `shc::verify` (slice 22's rules: one question per host, nothing fetched before the yes). The
+/// card files of one link share one issuer key cache, so an issuer's keys and revocation lists are
+/// fetched once per link, and the whole check stops after [`VERIFY_LIMIT`].
 pub async fn check(opened: &[Opened], approved: &[String], route: &Route, now: DateTime<Utc>) -> CardsChecked {
+    check_within(opened, approved, route, now, VERIFY_LIMIT).await
+}
+
+/// [`check`], stopped after `limit` for the whole link.
+pub async fn check_within(
+    opened: &[Opened],
+    approved: &[String],
+    route: &Route,
+    now: DateTime<Utc>,
+    limit: Duration,
+) -> CardsChecked {
     let mut asks: Vec<Ask> = Vec::new();
     for o in opened {
         let Opened::Cards { input, .. } = o else { continue };
@@ -673,16 +782,31 @@ pub async fn check(opened: &[Opened], approved: &[String], route: &Route, now: D
     if !asks.is_empty() {
         return CardsChecked::NeedsApproval(asks);
     }
-    let mut all = Vec::new();
-    for o in opened {
-        let Opened::Cards { input, .. } = o else { continue };
-        match shc::check(input, approved, route, now).await {
-            Checked::Verified(cards) => all.push(cards),
-            Checked::Refused { refusal, iss } => return CardsChecked::Stopped(Stop::Card { refusal, iss }),
-            Checked::NeedsApproval(asks) => return CardsChecked::NeedsApproval(asks),
+    let mut at: Option<String> = None;
+    let verified = tokio::time::timeout(limit, async {
+        let mut keys = shc::Keys::default();
+        let mut all = Vec::new();
+        for o in opened {
+            let Opened::Cards { input, .. } = o else { continue };
+            // each file's cards stay together, in the order of the opened files
+            let mut cards = Vec::with_capacity(input.cards.len());
+            for jws in &input.cards {
+                let iss = shc::issuer(jws).ok().map(|i| i.iss);
+                at.clone_from(&iss);
+                match shc::verify(jws, &mut keys, route, now).await {
+                    Ok(card) => cards.push(card),
+                    Err(refusal) => return CardsChecked::Stopped(Stop::Card { refusal, iss }),
+                }
+            }
+            all.push(cards);
         }
-    }
-    CardsChecked::Verified(all)
+        CardsChecked::Verified(all)
+    })
+    .await;
+    verified.unwrap_or(CardsChecked::Stopped(Stop::Card {
+        refusal: shc::Refusal::Keys("timeout".into()),
+        iss: at,
+    }))
 }
 
 // ------------------------------------------------------------------- storing ----
@@ -909,6 +1033,35 @@ mod tests {
             parse("shlink:/%%%", now()).map_err(|r| r.code()).map(|_| ()),
             Err("link")
         );
+    }
+
+    /// "exp": a number of seconds, which may have a fraction; a link that has not expired yet by
+    /// that fraction is read.
+    #[test]
+    fn a_fractional_exp_is_compared_with_its_fraction() {
+        let url = "https://share.rivera.test/api/shl/abc";
+        let exp = now().timestamp() as f64 + 0.75;
+        let at = now() + chrono::Duration::milliseconds(250);
+        let text = payload(&json!({"url": url, "key": KEY, "exp": exp}));
+        let link = parse(&text, at).map_err(|r| r.code());
+        assert_eq!(
+            link.as_ref().map(|l| l.exp.map(|e| e.timestamp_millis())),
+            Ok(Some(now().timestamp_millis() + 750))
+        );
+        let late = now() + chrono::Duration::milliseconds(800);
+        assert_eq!(parse(&text, late).map(|_| ()).map_err(|r| r.code()), Err("expired"));
+    }
+
+    /// A pasted card envelope (JSON) stays a card even when one of its strings holds `shlink:/`.
+    #[test]
+    fn a_json_card_envelope_is_not_a_link() {
+        let link = payload(&json!({"url": "https://share.rivera.test/m", "key": KEY}));
+        assert!(is_link(&link));
+        assert!(is_link(&format!("https://viewer.example.org/#{link}")));
+        assert!(is_link(&format!("  {link}\n")));
+        let envelope = json!({"verifiableCredential": ["a.b.c"], "note": link}).to_string();
+        assert!(!is_link(&envelope), "{envelope}");
+        assert!(!is_link(&format!("\n {envelope}")));
     }
 
     #[test]

@@ -117,15 +117,19 @@ export const SHL_REASONS = [
 	'too_many',
 	'decrypt',
 	'not_fhir',
-	'held'
+	'held',
+	'location_expired'
 ] as const;
 
 /** Why a file of a link was not imported (shl_receive::NOT_IMPORTED). */
 export const SHL_NOT_IMPORTED = ['api_access', 'unknown_type'] as const;
 
-/** True when the pasted text holds a SMART Health Link rather than a card. */
+/**
+ * True when the pasted text holds a SMART Health Link rather than a card. Text that starts with `{` is
+ * a card envelope (JSON), whatever its strings hold (shl_receive::is_link).
+ */
 export function isLink(text: string): boolean {
-	return text.includes('shlink:/');
+	return !text.trimStart().startsWith('{') && text.includes('shlink:/');
 }
 
 /** True when a wrong-passcode detail says the link has no attempts left. */
