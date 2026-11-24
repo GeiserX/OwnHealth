@@ -14,6 +14,8 @@
 //!   rotated token, commits, and only then hands the access token out. A second caller waits on the
 //!   lock and reuses the first one's result. A reply with no refresh token keeps the old one.
 //!   `invalid_grant` sets `reconsent_needed_at`; so does a rotated token that could not be stored.
+//!   Blue Button persists that marker before sending its single-use token and clears it atomically
+//!   with the replacement, so a lost reply or interrupted refresh can never spend it twice.
 //! - **Disconnect.** [`disconnect`] calls the revocation endpoint when the server offers one, then
 //!   deletes both tokens and the cursor. [`revoke_profile`] does the vendor half before a
 //!   profile delete.
@@ -28,7 +30,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgConnection, PgPool};
+use sqlx::postgres::PgAdvisoryLock;
+use sqlx::{Connection, PgConnection, PgPool};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
@@ -70,6 +73,12 @@ pub fn v1_scopes(scopes: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// CMS Blue Button v3 requests only the three resources the poller reads.
+pub const BLUEBUTTON_SCOPES: &str =
+    "launch/patient patient/Patient.rs patient/Coverage.rs patient/ExplanationOfBenefit.rs";
+const BLUEBUTTON_ISSUER: &str = "https://api.bluebutton.cms.gov/v3/fhir";
+const BLUEBUTTON_SANDBOX: &str = "https://sandbox.bluebutton.cms.gov/v3/fhir";
 
 /// The switch that lets a debug build with dev auth reach a fake vendor on loopback.
 pub const DEV_LOOPBACK_SWITCH: &str = "OWNHEALTH_DEV_CONNECTOR_LOOPBACK";
@@ -243,6 +252,8 @@ pub fn safe_endpoint(url: &str, egress: &Egress) -> bool {
 pub enum Discovery {
     /// SMART App Launch: `<issuer>/.well-known/smart-configuration`.
     Smart,
+    /// CMS's v3 OAuth endpoints are siblings of the fixed FHIR base.
+    BlueButton,
     /// Fixed paths under the issuer, for a vendor with one API (Blue Button, Dexcom).
     Fixed {
         authorize: &'static str,
@@ -263,8 +274,7 @@ pub struct KindSpec {
     pub revoke_page: Option<&'static str>,
 }
 
-/// The kinds the launch route serves. SMART is here; Blue Button and Dexcom add their arm with their
-/// slice (18, 38).
+/// The kinds the launch route serves.
 pub fn kind_spec(kind: &str) -> Option<KindSpec> {
     match kind {
         "smart" => Some(KindSpec {
@@ -272,6 +282,12 @@ pub fn kind_spec(kind: &str) -> Option<KindSpec> {
             scopes: SMART_SCOPES,
             default_issuer: None,
             revoke_page: None,
+        }),
+        "bluebutton" => Some(KindSpec {
+            discovery: Discovery::BlueButton,
+            scopes: BLUEBUTTON_SCOPES,
+            default_issuer: Some(BLUEBUTTON_ISSUER),
+            revoke_page: Some("https://www.medicare.gov/account/"),
         }),
         _ => None,
     }
@@ -290,6 +306,41 @@ fn join(issuer: &str, path: &str) -> String {
     format!("{}/{}", issuer.trim_end_matches('/'), path.trim_start_matches('/'))
 }
 
+/// The production and sandbox bases have fixed HTTPS origins. Tests can use a v3 FHIR base
+/// on loopback only when connector egress was widened by the debug switch.
+pub fn bluebutton_base(base: &str, egress: &Egress) -> bool {
+    if matches!(base, BLUEBUTTON_ISSUER | BLUEBUTTON_SANDBOX) {
+        return true;
+    }
+    !egress.https_only
+        && egress.allow_private
+        && safe_endpoint(base, egress)
+        && url::Url::parse(base).is_ok_and(|u| {
+            u.scheme() == "http" && u.path() == "/v3/fhir" && u.query().is_none() && u.fragment().is_none()
+        })
+}
+
+fn bluebutton_endpoints(base: &str, egress: &Egress) -> Result<Endpoints, OAuthError> {
+    let root = base
+        .strip_suffix("/fhir")
+        .filter(|_| bluebutton_base(base, egress))
+        .ok_or_else(|| {
+            refused(
+                "bad_issuer",
+                "Choose the CMS Blue Button v3 production or sandbox server.",
+            )
+        })?;
+    Ok(Endpoints {
+        issuer: base.into(),
+        authorize: format!("{root}/o/authorize/"),
+        token: format!("{root}/o/token/"),
+        revocation: Some(format!("{root}/o/revoke_token/")),
+        scopes: BLUEBUTTON_SCOPES.into(),
+        aud: None,
+        auth: ClientAuth::Basic,
+    })
+}
+
 /// The endpoints of `issuer` for a kind: read from the server for SMART, built from fixed paths
 /// otherwise.
 pub async fn resolve(spec: &KindSpec, issuer: &str, egress: &Egress) -> Result<Endpoints, OAuthError> {
@@ -299,6 +350,7 @@ pub async fn resolve(spec: &KindSpec, issuer: &str, egress: &Egress) -> Result<E
     }
     let endpoints = match &spec.discovery {
         Discovery::Smart => discover_smart(&issuer, spec.scopes, egress).await?,
+        Discovery::BlueButton => bluebutton_endpoints(&issuer, egress)?,
         Discovery::Fixed {
             authorize,
             token,
@@ -426,6 +478,32 @@ pub async fn load_client(
         secret,
         redirect_uri,
     }))
+}
+
+fn bluebutton_requires_secret() -> OAuthError {
+    refused(
+        "client_secret_required",
+        "Blue Button needs a registered client with a secret.",
+    )
+}
+
+fn check_bluebutton_client(client: &ConnectorClient, endpoints: &Endpoints, egress: &Egress) -> Result<(), OAuthError> {
+    if client.vendor != "bluebutton" || client.secret.is_none() {
+        return Err(bluebutton_requires_secret());
+    }
+    let registered = client
+        .issuer
+        .as_deref()
+        .unwrap_or(BLUEBUTTON_ISSUER)
+        .trim()
+        .trim_end_matches('/');
+    if registered != endpoints.issuer || bluebutton_endpoints(registered, egress)? != *endpoints {
+        return Err(refused(
+            "bad_issuer",
+            "This client is registered for another Blue Button server.",
+        ));
+    }
+    Ok(())
 }
 
 /// RFC 6749 2.3.1: the id and secret are form-encoded before they are joined and base64-encoded.
@@ -604,6 +682,9 @@ pub async fn begin(conn: &mut PgConnection, l: &Launch<'_>) -> Result<Begun, OAu
     if l.binder.len() < 16 {
         return Err(refused("bad_binder", "The browser binder is missing."));
     }
+    if l.kind == "bluebutton" && !l.client.confidential {
+        return Err(bluebutton_requires_secret());
+    }
     // resolve checked it against the egress; whatever was stored, never a script or a data URL
     let mut url = url::Url::parse(&l.endpoints.authorize)
         .ok()
@@ -777,6 +858,9 @@ pub async fn exchange(
     code: &str,
     egress: &Egress,
 ) -> Result<TokenSet, OAuthError> {
+    if p.kind == "bluebutton" {
+        check_bluebutton_client(client, &p.endpoints, egress)?;
+    }
     let req = TokenRequest::new(
         client,
         p.endpoints.auth,
@@ -788,7 +872,14 @@ pub async fn exchange(
         ],
     );
     let http = SourceHttp::new(p.endpoints.hosts(), egress.clone());
-    parse_tokens(&req.send(&http, &p.endpoints.token).await?)
+    let tokens = parse_tokens(&req.send(&http, &p.endpoints.token).await?)?;
+    if p.kind == "bluebutton" && tokens.patient.is_none() {
+        return Err(refused(
+            "no_patient",
+            "The Medicare sign-in did not identify a patient.",
+        ));
+    }
+    Ok(tokens)
 }
 
 fn config_for(p: &Pending, t: &TokenSet) -> Value {
@@ -915,7 +1006,8 @@ pub async fn save_connection(
     sqlx::query(
         "update source set config = $2, secret_id = $3, enabled = true, reconsent_needed_at = null, \
          access_expires_at = $4, grant_expires_at = $5, oauth_grant_id = $6, oauth_access_token = $7, \
-         last_error_at = null, last_error = null, consecutive_failures = 0 where id = $1",
+         last_error_at = null, last_error = null, consecutive_failures = 0, \
+         cursor = case when kind = 'bluebutton' then null else cursor end where id = $1",
     )
     .bind(source_id)
     .bind(&config)
@@ -1028,7 +1120,24 @@ async fn access_token_inner(
         }
     }
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
-    let mut tx = pool.begin().await?;
+    let mut conn = pool.acquire().await?;
+    let single_use = sqlx::query_scalar::<_, bool>("select kind = 'bluebutton' from source where id = $1")
+        .bind(source_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .unwrap_or(false);
+    // The session lock spans both transactions of a Blue Button refresh. Other callers wait
+    // and reuse the committed result. A dropped future releases the lock.
+    let mut guard;
+    let conn: &mut PgConnection = if single_use {
+        guard = PgAdvisoryLock::new(format!("connector.refresh:{source_id}"))
+            .acquire(conn)
+            .await?;
+        &mut guard
+    } else {
+        &mut conn
+    };
+    let mut tx = conn.begin().await?;
     let row: Option<Locked> = sqlx::query_as(
         "select household_id, profile_id, secret_id, connector_client_id, config, reconsent_needed_at, enabled, \
          oauth_grant_id, oauth_access_token, access_expires_at from source where id = $1 and kind = any($2) for update",
@@ -1103,6 +1212,9 @@ async fn access_token_inner(
             "This process cannot open the profile's key, so it cannot store this connection's next token.",
         ));
     }
+    if single_use {
+        check_bluebutton_client(&client, &endpoints, egress)?;
+    }
     let refresh = secrets::read_secret(&mut tx, sb, household, secret_id).await?;
     let req = TokenRequest::new(
         &client,
@@ -1113,8 +1225,37 @@ async fn access_token_inner(
         ],
     );
     let http = SourceHttp::new(declared_hosts(&config), egress.clone());
-    let answer = req.send(&http, &endpoints.token).await?;
-    let t = match parse_tokens(&answer) {
+    if single_use {
+        // Commit the demand for consent before sending a token that CMS may spend even if we
+        // never receive the reply. Only a committed replacement clears it. Re-lock the source
+        // and check the grant because reconnect and disconnect use the row lock.
+        needs_reconsent(&mut tx, grant, now).await?;
+        tx.commit().await?;
+        tx = conn.begin().await?;
+        let current: Option<bool> = sqlx::query_scalar(
+            "select enabled and oauth_grant_id is not distinct from $2 and secret_id is not distinct from $3 \
+             from source where id = $1 for update",
+        )
+        .bind(source_id)
+        .bind(oauth_grant_id)
+        .bind(secret_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current != Some(true) {
+            return Err(OAuthError::GrantChanged);
+        }
+    }
+    let answer = req.send(&http, &endpoints.token).await.and_then(|a| parse_tokens(&a));
+    let t = match answer {
+        Ok(t)
+            if !single_use
+                || (t.refresh.as_ref().is_some_and(|token| {
+                    !bool::from(token.expose().as_bytes().ct_eq(refresh.expose().as_bytes()))
+                }) && t.patient.as_deref().is_none_or(|patient| config["patient"] == patient)) =>
+        {
+            t
+        }
+        _ if single_use => return Err(OAuthError::ReconsentNeeded),
         Ok(t) => t,
         Err(OAuthError::Vendor { code, .. }) if code == "invalid_grant" => {
             needs_reconsent(&mut tx, grant, now).await?;
@@ -1144,7 +1285,7 @@ async fn access_token_inner(
         sqlx::query(
             "update source set access_expires_at = $2, grant_expires_at = coalesce($3, grant_expires_at), \
              config = case when $4::text is null then config else jsonb_set(config, '{scope}', to_jsonb($4::text)) end, \
-             oauth_access_token = $5 where id = $1",
+             oauth_access_token = $5, reconsent_needed_at = null where id = $1",
         )
         .bind(source_id)
         .bind(access_until(&t, now))
@@ -1160,6 +1301,12 @@ async fn access_token_inner(
     match stored {
         Ok(()) => Ok(t.access),
         Err(e) => {
+            if single_use {
+                // The preflight already committed the reconsent marker. A failed COMMIT can
+                // itself have an uncertain outcome, so the next read consults the stored row.
+                tracing::warn!(%source_id, "the rotated Blue Button token could not be confirmed");
+                return Err(OAuthError::ReconsentNeeded);
+            }
             if !rotated {
                 return Err(e);
             }
@@ -1213,6 +1360,9 @@ async fn revoke_held(
             None => None,
         }
         .ok_or_else(|| refused("client_gone", "The vendor client of this connection is gone."))?;
+        if client.vendor == "bluebutton" {
+            check_bluebutton_client(&client, &endpoints, egress)?;
+        }
         let token = secrets::read_secret(&mut *conn, sb, household, secret_id).await?;
         let req = TokenRequest::new(
             &client,
@@ -1367,6 +1517,29 @@ pub async fn revoke_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn blue_button_uses_only_cms_v3_and_basic_client_auth() {
+        let spec = kind_spec("bluebutton").expect("Blue Button is available for launch");
+        let egress = Egress::connector();
+        let cms = spec.default_issuer.expect("production CMS base");
+        let endpoints = resolve(&spec, cms, &egress).await.expect("CMS v3 endpoints");
+        assert_eq!(endpoints.issuer, "https://api.bluebutton.cms.gov/v3/fhir");
+        assert_eq!(endpoints.authorize, "https://api.bluebutton.cms.gov/v3/o/authorize/");
+        assert_eq!(endpoints.token, "https://api.bluebutton.cms.gov/v3/o/token/");
+        assert_eq!(
+            endpoints.revocation.as_deref(),
+            Some("https://api.bluebutton.cms.gov/v3/o/revoke_token/")
+        );
+        assert_eq!(endpoints.auth, ClientAuth::Basic);
+        for issuer in [
+            "https://api.bluebutton.cms.gov/v2/fhir",
+            "https://api.bluebutton.cms.gov.evil.example/v3/fhir",
+            "https://api.bluebutton.cms.gov/v3/fhir?other=1",
+        ] {
+            assert!(resolve(&spec, issuer, &egress).await.is_err());
+        }
+    }
 
     #[test]
     fn a_vendor_error_code_is_kept_only_when_it_is_a_plain_word() {

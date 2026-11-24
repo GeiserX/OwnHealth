@@ -453,6 +453,9 @@ pub struct ManagedHealth {
     pub open_gaps: i32,
     /// The server a connection talks to (`config.endpoints.issuer`; SMART: the FHIR base URL).
     pub server: Option<String>,
+    /// Distinct claims returned by the most recent Blue Button claim search that answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_count: Option<i32>,
 }
 
 pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Result<Vec<SourceHealth>> {
@@ -468,7 +471,8 @@ pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Resul
          (select count(*)::int4 from review_item g where g.household_id = s.household_id and g.status = 'open' \
            and g.kind = 'source_gap' and g.ref_table = 'source' and g.ref_id = s.id \
            and g.profile_id is not distinct from s.profile_id) as open_gaps, \
-         s.config -> 'endpoints' ->> 'issuer' as server \
+         s.config -> 'endpoints' ->> 'issuer' as server, \
+         case when s.kind = 'bluebutton' then (s.cursor->>'claim_count')::int4 end as claim_count \
          from source s left join lateral (select status, errors, error from source_run \
            where source_id = s.id and oauth_grant_id is not distinct from s.oauth_grant_id \
            and finished_at is not null order by started_at desc, id desc limit 1) r on true \

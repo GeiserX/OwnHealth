@@ -13,6 +13,7 @@ const port = Number(process.env.OWNHEALTH_E2E_PORT ?? 8190);
 const viewerPort = Number(process.env.OWNHEALTH_E2E_VIEWER_PORT ?? port + 1);
 const baseURL = `http://127.0.0.1:${port}`;
 const fakePort = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? port + 1000);
+process.env.OWNHEALTH_E2E_SECRETS_KEY ??= btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 process.env.OWNHEALTH_E2E_PORT = String(port);
 process.env.OWNHEALTH_E2E_FAKE_PORT = String(fakePort);
 process.env.OWNHEALTH_E2E_VIEWER_PORT ??= String(viewerPort);

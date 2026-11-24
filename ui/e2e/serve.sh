@@ -49,7 +49,7 @@ export OWNHEALTH_BASE_URL="http://127.0.0.1:$port"
 # share links on: a loopback http address is the one plain-http share address the app accepts
 export OWNHEALTH_SHARE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
-export OWNHEALTH_SECRETS_KEY="$(openssl rand -base64 32)" # seals the connectors' refresh tokens
+export OWNHEALTH_SECRETS_KEY="${OWNHEALTH_E2E_SECRETS_KEY:-$(openssl rand -base64 32)}" # seals the connectors' refresh tokens
 export OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1 # debug build with dev auth only: the fake vendor on loopback
 export RUST_LOG="${RUST_LOG:-warn}" # the access log stays out of the test output; errors still show
 

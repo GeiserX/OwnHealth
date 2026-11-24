@@ -814,7 +814,21 @@ mod tests {
                 access_expires_at: None,
                 open_gaps: 0,
                 server: Some("https://fhir.labnorte.example/r4".into()),
+                claim_count: (kind == "bluebutton").then_some(42),
             },
+        }
+    }
+
+    #[test]
+    fn claim_count_is_visible_to_the_connection_manager() {
+        for manager in [Some(true), Some(false), None] {
+            let rows = [(row("bluebutton"), manager)];
+            let (json, _) = out(&rows);
+            let value = serde_json::to_value(&json[0]).expect("a JSON source health row");
+            assert_eq!(
+                value.get("claim_count").and_then(Value::as_i64),
+                (manager == Some(true)).then_some(42)
+            );
         }
     }
 

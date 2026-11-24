@@ -354,7 +354,7 @@ async fn a_launch_for_another_household_or_a_profile_the_caller_does_not_manage_
     let r = t.launch(&mut sam, t.env.profile("alex")).await?;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.json);
     // a kind no slice serves yet, and a kind that is not a connection
-    for kind in ["bluebutton", "dexcom", "email", "nope"] {
+    for kind in ["dexcom", "email", "nope"] {
         let r = a
             .post(
                 &format!("/api/connectors/launch/{kind}"),
