@@ -364,8 +364,13 @@ impl Reader<'_> {
                 got.problem(Issue::RepeatedPage);
                 return Ok(got);
             }
-            got.answered = true;
+            // A page that holds error outcomes and no match is not an answer, so a search that got only
+            // that leaves no count. A clean or note-only page answers (zero stays zero), and a failing
+            // page after an answered one keeps the count of the pages before it.
             let matches = entries.iter().filter(|entry| !outcome(entry)).count();
+            if matches > 0 || !entries.iter().any(|entry| outcome(entry) && !note(entry)) {
+                got.answered = true;
+            }
             for entry in entries.iter().filter(|entry| !note(entry)) {
                 got.add(kind, entry, self.base, self.patient);
             }

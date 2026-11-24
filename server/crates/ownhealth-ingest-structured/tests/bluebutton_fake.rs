@@ -59,6 +59,10 @@ enum Eob {
     WithOutcome,
     /// The first page holds only an informational OperationOutcome, with a next link.
     OutcomeOnly,
+    /// The first page holds only an error OperationOutcome, with no next link.
+    ErrorOnly,
+    /// 50 claims with a next link, then a page that holds only an error OperationOutcome.
+    LaterError,
 }
 
 /// How the fake CMS behaves. Tests change it between calls.
@@ -76,6 +80,8 @@ struct Mode {
     no_patient: bool,
     /// The coverage search answers 503.
     coverage_fails: bool,
+    /// The coverage search answers a page that holds only an error OperationOutcome.
+    coverage_error_only: bool,
     /// The scope the token answers grant, when narrower than the request.
     scope: Option<String>,
     eob: Eob,
@@ -249,6 +255,7 @@ async fn search(
             (vec![p], false)
         }
         ("Coverage", _, 0) if mode.coverage_fails => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        ("Coverage", _, 0) if mode.coverage_error_only => (vec![], false),
         ("Coverage", _, 0) => (vec![fixture("cms-coverage.json")], false),
         ("ExplanationOfBenefit", Eob::Fails(status), 0) => {
             return StatusCode::from_u16(status).expect("an HTTP status").into_response();
@@ -261,6 +268,7 @@ async fn search(
         ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl | Eob::WithOutcome, 0) => (claims(0..50), true),
         ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl | Eob::WithOutcome, 50) => (last(), false),
         ("ExplanationOfBenefit", Eob::OutcomeOnly, 0) => (vec![], true),
+        ("ExplanationOfBenefit", Eob::LaterError, 0) => (claims(0..50), true),
         _ => (vec![], false),
     };
     let n = resources.len();
@@ -282,6 +290,8 @@ async fn search(
     // FHIR R4 lets a searchset carry an OperationOutcome entry that is not a match
     let severity = match (kind.as_str(), mode.eob, offset) {
         ("ExplanationOfBenefit", Eob::WithOutcome | Eob::OutcomeOnly, 0) => Some("information"),
+        ("ExplanationOfBenefit", Eob::ErrorOnly, 0) | ("ExplanationOfBenefit", Eob::LaterError, 50) => Some("error"),
+        ("Coverage", _, 0) if mode.coverage_error_only => Some("error"),
         ("Patient", _, 0) => mode.patient_outcome,
         _ => None,
     };
@@ -952,5 +962,39 @@ async fn an_informational_outcome_beside_the_patient_does_not_block_the_pull() -
         .expect_err("an error outcome beside the Patient stops the pull");
     assert!(stop.message.starts_with("unexpected_resource"), "{}", stop.message);
     assert_eq!(setup.fake.calls().pages, [("Patient".into(), 0)]);
+    Ok(())
+}
+
+/// A search page that holds only an error OperationOutcome is not an answer. A claim search that got
+/// only that shows no claim count, a later page like it keeps the count of the pages before, and when
+/// both data searches get only that the run stops as no answer.
+#[tokio::test]
+async fn an_error_only_page_is_not_an_answer() -> common::R {
+    let setup = setup(Mode {
+        eob: Eob::ErrorOnly,
+        ..Mode::default()
+    })
+    .await?;
+    let claims_failed = pull(&setup, 200).await?;
+    assert_eq!(claims_failed.cursor, Some(json!({"claim_count": null})));
+    let codes: Vec<&str> = claims_failed.problems.iter().map(|p| p.code.as_str()).collect();
+    assert_eq!(codes, ["unexpected_resource"]);
+
+    setup.fake.mode().eob = Eob::LaterError;
+    let later = pull(&setup, 200).await?;
+    assert_eq!(later.cursor, Some(json!({"claim_count": 50})));
+
+    {
+        let mut mode = setup.fake.mode();
+        mode.eob = Eob::ErrorOnly;
+        mode.coverage_error_only = true;
+    }
+    let source = get_source(&mut *setup.ctx.pool.acquire().await?, setup.source_id)
+        .await?
+        .expect("connected source");
+    let stop = bluebutton::pull(&setup.ctx, &source, &egress(), Utc::now(), 200)
+        .await
+        .expect_err("neither data search answers");
+    assert!(stop.message.starts_with("bluebutton_no_answer"), "{}", stop.message);
     Ok(())
 }
