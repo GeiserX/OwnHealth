@@ -17,7 +17,7 @@
 //! ([`WEARABLE_JOBS`]) is shown only to a caller who may read wearables on that profile; anyone else
 //! with a grant there sees the job with `result: null`.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Query, Request, State};
@@ -250,10 +250,8 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         .iter()
         .map(|r| row_to_json(r).map(Value::Object))
         .collect::<Result<Vec<_>, _>>()?;
-    // the jobs whose details this read returns (a DICOM import's, a finished C-CDA import's): one
-    // audit row names them all
-    let mut read_profiles = BTreeSet::new();
-    let mut read_jobs = Vec::new();
+    // Audit the DICOM details and finished C-CDA results under the profiles they came from.
+    let mut read_jobs = BTreeMap::<_, Vec<_>>::new();
     for j in &mut jobs {
         pydantic_datetimes(j, &["created_at", "finished_at"]);
         let permission = j["profile_id"]
@@ -273,8 +271,10 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         if dicom {
             if let Some(perm) = permission.filter(|p| p.has("read:records")) {
                 perm.record_read(&["read:records"]);
-                read_profiles.insert(perm.profile.id);
-                read_jobs.push(j["id"].to_string());
+                read_jobs
+                    .entry(Some(perm.profile.id))
+                    .or_default()
+                    .push(j["id"].to_string());
             } else {
                 j["result"] = Value::Null;
                 j["filename"] = Value::Null;
@@ -286,21 +286,24 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
             && !j["result"].is_null()
             && let Some(perm) = permission
         {
-            read_profiles.insert(perm.profile.id);
-            read_jobs.push(j["id"].to_string());
+            read_jobs
+                .entry(Some(perm.profile.id))
+                .or_default()
+                .push(j["id"].to_string());
         }
     }
-    if !read_jobs.is_empty() {
+    if jobs.is_empty() {
+        read_jobs.insert(None, Vec::new());
+    }
+    for (profile_id, job_ids) in read_jobs {
         let mut audit = AuditEvent::new(caller.0.actor_kind(), "ui", "read");
         audit.actor_id = caller.0.user_id;
         audit.token_id = caller.0.token_id;
         audit.tool = Some("GET /api/jobs".into());
-        if read_profiles.len() == 1 {
-            audit.profile_id = read_profiles.first().copied();
-        }
+        audit.profile_id = profile_id;
         audit.resource_type = Some("job".into());
-        audit.rows_out = i32::try_from(read_jobs.len()).ok();
-        audit.resource_ids = Some(read_jobs);
+        audit.rows_out = i32::try_from(job_ids.len()).ok();
+        audit.resource_ids = Some(job_ids);
         write_audit(&mut tx, &audit).await?;
     }
     tx.commit().await?;

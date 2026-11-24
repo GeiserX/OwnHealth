@@ -1373,3 +1373,77 @@ async fn reading_a_finished_ccda_job_writes_one_audit_row() -> R {
     );
     Ok(())
 }
+#[tokio::test]
+async fn round_5_job_reads_are_audited_by_profile() -> R {
+    let a = app().await?;
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("sam"))
+        .bind(a.family.profile("alex"))
+        .bind(["read:summary", "read:records"])
+        .execute(&a.rt.pool)
+        .await?;
+    let mut ids = Vec::new();
+    for (slug, kind) in [
+        ("alex", ownhealth_imaging::import::JOB),
+        ("lucia", ownhealth_ingest_structured::ccda::JOB),
+        ("alex", ownhealth_imaging::import::JOB),
+    ] {
+        let id: i64 = sqlx::query_scalar(
+            "insert into job (kind, state, payload, result) values ($1, 'done',              jsonb_build_object('profile_id', $2::text), '{\"accepted\": 1}') returning id",
+        )
+        .bind(kind)
+        .bind(a.family.profile(slug).to_string())
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    let (status, response) = a
+        .get("sam", &format!("/jobs?ids={},{},{}", ids[0], ids[1], ids[2]))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["jobs"].as_array().map(Vec::len), Some(3), "{response}");
+    assert!(
+        response["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["result"]["accepted"] == 1)
+    );
+
+    for (slug, expected_ids) in [("alex", vec![ids[2], ids[0]]), ("lucia", vec![ids[1]])] {
+        let (status, log) = a.get("alex", &format!("/audit?profile={slug}")).await?;
+        assert_eq!(status, StatusCode::OK, "{log}");
+        let rows: Vec<_> = log["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["tool"] == "GET /api/jobs")
+            .collect();
+        assert_eq!(rows.len(), 1, "{slug}: {log}");
+        assert_eq!(rows[0]["actor"], "Sam Rivera");
+        assert_eq!(rows[0]["rows_out"], expected_ids.len());
+        assert_eq!(
+            rows[0]["resource_ids"],
+            json!(expected_ids.iter().map(i64::to_string).collect::<Vec<_>>())
+        );
+
+        for reader in ["alex", "sam"] {
+            let (status, who) = a.get(reader, &format!("/audit/who?profile={slug}")).await?;
+            assert_eq!(status, StatusCode::OK, "{who}");
+            let event = &who["items"][0];
+            assert_eq!(event["actor"], "Sam Rivera", "{reader} on {slug}: {who}");
+            assert_eq!(event["events"], 1, "{reader} on {slug}: {who}");
+        }
+    }
+
+    let (status, response) = a.get("sam", "/jobs?ids=0").await?;
+    assert_eq!((status, response["jobs"].clone()), (StatusCode::OK, json!([])));
+    let (status, log) = a.get("sam", "/audit").await?;
+    assert_eq!(status, StatusCode::OK, "{log}");
+    let row = &log["items"][0];
+    assert_eq!(row["tool"], "GET /api/jobs");
+    assert_eq!(row["profile"], serde_json::Value::Null);
+    assert_eq!(row["rows_out"], 0);
+    assert_eq!(row["resource_ids"], json!([]));
+    Ok(())
+}
