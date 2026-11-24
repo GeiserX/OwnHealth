@@ -12,6 +12,7 @@ import {
 	connectionState,
 	connectorErrorKey,
 	daysLeft,
+	endedVendors,
 	FIRST_PULL_EVERY,
 	FIRST_PULL_TRIES,
 	refreshUntilFirstPull,
@@ -292,4 +293,39 @@ test('the Connections screen keeps reading the rows while the first pull runs', 
 	const page = read('../src/routes/connections/+page.svelte');
 	assert.match(page, /refreshUntilFirstPull\(/);
 	assert.doesNotMatch(page, /setTimeout\(load, 8000\)/);
+});
+
+// Slice 35: Open Wearables brings several vendors through one connection. One vendor's connection can
+// end there while the others keep syncing, and only the operator reconnects it in the sidecar.
+test('an Open Wearables card names the vendors whose connection ended and offers no Reconnect', () => {
+	const ow = conn({ kind: 'openwearables', label: 'Open Wearables', reconsent_needed_at: inDays(-0.1), last_run_problem: 'ow_connection_ended: oura, polar' });
+	assert.equal(connectionState(ow, NOW), 'reconsent');
+	assert.deepEqual(endedVendors(ow), ['oura', 'polar']);
+	assert.equal(canReconnect({ ...ow, can_manage: true }), false);
+	assert.deepEqual(endedVendors({ ...ow, last_run_problem: 'ow_http: Open Wearables HTTP 503' }), []);
+	assert.deepEqual(endedVendors({ ...ow, last_run_problem: null }), []);
+	assert.deepEqual(endedVendors({ ...ow, kind: 'smart' }), []);
+	assert.deepEqual(endedVendors({ ...ow, last_run_problem: 'ow_connection_ended: <b>oura</b>' }), []);
+	for (const lang of ['en', 'es'] as const) {
+		const d = dict[lang] as Record<string, string>;
+		for (const k of ['con_st_ow_ended', 'con_st_ow_ended_any', 'fu_k_oura', 'fu_k_polar', 'fu_k_whoop', 'fu_k_withings']) assert.ok(d[k], `${lang} ${k}`);
+		assert.match(d.con_st_ow_ended, /\{vendors\}/);
+		for (const k of ['con_st_ow_ended', 'con_st_ow_ended_any']) assert.doesNotMatch(d[k], /Reconnect|Reconectar|Nothing syncs|No se sincroniza nada/);
+	}
+	const page = read('../src/routes/connections/+page.svelte');
+	assert.match(page, /r\.kind === 'openwearables'/);
+	assert.match(page, /con_st_ow_ended/);
+});
+
+test('the Open Wearables stops read in English and Spanish', () => {
+	assert.equal(runWords('ow_http: Open Wearables HTTP 503', hasKey, sayIn('en')), 'Open Wearables answered 503.');
+	assert.equal(runWords('ow_http: Open Wearables HTTP 503', hasKey, sayIn('es')), 'Open Wearables respondió 503.');
+	const bad = 'ow_response: Invalid Open Wearables response. / Respuesta no válida de Open Wearables.';
+	assert.equal(runWords(bad, hasKey, sayIn('es')), 'Open Wearables envió una respuesta que OwnHealth no puede leer.');
+	assert.equal(runWords('PermanentJobError: too_many_pages: Open Wearables time series stopped after 300 pages', hasKey, sayIn('es')), 'La lectura se detuvo tras 300 páginas.');
+	assert.equal(
+		runWords('PermanentJobError: repeated_page: Open Wearables sent a time-series cursor it had sent before', hasKey, sayIn('en')),
+		'The server sent a next page it had sent before, so the rest was not read.'
+	);
+	assert.equal(runWords('PermanentJobError: too_large: Open Wearables answers for one day passed the size limit', hasKey, sayIn('es')), 'Las respuestas de esta ejecución pasaron el límite de tamaño, así que el resto no se leyó.');
 });
