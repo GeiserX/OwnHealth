@@ -619,3 +619,53 @@ async fn two_date_only_facts_a_day_apart_are_two_draws() -> R {
     );
     Ok(())
 }
+
+/// The run's status and the source's cursor commit together: when the second write fails, the run
+/// stays open and the cursor keeps its old value, so a health read never pairs one with the other.
+#[tokio::test]
+async fn a_failed_cursor_write_leaves_the_run_open() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let id = sources::create_source(
+        &mut c,
+        &NewSource {
+            poll_seconds: Some(300),
+            ..NewSource::new(f.household_id, "gadgetbridge", "Pulsera de Alex")
+        },
+    )
+    .await?;
+    sqlx::query("update source set cursor = '{\"uid\": 1}' where id = $1")
+        .bind(id)
+        .execute(&mut *c)
+        .await?;
+    let run = begin_run(&mut c, id, "poll", None).await?;
+    // a failure after the run row is written: every later write to the source fails
+    sqlx::raw_sql(
+        "create function fail_source_write() returns trigger language plpgsql as \
+         $$ begin raise exception 'injected failure'; end $$; \
+         create trigger fail_source_write before update on source \
+         for each row execute function fail_source_write();",
+    )
+    .execute(&mut *c)
+    .await?;
+    let done = RunOutcome {
+        cursor: Some(json!({"uid": 2})),
+        ..RunOutcome::default()
+    };
+    assert!(finish_run(&mut c, run, Ok(&done)).await.is_err());
+    assert!(finish_run(&mut c, run, Err("mailbox unreachable")).await.is_err());
+    sqlx::raw_sql("drop trigger fail_source_write on source")
+        .execute(&mut *c)
+        .await?;
+    let open: bool =
+        sqlx::query_scalar("select finished_at is null and status = 'running' from source_run where id = $1")
+            .bind(run)
+            .fetch_one(&mut *c)
+            .await?;
+    assert!(open, "the run was closed although its source write failed");
+    let source = sources::get_source(&mut c, id).await?.expect("source");
+    assert_eq!(source.cursor, Some(json!({"uid": 1})));
+    assert_eq!(source.consecutive_failures, 0);
+    Ok(())
+}

@@ -332,6 +332,7 @@ pub async fn begin_run(conn: &mut PgConnection, source_id: Uuid, trigger: &str, 
 /// 500 characters). Updates the source's health and cursor only if the grant still matches.
 /// A run with problems where something still arrived is `partial` and counts as a success for "last successful sync"; a run where every item it
 /// saw failed is an `error` (nothing arrived, and the cursor stays so the items are retried).
+/// The run row and the source row commit together, so a health read never sees one without the other.
 pub async fn finish_run(
     conn: &mut PgConnection,
     run_id: i64,
@@ -354,6 +355,7 @@ pub async fn finish_run(
     };
     let d = RunOutcome::default();
     let o = outcome.unwrap_or(&d);
+    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
     let (source_id, grant_id): (Uuid, Option<Uuid>) = sqlx::query_as(
         "update source_run set finished_at = now(), status = $2, items_seen = $3, items_new = $4, \
          items_duplicate = $5, items_quarantined = $6, errors = $7, error = $8, skipped = $9 where id = $1 \
@@ -368,7 +370,7 @@ pub async fn finish_run(
     .bind(serde_json::to_value(&o.problems)?)
     .bind(&error)
     .bind(serde_json::to_value(&o.skipped)?)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *tx)
     .await?;
     if let Some(e) = &error {
         sqlx::query(
@@ -378,7 +380,7 @@ pub async fn finish_run(
         .bind(source_id)
         .bind(e)
         .bind(grant_id)
-        .execute(conn)
+        .execute(&mut *tx)
         .await?;
     } else {
         sqlx::query(
@@ -388,9 +390,10 @@ pub async fn finish_run(
         .bind(source_id)
         .bind(&o.cursor)
         .bind(grant_id)
-        .execute(conn)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
