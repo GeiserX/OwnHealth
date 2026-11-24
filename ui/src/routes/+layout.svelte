@@ -14,6 +14,8 @@
 	import { searchTarget } from '#lib/logic/search';
 	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
+	import NotificationOutbox from '#lib/components/NotificationOutbox.svelte';
+	import { NOTICES_SHOWN } from '#lib/logic/breakglass';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	let { children }: { children: Snippet } = $props();
@@ -43,6 +45,12 @@
 			app.loading = false;
 		}
 	}
+
+	// No session, found by this load or by any call of a page (api/core.ts): the next login opens the
+	// unread notices again.
+	$effect(() => {
+		if (app.unauthenticated) localStorage.removeItem(NOTICES_SHOWN);
+	});
 
 	onMount(() => {
 		document.documentElement.lang = i18n.lang;
@@ -189,6 +197,7 @@
 				<span>{t('toreview')}</span>
 				{#if me}<b class="num" style="color:var(--watch)">{me.review_open}</b>{:else}<b class="dim">—</b>{/if}
 			</a>
+			<NotificationOutbox />
 			<div class="seg" role="group" aria-label={t('lang_label')}>
 				<LangButtons />
 			</div>
