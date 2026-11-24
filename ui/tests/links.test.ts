@@ -114,7 +114,9 @@ test('the step-up note is not part of a heading, and the new link has a live reg
 	assert.ok(live > 0 && live < page.indexOf('{#if fresh}'), 'live region before the fresh block');
 	assert.match(page, /<h3 id="shl-made" tabindex="-1" bind:this=\{madeEl\}>/);
 	assert.match(page, /madeEl\?\.focus\(\)/);
-	assert.match(page, /getElementById\(`shl-log-\$\{x\.id\}`\)\?\.focus\(\)/);
+	// after a revoke the keyboard stays on the row: its access log, or the row itself (an offline card has no log)
+	assert.match(page, /\(document\.getElementById\(`shl-log-\$\{x\.id\}`\) \?\? document\.getElementById\(`shl-row-\$\{x\.id\}`\)\)\?\.focus\(\)/);
+	assert.match(page, /<li data-testid="shl-row" id="shl-row-\{x\.id\}" tabindex="-1">/);
 });
 
 test('every state, reason and access event has words in es and en, and only a live link can be revoked', () => {

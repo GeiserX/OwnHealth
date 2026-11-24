@@ -149,9 +149,9 @@
 			if (fresh?.id === x.id) fresh = null;
 			load();
 			if (logOf === x.id) openLog(x.id);
-			// the Revoke button is gone: keep the keyboard on the same row
+			// the Revoke button is gone: keep the keyboard on the same row, on its access log when it has one
 			await tick();
-			document.getElementById(`shl-log-${x.id}`)?.focus();
+			(document.getElementById(`shl-log-${x.id}`) ?? document.getElementById(`shl-row-${x.id}`))?.focus();
 		} catch (e) {
 			if (slug === s) rowError = { id: x.id, text: errText(e), raw: errRaw(e) };
 		} finally {
@@ -283,7 +283,7 @@
 				<ul class="sl-list">
 					{#each links.data.items as x (x.id)}
 						{@const st = stateOf(x, now)}
-						<li data-testid="shl-row">
+						<li data-testid="shl-row" id="shl-row-{x.id}" tabindex="-1">
 							<div class="sl-row">
 								<div class="sl-main">
 									<div class="sl-top">

@@ -74,3 +74,21 @@ test('the emergency card form and downloads fit a Spanish phone screen', async (
 	await expect(rows.first().getByRole('button', { name: /^Quién lo abrió/ })).toHaveCount(0);
 	await expect(rows.nth(1)).toContainText('sustituida por una tarjeta nueva');
 });
+
+test('a keyboard revoke of an offline card keeps the keyboard on its row', async ({ page }) => {
+	await page.goto('/summary?lang=en');
+	const card = page.getByRole('region', { name: 'Emergency card' });
+	await expect(card).toBeVisible();
+	await card.getByRole('button', { name: 'Create emergency card' }).click();
+	await card.getByRole('link', { name: 'Manage cards and links' }).click();
+	const row = page.getByTestId('shl-row').filter({ hasText: 'Offline card' }).first();
+	await expect(row.getByRole('button', { name: 'Who opened it · Emergency card' })).toHaveCount(0);
+	await row.getByRole('button', { name: 'Revoke · Emergency card' }).focus();
+	await page.keyboard.press('Enter');
+	// the confirmation starts on Cancel: Tab to Revoke, Enter
+	await expect(row.getByRole('button', { name: 'Cancel' })).toBeFocused();
+	await page.keyboard.press('Tab');
+	await page.keyboard.press('Enter');
+	await expect(row).toContainText('Revoked');
+	await expect(row).toBeFocused();
+});
