@@ -93,6 +93,14 @@ async fn only_the_household_admin_can_read_or_change_consent_and_each_change_is_
     .fetch_all(&w.db.pool)
     .await?;
     assert_eq!(changed, [Some("mcp_session_report=true".to_string())]);
+    let reads: i64 = sqlx::query_scalar(
+        "select count(*) from audit_event where actor_id = $1 and action = 'read' \
+         and tool = 'GET /api/mcp/session-report'",
+    )
+    .bind(w.family.user("alex"))
+    .fetch_one(&w.db.pool)
+    .await?;
+    assert_eq!(reads, 1, "one audit row for the one report the owner read");
     Ok(())
 }
 
@@ -110,6 +118,11 @@ fn call(actor: Uuid, token: Uuid, tool: &str, result: &str, measures: Option<(i3
     }
 }
 
+fn on(profile: Uuid, mut event: AuditEvent) -> AuditEvent {
+    event.profile_id = Some(profile);
+    event
+}
+
 #[tokio::test]
 async fn sessions_split_at_thirty_minutes_and_summarise_only_eligible_calls() -> anyhow::Result<()> {
     let w = World::new().await?;
@@ -124,7 +137,13 @@ async fn sessions_split_at_thirty_minutes_and_summarise_only_eligible_calls() ->
     for (minutes, event) in [
         (0, call(alex, a, "get_genome_findings", "ok", Some((2, 14)))),
         (0, call(alex, a, "get_genome_findings", "budget_cut", Some((1, 18)))),
-        (2, call(sam, b, "get_health_status", "ok", Some((0, 14)))),
+        (
+            2,
+            on(
+                w.family.profile("alex"),
+                call(sam, b, "get_health_status", "ok", Some((0, 14))),
+            ),
+        ),
         (
             3,
             call(other.user("alex"), foreign, "get_health_status", "ok", Some((99, 99))),
@@ -168,5 +187,86 @@ async fn sessions_split_at_thirty_minutes_and_summarise_only_eligible_calls() ->
         w.report(&w.alex).await?,
         (StatusCode::OK, json!({"enabled": false, "sessions": []}))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_report_shows_only_calls_the_owner_sees_in_the_audit_log() -> anyhow::Result<()> {
+    let w = World::new().await?;
+    let alex = w.family.user("alex");
+    let sam = w.family.user("sam");
+    let token = Uuid::new_v4();
+    let mut c = w.db.pool.acquire().await?;
+    let start = DateTime::parse_from_rfc3339("2026-11-23T12:00:00Z")?.with_timezone(&Utc);
+    for (minutes, event) in [
+        // sam's own profile, which alex does not manage: hidden from alex's audit log
+        (
+            0,
+            on(
+                w.family.profile("sam"),
+                call(sam, token, "get_genome_findings", "ok", Some((7, 30))),
+            ),
+        ),
+        // no profile at all, made by sam's token: hidden too
+        (1, call(sam, token, "list_profiles", "ok", Some((0, 2)))),
+        // alex's profile: alex manages it, so alex sees it
+        (
+            2,
+            on(
+                w.family.profile("alex"),
+                call(sam, token, "get_health_status", "ok", Some((1, 14))),
+            ),
+        ),
+        // alex's own token: alex sees every call it made
+        (3, call(alex, Uuid::new_v4(), "list_profiles", "ok", Some((0, 2)))),
+    ] {
+        write_audit_at(&mut c, &event, Some(start + TimeDelta::minutes(minutes))).await?;
+    }
+    drop(c);
+    assert_eq!(w.consent(&w.alex, true).await?.0, StatusCode::OK);
+    let (status, audit) = w.req(Method::GET, "/audit?via=mcp", &w.alex, Value::Null).await?;
+    assert_eq!(status, StatusCode::OK, "{audit}");
+    let mut seen: Vec<&str> = audit["items"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|i| i["tool"].as_str()).collect())
+        .unwrap_or_default();
+    seen.sort_unstable();
+    assert_eq!(seen, ["get_health_status", "list_profiles"], "{audit}");
+    let (status, report) = w.report(&w.alex).await?;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(
+        report["sessions"],
+        json!([
+            {"started_at": "2026-11-23T12:03:00Z", "ended_at": "2026-11-23T12:03:00Z", "tools": [
+                {"tool": "list_profiles", "calls": 1, "not_assessed_calls": 0, "not_assessed_n": 0, "budget_cuts": 0, "denied": 0, "errors": 0, "arg_bytes": 2}
+            ]},
+            {"started_at": "2026-11-23T12:02:00Z", "ended_at": "2026-11-23T12:02:00Z", "tools": [
+                {"tool": "get_health_status", "calls": 1, "not_assessed_calls": 1, "not_assessed_n": 1, "budget_cuts": 0, "denied": 0, "errors": 0, "arg_bytes": 14}
+            ]}
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_report_keeps_the_newest_fifty_sessions() -> anyhow::Result<()> {
+    let w = World::new().await?;
+    let alex = w.family.user("alex");
+    let token = Uuid::new_v4();
+    let mut c = w.db.pool.acquire().await?;
+    let start = DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")?.with_timezone(&Utc);
+    for i in 0..51 {
+        let event = call(alex, token, "list_profiles", "ok", Some((0, i + 1)));
+        write_audit_at(&mut c, &event, Some(start + TimeDelta::minutes(31 * i64::from(i)))).await?;
+    }
+    drop(c);
+    assert_eq!(w.consent(&w.alex, true).await?.0, StatusCode::OK);
+    let (status, report) = w.report(&w.alex).await?;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let bytes: Vec<i64> = report["sessions"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s["tools"][0]["arg_bytes"].as_i64()).collect())
+        .unwrap_or_default();
+    assert_eq!(bytes, (2..=51).rev().collect::<Vec<i64>>());
     Ok(())
 }

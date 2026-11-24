@@ -4,9 +4,9 @@ use axum::response::IntoResponse;
 use axum::routing::{get, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use ownhealth_auth::household::is_household_owner;
+use ownhealth_auth::household::{can_manage, is_household_owner};
 use ownhealth_core::Runtime;
-use ownhealth_core::access::Principal;
+use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::langs;
 use ownhealth_mcp::tools::{SESSION_REPORT_SETTING, session_report_enabled};
@@ -84,6 +84,14 @@ async fn get_report(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) 
     let (household_id, uid) = owner(&mut tx, &p).await?;
     let enabled = session_report_enabled(&mut tx, Some(household_id)).await?;
     let sessions = if enabled {
+        // The report reads the rows GET /audit shows this person: calls their own tokens made and
+        // calls on profiles they manage. Another member's calls elsewhere stay out, as in the log.
+        let managed: Vec<Uuid> = accessible_profiles(&mut tx, &p)
+            .await?
+            .iter()
+            .filter(|perm| can_manage(perm))
+            .map(|perm| perm.profile.id)
+            .collect();
         // An unrecorded tool call breaks the run without being part of either session. The audit
         // id gives calls with the same timestamp a stable order. Group by token internally only.
         sqlx::query_as(
@@ -95,6 +103,7 @@ async fn get_report(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) 
                 from audit_event e join app_user u on u.id = e.actor_id
                 where u.household_id = $1 and e.via = 'mcp' and e.actor_kind = 'token'
                       and e.token_id is not null and e.tool is not null and e.action like 'tools/call:%'
+                      and (e.actor_id = $2 or e.profile_id = any($3))
                 window by_token as (partition by e.token_id order by e.ts, e.id)
             ), numbered as (
                 select *, sum(case when not prev_recorded or ts - prev_at >= interval '30 minutes'
@@ -124,6 +133,8 @@ async fn get_report(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) 
             order by ended_at desc, last_id desc"#,
         )
         .bind(household_id)
+        .bind(uid)
+        .bind(&managed)
         .fetch_all(&mut *tx)
         .await?
     } else {
