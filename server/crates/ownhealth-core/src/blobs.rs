@@ -1559,6 +1559,48 @@ mod tests {
     }
 
     #[test]
+    fn resumed_restore_refuses_other_bytes_at_an_expected_path() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let original = b"original backup bytes";
+        let digest = sha256_reader(&original[..])?;
+        let expected = BTreeMap::from([(digest.as_str(), digest.as_str())]);
+        let target = settings.blobs_path().join(tree_rel(&digest).unwrap());
+        fs::create_dir_all(target.parent().unwrap())?;
+        fs::write(&target, b"unrelated blob bytes")?;
+        check_restore_target(&settings, &expected, true).expect_err("resume must compare the digest");
+        assert_eq!(fs::read(&target)?, b"unrelated blob bytes");
+        fs::write(&target, original)?;
+        check_restore_target(&settings, &expected, true)?;
+        Ok(())
+    }
+
+    #[test]
+    fn resumed_restore_refuses_a_different_nonempty_loss_record() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let profile = Uuid::new_v4();
+        let expected = RestoreLosses::from([(profile, BTreeSet::from(["a".repeat(64)]))]);
+        let stored = RestoreLosses::from([(profile, BTreeSet::from(["b".repeat(64)]))]);
+        write_restore_losses(&settings, &stored)?;
+
+        let error = record_restore_losses(&settings, &expected).expect_err("resume must refuse a different record");
+        assert!(
+            error.to_string().contains("differs from the losses for this restore"),
+            "{error}"
+        );
+        assert_eq!(read_restore_losses(&settings)?, stored);
+        record_restore_losses(&settings, &stored)?;
+        Ok(())
+    }
+
+    #[test]
     fn open_seek_reads_from_any_offset() -> Result<(), BlobError> {
         let dir = tempfile::tempdir()?;
         let store = BlobStore::new(dir.path())?;
