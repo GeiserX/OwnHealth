@@ -1057,7 +1057,7 @@ fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
     match mime {
         "application/fhir+json" | "application/fhir+ndjson" => "import.fhir_bundle",
         "application/zip" => "import.apple_health",
-        "application/hl7-cda+xml" => "import.ccda",
+        ownhealth_ingest_structured::ccda::MIME => ownhealth_ingest_structured::ccda::JOB,
         _ => "import.pdf",
     }
 }
