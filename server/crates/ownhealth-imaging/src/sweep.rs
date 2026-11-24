@@ -17,8 +17,14 @@
 //!
 //! Every deletion happens under the one StudyInstanceUID lock every Orthanc writer takes
 //! ([`ownhealth_core::orthanc::lock_study`]), after the record is read again under it, so a study an
-//! import is recording right now is never deleted. When Orthanc does not answer, the sweep ends
-//! without a failure and says so in its result: the next one finishes the work.
+//! import is recording right now is never deleted. Two sweeps at once (the hourly one and one after a
+//! profile delete) are safe for the same reason, and a study the other one deleted counts as gone.
+//!
+//! When Orthanc does not answer the list of its studies, the sweep ends without a failure, says so in
+//! its result and queues one more sweep in five minutes; after that, the hourly sweep finishes the
+//! work. A step that fails for one study or journal (Orthanc answers an error) does not stop the
+//! others: the sweep goes on, then fails with the count, so the job retries and, when the step keeps
+//! failing, ends with a `job_failed` item in review.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,19 +42,48 @@ use crate::orthanc::Orthanc;
 pub const JOB: &str = "imaging.sweep";
 /// How often the app queues a sweep.
 pub const EVERY_SECONDS: u64 = 3600;
+/// How long after a sweep that found Orthanc down the next one runs.
+pub const RETRY_SECONDS: i32 = 300;
 
 /// Queues a sweep in the caller's transaction, unless one is queued or running already.
 pub async fn enqueue(conn: &mut PgConnection) -> sqlx::Result<Option<i64>> {
+    enqueue_keyed(conn, JOB, &json!({})).await
+}
+
+/// Queues a sweep right after profile `profile_id` was deleted, in the caller's transaction. A sweep
+/// that runs already may have read the record before the delete and would leave the profile's
+/// studies, so this one has a key of its own.
+pub async fn enqueue_after_delete(conn: &mut PgConnection, profile_id: Uuid) -> sqlx::Result<Option<i64>> {
+    let key = format!("{JOB}:{profile_id}");
+    enqueue_keyed(conn, &key, &json!({"profile_id": profile_id.to_string()})).await
+}
+
+async fn enqueue_keyed(conn: &mut PgConnection, key: &str, payload: &Value) -> sqlx::Result<Option<i64>> {
     enqueue_job(
         conn,
         JOB,
-        &json!({}),
+        payload,
         EnqueueOptions {
             max_attempts: 3,
-            ..EnqueueOptions::dedupe(JOB)
+            ..EnqueueOptions::dedupe(key)
         },
     )
     .await
+}
+
+/// One more sweep in [`RETRY_SECONDS`], after one that found Orthanc down. True when it was queued.
+async fn retry_later(ctx: &JobContext) -> Result<bool, JobError> {
+    let mut tx = ctx.pool.begin().await?;
+    let id = enqueue_keyed(&mut tx, &format!("{JOB}:retry"), &json!({"retry": true})).await?;
+    if let Some(id) = id {
+        sqlx::query("update job set run_after = now() + make_interval(secs => $2) where id = $1")
+            .bind(id)
+            .bind(f64::from(RETRY_SECONDS))
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(id.is_some())
 }
 
 pub(crate) fn job(ctx: JobContext, job: Job) -> BoxFuture<'static, HandlerResult> {
@@ -56,19 +91,52 @@ pub(crate) fn job(ctx: JobContext, job: Job) -> BoxFuture<'static, HandlerResult
 }
 
 /// Runs one sweep. Imaging off: nothing to do.
-pub async fn run(ctx: JobContext, _job: Job) -> HandlerResult {
+pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     let Some(config) = ctx.settings.orthanc.clone() else {
         return Ok(Some(json!({"skipped": "imaging_off"})));
     };
     let orthanc = Orthanc::new(config).map_err(retry)?;
-    match sweep(&ctx, &orthanc).await {
-        Ok(done) => Ok(Some(done)),
-        // the next sweep (hourly, and at every start) finishes the work
-        Err(e) if e.type_name == "OrthancError" => {
-            tracing::warn!(error = %e.message, "the imaging sweep stopped: Orthanc did not answer");
-            Ok(Some(json!({"skipped": "orthanc_unreachable"})))
+    let held = match orthanc.study_ids().await {
+        Ok(held) => held,
+        Err(e) => {
+            tracing::warn!(error = %e, "the imaging sweep stopped: Orthanc did not answer");
+            // a sweep that was itself the retry leaves the rest to the hourly one
+            let again = job.payload.get("retry") != Some(&Value::Bool(true)) && retry_later(&ctx).await?;
+            return Ok(Some(json!({"skipped": "orthanc_unreachable", "retry_queued": again})));
         }
-        Err(e) => Err(e),
+    };
+    let mut failed = Failed::default();
+    let done = sweep(&ctx, &orthanc, &held, &mut failed).await?;
+    match failed.first {
+        None => Ok(Some(done)),
+        Some(first) => Err(JobError::typed(
+            "OrthancError",
+            format!(
+                "the imaging sweep could not finish {} of its steps in Orthanc, and did the others ({done}); \
+                 the first: {first}",
+                failed.count
+            ),
+        )),
+    }
+}
+
+/// The steps that failed in Orthanc: the sweep goes on without them.
+#[derive(Default)]
+struct Failed {
+    count: usize,
+    first: Option<String>,
+}
+
+impl Failed {
+    /// Counts an Orthanc failure; any other failure stops the sweep.
+    fn note(&mut self, e: JobError) -> Result<(), JobError> {
+        if e.type_name != "OrthancError" {
+            return Err(e);
+        }
+        tracing::warn!(error = %e.message, "an imaging sweep step failed in Orthanc; the sweep goes on");
+        self.count += 1;
+        self.first.get_or_insert(e.message);
+        Ok(())
     }
 }
 
@@ -92,7 +160,7 @@ pub(crate) fn recorded_series(fhir: &Value) -> BTreeSet<String> {
         .unwrap_or_default()
 }
 
-async fn sweep(ctx: &JobContext, orthanc: &Orthanc) -> Result<Value, JobError> {
+async fn sweep(ctx: &JobContext, orthanc: &Orthanc, held: &[String], failed: &mut Failed) -> Result<Value, JobError> {
     // 1. the journal of a purged upload
     let orphaned: Vec<String> = sqlx::query_scalar(
         "select distinct p.study_instance_uid from imaging_import_post p \
@@ -101,11 +169,17 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc) -> Result<Value, JobError> {
     .fetch_all(&ctx.pool)
     .await?;
     let mut journal = None;
+    let mut drained = 0;
     for uid in &orphaned {
         let mut tx = ctx.pool.begin().await?;
         lock_study(&mut tx, uid).await?;
-        recover_posts(&mut tx, &mut journal, &ctx.pool, orthanc, uid).await?;
-        tx.commit().await?;
+        match recover_posts(&mut tx, &mut journal, &ctx.pool, orthanc, uid).await {
+            Ok(()) => {
+                tx.commit().await?;
+                drained += 1;
+            }
+            Err(e) => failed.note(e)?,
+        }
     }
     drop(journal);
 
@@ -129,21 +203,13 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc) -> Result<Value, JobError> {
             )
         })
         .collect();
-    let held = orthanc.study_ids().await.map_err(retry)?;
     let mut removed_studies = 0;
     for id in held.iter().filter(|id| !named.contains_key(*id)) {
-        let uid = orthanc.study(id).await.map_err(retry)?.study_instance_uid;
-        let mut tx = ctx.pool.begin().await?;
-        lock_study(&mut tx, &uid).await?;
-        let still: bool = sqlx::query_scalar("select exists (select 1 from imaging_study where orthanc_id = $1)")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-        if !still {
-            orthanc.delete_study(id).await.map_err(retry)?;
-            removed_studies += 1;
+        match remove_unnamed(ctx, orthanc, id).await {
+            Ok(true) => removed_studies += 1,
+            Ok(false) => {}
+            Err(e) => failed.note(e)?,
         }
-        tx.commit().await?;
     }
 
     // 3 and 4. the recorded studies
@@ -151,39 +217,15 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc) -> Result<Value, JobError> {
     let mut removed_series = 0;
     let mut rebuild: BTreeSet<Uuid> = BTreeSet::new();
     for (id, study) in &named {
-        let series = if held.contains(id) {
-            orthanc.series_ids(id).await.map_err(retry)?
-        } else {
-            None
-        };
-        let Some(series) = series else {
-            rebuild.insert(study.profile_id);
-            continue;
-        };
-        let uids: BTreeSet<&String> = series.iter().map(|(_, uid)| uid).collect();
-        if study.series.iter().any(|s| !uids.contains(s)) {
-            rebuild.insert(study.profile_id);
-        }
-        if series.iter().all(|(_, uid)| study.series.contains(uid)) {
-            continue;
-        }
-        // read the record again under the lock: an import may have just counted the series
-        let mut tx = ctx.pool.begin().await?;
-        lock_study(&mut tx, &study.uid).await?;
-        let fhir: Option<Value> = sqlx::query_scalar("select fhir from imaging_study where orthanc_id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        if let Some(fhir) = fhir {
-            let counted = recorded_series(&fhir);
-            for (series_id, uid) in &series {
-                if !counted.contains(uid) {
-                    orthanc.delete_series(series_id).await.map_err(retry)?;
-                    removed_series += 1;
+        match check_recorded(ctx, orthanc, held.contains(id), id, study).await {
+            Ok((lacking, removed)) => {
+                if lacking {
+                    rebuild.insert(study.profile_id);
                 }
+                removed_series += removed;
             }
+            Err(e) => failed.note(e)?,
         }
-        tx.commit().await?;
     }
     let mut queued = 0;
     for profile_id in &rebuild {
@@ -193,10 +235,73 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc) -> Result<Value, JobError> {
         }
     }
     Ok(json!({
-        "drained_journals": orphaned.len(),
+        "drained_journals": drained,
         "removed_studies": removed_studies,
         "removed_series": removed_series,
         "rebuild_profiles": rebuild.len(),
         "rebuilds_queued": queued,
     }))
+}
+
+/// Deletes Orthanc study `id`, which the record did not name, unless the record names it once read
+/// again under its UID lock. True when it went.
+async fn remove_unnamed(ctx: &JobContext, orthanc: &Orthanc, id: &str) -> Result<bool, JobError> {
+    // another sweep may have deleted it since the list
+    let Some(info) = orthanc.study_if_held(id).await.map_err(retry)? else {
+        return Ok(false);
+    };
+    let mut tx = ctx.pool.begin().await?;
+    lock_study(&mut tx, &info.study_instance_uid).await?;
+    let still: bool = sqlx::query_scalar("select exists (select 1 from imaging_study where orthanc_id = $1)")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !still {
+        orthanc.delete_study(id).await.map_err(retry)?;
+    }
+    tx.commit().await?;
+    Ok(!still)
+}
+
+/// A recorded study: whether Orthanc lacks it or a series its record counts (so its profile needs a
+/// rebuild), and how many series no record counts it deleted.
+async fn check_recorded(
+    ctx: &JobContext,
+    orthanc: &Orthanc,
+    listed: bool,
+    id: &str,
+    study: &Named,
+) -> Result<(bool, usize), JobError> {
+    let series = if listed {
+        orthanc.series_ids(id).await.map_err(retry)?
+    } else {
+        None
+    };
+    let Some(series) = series else {
+        return Ok((true, 0));
+    };
+    let uids: BTreeSet<&String> = series.iter().map(|(_, uid)| uid).collect();
+    let lacking = study.series.iter().any(|s| !uids.contains(s));
+    if series.iter().all(|(_, uid)| study.series.contains(uid)) {
+        return Ok((lacking, 0));
+    }
+    // read the record again under the lock: an import may have just counted the series
+    let mut tx = ctx.pool.begin().await?;
+    lock_study(&mut tx, &study.uid).await?;
+    let fhir: Option<Value> = sqlx::query_scalar("select fhir from imaging_study where orthanc_id = $1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let mut removed = 0;
+    if let Some(fhir) = fhir {
+        let counted = recorded_series(&fhir);
+        for (series_id, uid) in &series {
+            if !counted.contains(uid) {
+                orthanc.delete_series(series_id).await.map_err(retry)?;
+                removed += 1;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok((lacking, removed))
 }

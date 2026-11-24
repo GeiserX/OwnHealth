@@ -8,11 +8,15 @@
 mod support;
 
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use ownhealth_core::Runtime;
 use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::demo::{Family, create_rivera_family};
+use ownhealth_core::documents::{NewDocument, create_document};
 use ownhealth_core::jobs::{self, JobContext};
+use ownhealth_core::orthanc::lock_study;
+use ownhealth_core::review::{self, ReviewItem};
 use ownhealth_core::testing::TestDb;
 use ownhealth_imaging::import::{JOB, REVIEW_KIND};
 use ownhealth_imaging::orthanc::Orthanc;
@@ -20,7 +24,9 @@ use ownhealth_imaging::remove::{self, RELEASE_JOB, Removal};
 use ownhealth_imaging::upload::{self, Recorded};
 use ownhealth_imaging::{rebuild, sweep};
 use serde_json::Value;
+use sqlx::PgConnection;
 use support::{ALEX, CARMEN, EXPLICIT_LE, FakeOrthanc, SAM, Study, study_files, zip_files};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 type R = anyhow::Result<()>;
@@ -28,6 +34,7 @@ type R = anyhow::Result<()>;
 const U1: &str = "1.2.826.0.1.3680043.10.999.43.1";
 const U2: &str = "1.2.826.0.1.3680043.10.999.43.2";
 const U3: &str = "1.2.826.0.1.3680043.10.999.43.3";
+const U9: &str = "1.2.826.0.1.3680043.10.999.43.9";
 
 struct Env {
     _db: TestDb,
@@ -104,10 +111,17 @@ impl Env {
     /// Queues a sweep, as the app does every hour and after a profile delete, and runs it.
     async fn sweep(&self) -> anyhow::Result<Value> {
         let mut conn = self.rt.pool.acquire().await?;
-        sweep::enqueue(&mut conn).await?;
+        let id = sweep::enqueue(&mut conn)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("a sweep is queued already"))?;
         drop(conn);
         assert_eq!(self.run(sweep::JOB).await?, 1);
-        let (state, result) = self.result(sweep::JOB).await?;
+        // that sweep's own result: one that found Orthanc down queues another
+        let (state, result): (String, Value) =
+            sqlx::query_as("select state, coalesce(result, 'null'::jsonb) from job where id = $1")
+                .bind(id)
+                .fetch_one(&self.rt.pool)
+                .await?;
         assert_eq!(state, "done", "{result}");
         Ok(result)
     }
@@ -440,5 +454,470 @@ async fn an_upload_with_a_recorded_study_or_a_running_import_stays() -> R {
     tx.commit().await?;
     assert!(e.rt.blobs.exists(BlobOwner::Profile(e.fam.profile("alex")), &sha));
     assert!(e.recorded(U1).await?.is_some());
+    Ok(())
+}
+
+/// Runs the queued jobs of one kind in a task of its own, so the test can hold a lock meanwhile.
+fn spawn_run(e: &Env, kind: &str) -> JoinHandle<anyhow::Result<usize>> {
+    let (ctx, kind) = (e.ctx.clone(), kind.to_string());
+    tokio::spawn(async move { Ok(jobs::drain(&ctx, "core", 20, Some(&[kind])).await?) })
+}
+
+/// Waits until a session of this test's database waits on a lock (true), or `task` ended (false).
+async fn until_waiting<T>(e: &Env, task: &JoinHandle<T>) -> anyhow::Result<bool> {
+    for _ in 0..400 {
+        if task.is_finished() {
+            return Ok(false);
+        }
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(&e.rt.pool)
+        .await?;
+        if waiting > 0 {
+            return Ok(true);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("nothing waited on a lock, and the task did not end")
+}
+
+async fn item(conn: &mut PgConnection, id: Uuid) -> anyhow::Result<ReviewItem> {
+    review::get_item(conn, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no item {id}"))
+}
+
+/// A disc of two other patients uploaded to Alex: both studies wait in review, nothing is recorded.
+async fn held_twice(e: &Env) -> anyhow::Result<(Recorded, String, Vec<Uuid>)> {
+    let mut disc = study_files(&Study::new(U3, CARMEN), "DICOM/P1");
+    disc.extend(study_files(&Study::new(U2, SAM), "DICOM/P2"));
+    let (up, sha) = e.upload("alex", &disc).await?;
+    e.import().await?;
+    let held: Vec<Uuid> = e.in_review("alex").await?.into_iter().map(|(id, ..)| id).collect();
+    assert_eq!(held.len(), 2, "{held:?}");
+    Ok((up, sha, held))
+}
+
+async fn uploads_left(e: &Env, up: &Recorded) -> anyhow::Result<i64> {
+    e.count(&format!(
+        "select count(*) from imaging_import where id = '{}'",
+        up.import_id
+    ))
+    .await
+}
+
+#[tokio::test]
+async fn two_held_studies_of_one_upload_closed_at_once_both_close_and_the_upload_goes() -> R {
+    let e = env().await?;
+    let (up, _, held) = held_twice(&e).await?;
+    let user = e.fam.user("alex");
+    let mut first = e.rt.pool.begin().await?;
+    review::dismiss(&mut first, held[0], user, None).await?;
+    let one = item(&mut first, held[0]).await?;
+    let mut second = e.rt.pool.begin().await?;
+    review::dismiss(&mut second, held[1], user, None).await?;
+    let two = item(&mut second, held[1]).await?;
+    // the first close settles while the second is still uncommitted, then the second settles
+    let a = tokio::spawn(async move {
+        let removed = remove::settle(&mut first, &one).await?;
+        first.commit().await?;
+        anyhow::Ok(removed)
+    });
+    until_waiting(&e, &a).await?;
+    let b = tokio::spawn(async move {
+        let removed = remove::settle(&mut second, &two).await?;
+        second.commit().await?;
+        anyhow::Ok(removed)
+    });
+    let (a, b) = (a.await?, b.await?);
+    assert!(matches!((&a, &b), (Ok(false), Ok(true))), "first {a:?}, second {b:?}");
+    assert_eq!(uploads_left(&e, &up).await?, 0);
+    assert!(e.in_review("alex").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn removing_an_upload_while_one_of_its_held_studies_is_closed_does_not_deadlock() -> R {
+    let e = env().await?;
+    let (up, _, held) = held_twice(&e).await?;
+    let user = e.fam.user("alex");
+    let mut closing = e.rt.pool.begin().await?;
+    review::dismiss(&mut closing, held[0], user, None).await?;
+    let one = item(&mut closing, held[0]).await?;
+    let (pool, import_id) = (e.rt.pool.clone(), up.import_id);
+    let removing = tokio::spawn(async move {
+        let mut tx = pool.begin().await?;
+        let r = remove::remove(&mut tx, import_id, Some(user), true).await?;
+        tx.commit().await?;
+        anyhow::Ok(r)
+    });
+    until_waiting(&e, &removing).await?;
+    let settled = match remove::settle(&mut closing, &one).await {
+        Ok(s) => {
+            closing.commit().await?;
+            Ok(s)
+        }
+        Err(err) => Err(err),
+    };
+    let removed = removing.await?;
+    assert!(matches!(settled, Ok(false)), "the close: {settled:?}");
+    assert!(
+        matches!(removed, Ok(Removal::Removed { dismissed: 1 })),
+        "the removal: {removed:?}"
+    );
+    assert_eq!(uploads_left(&e, &up).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_sweep_keeps_a_study_an_import_records_while_it_waits_for_the_lock() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    let (_, id, ..) = e.recorded(U1).await?.ok_or_else(|| anyhow::anyhow!("not recorded"))?;
+    let id = id.ok_or_else(|| anyhow::anyhow!("no Orthanc id"))?;
+    // the record does not name the study yet, as while an import records it under the UID lock
+    sqlx::query("update imaging_study set orthanc_id = null where study_instance_uid = $1")
+        .bind(U1)
+        .execute(&e.rt.pool)
+        .await?;
+    let mut import = e.rt.pool.begin().await?;
+    lock_study(&mut import, U1).await?;
+    let mut conn = e.rt.pool.acquire().await?;
+    sweep::enqueue(&mut conn).await?;
+    drop(conn);
+    let sweeping = spawn_run(&e, sweep::JOB);
+    assert!(
+        until_waiting(&e, &sweeping).await?,
+        "the sweep did not wait for the UID lock"
+    );
+    sqlx::query("update imaging_study set orthanc_id = $1 where study_instance_uid = $2")
+        .bind(&id)
+        .bind(U1)
+        .execute(&mut *import)
+        .await?;
+    import.commit().await?;
+    assert_eq!(sweeping.await??, 1);
+    let (state, swept) = e.result(sweep::JOB).await?;
+    assert_eq!(state, "done", "{swept}");
+    assert_eq!(swept["removed_studies"], 0, "{swept}");
+    assert_eq!(
+        e.orthanc.instances_under(U1),
+        6,
+        "the sweep deleted a study the record names"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_sweep_keeps_a_series_an_import_counts_while_it_waits_for_the_lock() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&three, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    // a second disc's import sends a third series and counts it under the UID lock
+    let client = Orthanc::new(e.orthanc.config())?;
+    client.store(support::image(&three, 2, 0, EXPLICIT_LE)).await?;
+    let mut import = e.rt.pool.begin().await?;
+    lock_study(&mut import, U1).await?;
+    let mut conn = e.rt.pool.acquire().await?;
+    sweep::enqueue(&mut conn).await?;
+    drop(conn);
+    let sweeping = spawn_run(&e, sweep::JOB);
+    assert!(
+        until_waiting(&e, &sweeping).await?,
+        "the sweep did not wait for the UID lock"
+    );
+    sqlx::query(
+        "update imaging_study set fhir = jsonb_set(fhir, '{series}', \
+         (fhir->'series') || jsonb_build_array(jsonb_build_object('uid', $1::text))) \
+         where study_instance_uid = $2",
+    )
+    .bind(three.series_uid(2))
+    .bind(U1)
+    .execute(&mut *import)
+    .await?;
+    import.commit().await?;
+    assert_eq!(sweeping.await??, 1);
+    let (state, swept) = e.result(sweep::JOB).await?;
+    assert_eq!(state, "done", "{swept}");
+    assert_eq!(swept["removed_series"], 0, "{swept}");
+    assert_eq!(
+        e.orthanc.series_under(U1).len(),
+        3,
+        "the sweep deleted a series the record counts"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rebuild_sends_nothing_for_a_study_the_record_let_go_while_it_waited() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    e.orthanc.wipe();
+    let mut conn = e.rt.pool.acquire().await?;
+    assert!(rebuild::enqueue(&mut conn, e.fam.profile("alex")).await?.is_some());
+    drop(conn);
+    let mut hold = e.rt.pool.begin().await?;
+    lock_study(&mut hold, U1).await?;
+    let rebuilding = spawn_run(&e, rebuild::JOB);
+    assert!(
+        until_waiting(&e, &rebuilding).await?,
+        "the rebuild did not wait for the UID lock"
+    );
+    // the record lets the study go meanwhile
+    sqlx::query("update imaging_study set orthanc_id = null where study_instance_uid = $1")
+        .bind(U1)
+        .execute(&mut *hold)
+        .await?;
+    hold.commit().await?;
+    assert_eq!(rebuilding.await??, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(rebuilt["sent_files"], 0, "{rebuilt}");
+    assert!(
+        e.orthanc.held().instances.is_empty(),
+        "the rebuild sent a study no record names"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_the_last_other_held_study_waits_for_an_accept_in_flight() -> R {
+    let e = env().await?;
+    let (up, _, held) = held_twice(&e).await?;
+    let user = e.fam.user("alex");
+    let mut accepting = e.rt.pool.begin().await?;
+    review::accept(&mut accepting, held[0], user, None).await?;
+    let (pool, other) = (e.rt.pool.clone(), held[1]);
+    let closing = tokio::spawn(async move {
+        let mut tx = pool.begin().await?;
+        review::dismiss(&mut tx, other, user, None).await?;
+        let it = item(&mut tx, other).await?;
+        let removed = remove::settle(&mut tx, &it).await?;
+        tx.commit().await?;
+        anyhow::Ok(removed)
+    });
+    let waited = until_waiting(&e, &closing).await?;
+    accepting.commit().await?;
+    assert!(waited, "the removal did not wait for the accept in flight");
+    assert!(!closing.await??, "the upload went while its accepted study was queued");
+    assert_eq!(uploads_left(&e, &up).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_study_orthanc_holds_without_a_counted_series_is_rebuilt() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &study_files(&three, "DICOM")).await?;
+    e.import().await?;
+    let (_, id, ..) = e.recorded(U1).await?.ok_or_else(|| anyhow::anyhow!("not recorded"))?;
+    let id = id.ok_or_else(|| anyhow::anyhow!("no Orthanc id"))?;
+    // Orthanc lost one counted series
+    let client = Orthanc::new(e.orthanc.config())?;
+    let series = client.series_ids(&id).await?.unwrap_or_default();
+    let lost = series
+        .iter()
+        .find(|(_, uid)| *uid == three.series_uid(1))
+        .ok_or_else(|| anyhow::anyhow!("no series 1"))?;
+    client.delete_series(&lost.0).await?;
+    assert_eq!(e.orthanc.series_under(U1).len(), 2);
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(
+        (rebuilt["rebuilt"].clone(), rebuilt["missing"].clone()),
+        (1.into(), 0.into()),
+        "{rebuilt}"
+    );
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        (0..3).map(|s| three.series_uid(s)).collect()
+    );
+    assert_eq!(e.orthanc.instances_under(U1), 9);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rebuilt_file_orthanc_files_under_another_study_is_taken_back() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    e.orthanc.wipe();
+    // the restored Orthanc reads U1's files as another study
+    if let Ok(mut m) = e.orthanc.misread.lock() {
+        *m = Some((U1.to_string(), U9.to_string()));
+    }
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(rebuilt["misfiled_files"], 6, "{rebuilt}");
+    assert_eq!(rebuilt["missing"], 1, "{rebuilt}");
+    assert!(
+        e.orthanc.held().instances.is_empty(),
+        "a misfiled file stayed: {:?}",
+        e.orthanc.held().studies
+    );
+    // that rebuild could not bring the study back: the hourly sweep does not read the same zips again
+    let again = e.sweep().await?;
+    assert_eq!(again["rebuild_profiles"], 1, "{again}");
+    assert_eq!(again["rebuilds_queued"], 0, "{again}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_study_orthanc_cannot_delete_neither_stops_the_sweep_nor_passes_unseen() -> R {
+    let e = env().await?;
+    let client = Orthanc::new(e.orthanc.config())?;
+    client
+        .store(support::image(&Study::new(U2, SAM), 0, 0, EXPLICIT_LE))
+        .await?;
+    client
+        .store(support::image(&Study::new(U3, CARMEN), 0, 0, EXPLICIT_LE))
+        .await?;
+    let ids: Vec<String> = e.orthanc.held().studies.keys().cloned().collect();
+    assert_eq!(ids.len(), 2);
+    // the study the sweep reaches first always fails to go
+    if let Ok(mut f) = e.orthanc.fail_study_delete.lock() {
+        *f = Some(ids[0].clone());
+    }
+    let mut conn = e.rt.pool.acquire().await?;
+    sweep::enqueue(&mut conn).await?;
+    drop(conn);
+    assert_eq!(e.run(sweep::JOB).await?, 1);
+    let held = e.orthanc.held();
+    assert!(
+        !held.studies.contains_key(&ids[1]),
+        "one failing study kept the next one"
+    );
+    assert!(held.studies.contains_key(&ids[0]));
+    // the sweep does not end done: it retries, and ends with a job_failed item if it keeps failing
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("select state, last_error from job where kind = $1 order by id desc limit 1")
+            .bind(sweep::JOB)
+            .fetch_one(&e.rt.pool)
+            .await?;
+    assert_eq!(state, "queued", "{error:?}");
+    assert!(error.is_some_and(|m| m.contains("1 ")), "no error recorded");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sweep_that_finds_orthanc_down_tries_again_in_five_minutes_once() -> R {
+    let e = env().await?;
+    e.orthanc.down.store(true, Ordering::SeqCst);
+    let waited = e.sweep().await?;
+    assert_eq!(waited["skipped"], "orthanc_unreachable", "{waited}");
+    let later = "select count(*) from job where kind = 'imaging.sweep' and state = 'queued' \
+                 and run_after > now() + interval '4 minutes' and run_after < now() + interval '6 minutes'";
+    assert_eq!(e.count(later).await?, 1, "no sweep queued for later");
+    // that retry finds Orthanc down too: the hourly sweep takes over, no third one is queued
+    sqlx::query("update job set run_after = now() where kind = 'imaging.sweep' and state = 'queued'")
+        .execute(&e.rt.pool)
+        .await?;
+    assert_eq!(e.run(sweep::JOB).await?, 1);
+    let queued = "select count(*) from job where kind = 'imaging.sweep' and state = 'queued'";
+    assert_eq!(e.count(queued).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rebuild_that_stopped_short_before_a_restore_does_not_hold_back_the_next() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    // a restore brings back the job table, with a rebuild that could not bring every study back
+    sqlx::query(
+        "insert into job (kind, payload, dedupe_key, state, finished_at, result) \
+         values ($1, jsonb_build_object('profile_id', $2::text), $3, 'done', now() - interval '1 hour', \
+         '{\"missing\": 1}')",
+    )
+    .bind(rebuild::JOB)
+    .bind(alex.to_string())
+    .bind(format!("{}:{alex}", rebuild::JOB))
+    .execute(&e.rt.pool)
+    .await?;
+    let mut conn = e.rt.pool.acquire().await?;
+    let queued = rebuild::enqueue(&mut conn, alex).await?;
+    assert!(
+        queued.is_some(),
+        "a rebuild from before this start held the next one back"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_reupload_of_the_same_zip_racing_the_removal_keeps_the_upload_and_its_zip() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    let (up, sha) = e.upload("alex", &study_files(&Study::new(U3, CARMEN), "DICOM")).await?;
+    e.import().await?;
+    assert_eq!(e.in_review("alex").await?.len(), 1);
+    // the same zip again, its import queued in a transaction that has not committed yet
+    let mut again = e.rt.pool.begin().await?;
+    let r = upload::record(&mut again, alex, &sha, 1, Some("cd.zip"), 6, None).await?;
+    assert!(r.duplicate && r.job_id.is_some(), "{r:?}");
+    let (pool, import_id) = (e.rt.pool.clone(), up.import_id);
+    let removing = tokio::spawn(async move {
+        let mut tx = pool.begin().await?;
+        let r = remove::remove(&mut tx, import_id, None, true).await?;
+        tx.commit().await?;
+        anyhow::Ok(r)
+    });
+    until_waiting(&e, &removing).await?;
+    again.commit().await?;
+    let removed = removing.await??;
+    assert_eq!(removed, Removal::Importing);
+    assert_eq!(uploads_left(&e, &up).await?, 1);
+    assert!(e.rt.blobs.exists(BlobOwner::Profile(alex), &sha));
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_release_keeps_the_zip_while_another_row_of_the_profile_names_its_bytes() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    let (up, sha) = e.upload("alex", &study_files(&Study::new(U3, CARMEN), "DICOM")).await?;
+    e.import().await?;
+    // a page image of one of Alex's documents with the same bytes (any column of BLOB_COLUMNS)
+    let other = "ab".repeat(32);
+    let mut tx = e.rt.pool.begin().await?;
+    let doc = create_document(
+        &mut tx,
+        &NewDocument::upload(e.fam.household_id, Some(alex), &other, "application/pdf", 10),
+    )
+    .await?;
+    sqlx::query(
+        "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, image_blob) \
+         values ($1, 1, 595, 842, false, decode($2, 'hex'))",
+    )
+    .bind(doc.id)
+    .bind(&sha)
+    .execute(&mut *tx)
+    .await?;
+    assert!(matches!(
+        remove::remove(&mut tx, up.import_id, None, true).await?,
+        Removal::Removed { .. }
+    ));
+    tx.commit().await?;
+    assert_eq!(e.run(RELEASE_JOB).await?, 1);
+    assert_eq!(e.result(RELEASE_JOB).await?.0, "done");
+    assert!(
+        e.rt.blobs.exists(BlobOwner::Profile(alex), &sha),
+        "the release removed bytes a document page of the profile names"
+    );
     Ok(())
 }

@@ -6,12 +6,21 @@
 //! `DELETE /api/imaging/imports/{id}`. Either way the removal refuses while a study of the upload is
 //! on the record (`imaging_import_study`), or while its import is queued or running. The upload row
 //! goes at once; the `imaging.release_upload` job then removes the zip, once no row of the profile
-//! names those bytes (and the plain copy once no row names them at all), waiting while a backup copies
-//! the files (`blobs::removal_lock`). A held study of a removed upload that is reopened refuses Accept
-//! (`import::accept`).
+//! names those bytes (and the plain copy once no row names them at all: the same check as a profile
+//! delete, `household::BLOB_COLUMNS`), waiting while a backup copies the files
+//! (`blobs::removal_lock`). A held study of a removed upload that is reopened refuses Accept with
+//! [`crate::import::UPLOAD_REMOVED`].
+//!
+//! Locks, in one order for every path: a held study's review item (a close or an accept holds its own
+//! item first; `DELETE` takes the open ones in id order), then the blob lock an upload of the same zip
+//! holds until its queued import commits (`documents::lock_blob`), then the upload row (an accept reads
+//! it with a shared lock). A close after a close reads the other items without a lock: while one is
+//! still being closed in another transaction it shows as open, so that close answers Waiting, and the
+//! other one, which waits on the upload's lock, removes the upload.
 
 use futures::future::BoxFuture;
-use ownhealth_core::blobs::{BlobOwner, removal_lock};
+use ownhealth_auth::household::{held_by, still_referenced};
+use ownhealth_core::blobs::{BlobOwner, removal_lock, sha256_hex_to_bytes};
 use ownhealth_core::documents::lock_blob;
 use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobError, enqueue};
 use ownhealth_core::review::ReviewItem;
@@ -45,15 +54,31 @@ pub enum Removal {
 /// Removes upload `import_id` in the caller's transaction. With `close_open`, its held studies that
 /// still wait in review are dismissed with it (by `user`); without, an open one keeps the upload.
 pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>, close_open: bool) -> Result<Removal> {
-    // An accept of a held study reads the upload with a shared lock (import::accept).
-    let row: Option<(Uuid, Vec<u8>)> =
-        sqlx::query_as("select profile_id, zip_blob from imaging_import where id = $1 for update")
-            .bind(import_id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    // the items first, as a close or an accept of one of them takes them
+    let mut open = if close_open {
+        open_items(&mut *conn, import_id, true).await?
+    } else {
+        Vec::new()
+    };
+    let row: Option<(Uuid, Vec<u8>)> = sqlx::query_as("select profile_id, zip_blob from imaging_import where id = $1")
+        .bind(import_id)
+        .fetch_optional(&mut *conn)
+        .await?;
     let Some((profile_id, zip)) = row else {
         return Ok(Removal::Gone);
     };
+    let sha = hex::encode(&zip);
+    // An upload of the same zip to the profile holds this lock shared until its queued import commits
+    // (upload::record): wait for it, so that import counts below.
+    lock_blob(&mut *conn, profile_id, &sha, false).await?;
+    // An accept of a held study reads the upload with a shared lock (import::accept).
+    let locked: Option<Uuid> = sqlx::query_scalar("select id from imaging_import where id = $1 for update")
+        .bind(import_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if locked.is_none() {
+        return Ok(Removal::Gone);
+    }
     let recorded: bool = sqlx::query_scalar(
         "select exists (select 1 from imaging_import_study where import_id = $1) \
          or exists (select 1 from imaging_study where import_id = $1)",
@@ -75,16 +100,11 @@ pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>
     if importing {
         return Ok(Removal::Importing);
     }
-    let open: Vec<Uuid> = sqlx::query_scalar(
-        "select id from review_item where kind = $1 and status = 'open' and ref_table = 'imaging_import' \
-         and ref_id = $2 order by id for update",
-    )
-    .bind(REVIEW_KIND)
-    .bind(import_id)
-    .fetch_all(&mut *conn)
-    .await?;
-    if !open.is_empty() && !close_open {
-        return Ok(Removal::Waiting);
+    if !close_open {
+        open = open_items(&mut *conn, import_id, false).await?;
+        if !open.is_empty() {
+            return Ok(Removal::Waiting);
+        }
     }
     sqlx::query(
         "update review_item set status = 'dismissed', decided_by = $2, decided_at = now(), decision_reason = $3 \
@@ -99,7 +119,6 @@ pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>
         .bind(import_id)
         .execute(&mut *conn)
         .await?;
-    let sha = hex::encode(&zip);
     let key = format!("{RELEASE_JOB}:{profile_id}:{sha}");
     enqueue(
         &mut *conn,
@@ -109,6 +128,23 @@ pub async fn remove(conn: &mut PgConnection, import_id: Uuid, user: Option<Uuid>
     )
     .await?;
     Ok(Removal::Removed { dismissed: open.len() })
+}
+
+/// The held studies of upload `import_id` that still wait in review, in id order; with `lock`, each
+/// one locked.
+async fn open_items(conn: &mut PgConnection, import_id: Uuid, lock: bool) -> Result<Vec<Uuid>> {
+    let sql = if lock {
+        "select id from review_item where kind = $1 and status = 'open' and ref_table = 'imaging_import' \
+         and ref_id = $2 order by id for update"
+    } else {
+        "select id from review_item where kind = $1 and status = 'open' and ref_table = 'imaging_import' \
+         and ref_id = $2 order by id"
+    };
+    Ok(sqlx::query_scalar(sql)
+        .bind(REVIEW_KIND)
+        .bind(import_id)
+        .fetch_all(&mut *conn)
+        .await?)
 }
 
 /// After a held study was dismissed or rejected, in the same transaction: removes its upload when
@@ -143,23 +179,12 @@ pub async fn release(ctx: JobContext, job: Job) -> HandlerResult {
     removal_lock(&mut tx, true).await.map_err(Error::from)?;
     // the lock an upload of the same bytes to the profile takes shared (upload::record)
     lock_blob(&mut tx, profile_id, &sha, false).await?;
-    let (mine, held): (bool, bool) = sqlx::query_as(
-        "select exists (select 1 from imaging_import where zip_blob = decode($1, 'hex') and profile_id = $2) \
-         or exists (select 1 from document where blob_sha256 = decode($1, 'hex') and profile_id = $2) \
-         or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex') and profile_id = $2), \
-         exists (select 1 from imaging_import where zip_blob = decode($1, 'hex')) \
-         or exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
-         or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
-         or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex'))",
-    )
-    .bind(&sha)
-    .bind(profile_id)
-    .fetch_one(&mut *tx)
-    .await?;
+    // every blob column a profile delete checks (household::BLOB_COLUMNS), with the same ownership
+    let bytes = sha256_hex_to_bytes(&sha).map_err(Error::from)?;
     let owner = BlobOwner::Profile(profile_id);
-    let gone = if !held {
+    let gone = if !still_referenced(&mut tx, &bytes).await? {
         ctx.blobs.delete(owner, &sha).map_err(Error::from)?
-    } else if !mine {
+    } else if !held_by(&mut tx, profile_id, &sha).await? {
         ctx.blobs.drop_sealed(owner, &sha).map_err(Error::from)?
     } else {
         false

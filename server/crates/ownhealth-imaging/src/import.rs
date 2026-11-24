@@ -1352,6 +1352,10 @@ async fn to_review_item(
     Ok(())
 }
 
+/// The refusal of an Accept whose upload was removed (crate::remove). The API answers it with a code
+/// of its own, `upload_removed`, so a page can say it in the person's language.
+pub const UPLOAD_REMOVED: &str = "This upload was removed. Upload the disc again to add this study.";
+
 /// Accepting an `imaging_study` item: a study whose patient did not match the profile, that came on a
 /// disc with other patients, or whose patient text did not decode, is imported as it is. The other reasons cannot be accepted: another
 /// profile or another patient holds the UID. The refusal names neither, since the item's reviewer may
@@ -1383,9 +1387,7 @@ pub async fn accept(
             .fetch_optional(&mut *conn)
             .await?;
     let Some(filename) = upload else {
-        return Err(Error::Review(
-            "This upload was removed. Upload the disc again to add this study.".into(),
-        ));
+        return Err(Error::Review(UPLOAD_REMOVED.into()));
     };
     let payload = json!({
         "import_id": import_id.to_string(),

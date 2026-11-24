@@ -229,16 +229,26 @@ impl Orthanc {
 
     /// One study's UID and patient as Orthanc read them (`GET /studies/{id}`).
     pub async fn study(&self, id: &str) -> Result<StudyInfo, OrthancError> {
+        self.study_if_held(id)
+            .await?
+            .ok_or_else(|| OrthancError("Orthanc answered 404 Not Found to a study read".into()))
+    }
+
+    /// [`Orthanc::study`], or None when Orthanc holds no such study (any more).
+    pub async fn study_if_held(&self, id: &str) -> Result<Option<StudyInfo>, OrthancError> {
         if !is_orthanc_id(id) {
             return Err(OrthancError("Orthanc named a study with an id that is not one".into()));
         }
         let res = self.send(self.http.get(self.url(&format!("/studies/{id}")))).await?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         let v = Orthanc::json(res, "a study read").await?;
         let tag = |group: &str, name: &str| v[group][name].as_str().unwrap_or_default().trim().to_string();
-        Ok(StudyInfo {
+        Ok(Some(StudyInfo {
             study_instance_uid: tag("MainDicomTags", "StudyInstanceUID"),
             patient_id: tag("PatientMainDicomTags", "PatientID"),
-        })
+        }))
     }
 
     /// The series of one study and their actual instance counts. Ask Orthanc for the computed

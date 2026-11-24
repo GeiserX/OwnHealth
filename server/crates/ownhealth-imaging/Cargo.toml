@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# the blob checks of a profile delete (household::BLOB_COLUMNS), for the release of a removed upload's zip
+ownhealth-auth.workspace = true
 ownhealth-core.workspace = true
 ownhealth-ingest-pdf.workspace = true
 chrono.workspace = true
@@ -31,7 +33,6 @@ zip.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true
-ownhealth-auth.workspace = true
 ownhealth-core = { workspace = true, features = ["testing"] }
 ownhealth-ops.workspace = true
 anyhow.workspace = true

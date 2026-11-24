@@ -32,16 +32,26 @@ use crate::sweep::recorded_series;
 /// The job kind.
 pub const JOB: &str = "imaging.rebuild";
 
-/// Queues a rebuild of `profile_id`'s studies, unless one is queued or running, or one finished in
-/// the last day and could not bring every study back (the sweep runs every hour: without this it
-/// would read the same zips again each time).
+/// This run of the app: each rebuild names the run that queued it.
+static RUN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn this_run() -> &'static str {
+    RUN.get_or_init(|| ownhealth_core::ids::token_hex(8))
+}
+
+/// Queues a rebuild of `profile_id`'s studies, unless one is queued or running, or one that this run
+/// of the app queued finished in the last day and could not bring every study back (the sweep runs
+/// every hour: without this it would read the same zips again each time). A rebuild of an earlier run
+/// does not count: after a restart, and after a restore that brought its job back, Orthanc may be
+/// another one.
 pub async fn enqueue(conn: &mut PgConnection, profile_id: Uuid) -> sqlx::Result<Option<i64>> {
     let key = format!("{JOB}:{profile_id}");
     let stuck: bool = sqlx::query_scalar(
-        "select exists (select 1 from job where dedupe_key = $1 and state = 'done' \
+        "select exists (select 1 from job where dedupe_key = $1 and state = 'done' and payload->>'run' = $2 \
          and finished_at > now() - interval '1 day' and coalesce((result->>'missing')::int, 0) > 0)",
     )
     .bind(&key)
+    .bind(this_run())
     .fetch_one(&mut *conn)
     .await?;
     if stuck {
@@ -50,7 +60,7 @@ pub async fn enqueue(conn: &mut PgConnection, profile_id: Uuid) -> sqlx::Result<
     enqueue_job(
         conn,
         JOB,
-        &json!({"profile_id": profile_id.to_string()}),
+        &json!({"profile_id": profile_id.to_string(), "run": this_run()}),
         EnqueueOptions::dedupe(&key),
     )
     .await

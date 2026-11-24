@@ -366,6 +366,8 @@ pub struct FakeOrthanc {
     pub after_store: Arc<Mutex<Option<AfterStore>>>,
     /// While set, every request answers 503, as a stopped Orthanc behind its proxy does.
     pub down: Arc<AtomicBool>,
+    /// A delete of this study answers 500 every time, as an Orthanc that cannot remove one resource.
+    pub fail_study_delete: Arc<Mutex<Option<String>>>,
 }
 
 fn json_answer(status: StatusCode, v: Value) -> Response {
@@ -399,6 +401,7 @@ impl FakeOrthanc {
             lookup_response: Arc::default(),
             after_store: Arc::default(),
             down: Arc::default(),
+            fail_study_delete: Arc::default(),
         };
         let me = fake.clone();
         let app = Router::new().fallback(move |req: Request| {
@@ -629,6 +632,9 @@ impl FakeOrthanc {
             }
             (Method::DELETE, p) if p.starts_with("/studies/") => {
                 let id = p.trim_start_matches("/studies/");
+                if self.fail_study_delete.lock().ok().and_then(|f| f.clone()).as_deref() == Some(id) {
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
                 if let Ok(mut h) = self.held.lock() {
                     if h.studies.remove(id).is_none() {
                         return StatusCode::NOT_FOUND.into_response();
