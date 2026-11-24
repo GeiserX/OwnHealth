@@ -68,7 +68,7 @@ async fn demo() -> anyhow::Result<Demo> {
 fn opts(now: DateTime<Utc>) -> Options {
     Options {
         threshold: THRESHOLD,
-        now,
+        now: Some(now),
         lock_timeout: Duration::from_millis(300),
         attempts: 2,
     }
@@ -697,25 +697,9 @@ async fn the_app_role_keeps_its_rights_and_leaves_the_switch_to_the_owner() -> R
     let d = demo().await?;
     let pool = &d.db.pool;
     let now = Utc::now();
-    let role = format!("oh_s65_{}", ownhealth_core::ids::token_hex(4));
-    let password = ownhealth_core::ids::token_hex(16);
-    for sql in [
-        format!("create role {role} login password '{password}'"),
-        format!("grant connect, temporary on database \"{}\" to {role}", d.db.name),
-        format!("grant usage on schema public to {role}"),
-        format!("grant select, insert, update, delete on all tables in schema public to {role}"),
-        format!("grant usage, select on all sequences in schema public to {role}"),
-    ] {
-        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
-    }
-    let app = PgPoolOptions::new()
-        .max_connections(3)
-        .connect_with(
-            PgConnectOptions::from_str(&d.db.url)?
-                .username(&role)
-                .password(&password),
-        )
-        .await?;
+    let role = TestLogin::new(&d.db, None).await?;
+    role.grant_app_rights(&d.db).await?;
+    let app = role.connect(&d.db).await?;
     let outcome = async {
         let r = partition::run(&app, &opts(now)).await?;
         assert_eq!(state(&r), "needs_owner", "{r}");
@@ -724,7 +708,7 @@ async fn the_app_role_keeps_its_rights_and_leaves_the_switch_to_the_owner() -> R
         assert_eq!(r["cutoff"], Value::Null, "{r}");
 
         // an owner's run stopped before the switch, with a sample set aside: the app's run names the
-        // cutoff that now refuses samples (it may not read the samples set aside)
+        // cutoff that now refuses samples.
         let mut c = pool.acquire().await?;
         let src = watch(&mut c, d.alex).await?;
         let far = cutoff_for(now) + chrono::Duration::days(3);
@@ -736,6 +720,14 @@ async fn the_app_role_keeps_its_rights_and_leaves_the_switch_to_the_owner() -> R
         assert_eq!(r["cutoff"], json!(cutoff_for(now).to_rfc3339()), "{r}");
         let note = r["note"].as_str().unwrap_or_default();
         assert!(note.contains("refused"), "{note}");
+        let raised = Options {
+            threshold: u64::MAX,
+            ..opts(now)
+        };
+        let r = partition::run(&app, &raised).await?;
+        assert_eq!(state(&r), "needs_owner", "{r}");
+        assert_eq!(r["ok"], false, "{r}");
+        assert_eq!(r["cutoff"], json!(cutoff_for(now).to_rfc3339()), "{r}");
 
         assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
         let mut c = app.acquire().await?;
@@ -764,12 +756,6 @@ async fn the_app_role_keeps_its_rights_and_leaves_the_switch_to_the_owner() -> R
     }
     .await;
     app.close().await;
-    sqlx::query(AssertSqlSafe(format!("drop owned by {role}")))
-        .execute(pool)
-        .await?;
-    sqlx::query(AssertSqlSafe(format!("drop role {role}")))
-        .execute(pool)
-        .await?;
     outcome
 }
 
@@ -857,20 +843,24 @@ async fn a_sample_set_aside_stays_out_when_its_document_moved_or_was_retracted_m
     )
     .await?;
     store::write(&mut conn, d.alex, None, vec![hr(c, 92.0, src)], Conflict::Keep).await?;
+    wearables::recompute_rollups(&mut conn, d.alex, None, Some(&[src])).await?;
     drop(conn);
 
+    let role = TestLogin::new(&d.db, None).await?;
+    role.grant_app_rights(&d.db).await?;
+    let app = role.connect(&d.db).await?;
     let p = partition::prepare(pool, &opts(now)).await?;
     assert_eq!(p["held_aside"], 3, "{p}");
 
-    let mut tx = pool.begin().await?;
-    ownhealth_ingest_pdf::assign_document(&mut tx, &d.blobs, moved, other, Uuid::new_v4(), None).await?;
-    tx.commit().await?;
-    let mut tx = pool.begin().await?;
-    retract_document_facts(&mut tx, retracted, "wrong file").await?;
+    let mut tx = app.begin().await?;
+    let retraction = retract_document_facts(&mut tx, retracted, "wrong file").await?;
     sqlx::query("update document set status = 'retracted', status_reason = 'wrong file' where id = $1")
         .bind(retracted)
         .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
+    let mut tx = pool.begin().await?;
+    ownhealth_ingest_pdf::assign_document(&mut tx, &d.blobs, moved, other, Uuid::new_v4(), None).await?;
     tx.commit().await?;
 
     let r = partition::run(pool, &opts(now)).await?;
@@ -887,6 +877,17 @@ async fn a_sample_set_aside_stays_out_when_its_document_moved_or_was_retracted_m
             .fetch_one(pool)
             .await?;
     assert_eq!(on_alex, 0, "the moved document's samples left the old profile");
+    let buckets: Vec<(String, i32, Option<f32>)> = sqlx::query_as(
+        "select bucket, n, v_avg from wearable_rollup where profile_id = $1 and metric = 'hr' \
+         and source_id = $2 and t >= $3 order by bucket",
+    )
+    .bind(d.alex)
+    .bind(src)
+    .bind(month_start(far))
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(buckets, [("day".into(), 1, Some(92.0)), ("hour".into(), 1, Some(92.0))]);
+    assert_eq!(retraction["wearable_samples"], 1, "{retraction}");
     Ok(())
 }
 
@@ -944,22 +945,12 @@ async fn a_member_of_the_owners_role_switches_and_the_owner_keeps_every_table() 
     )
     .fetch_one(pool)
     .await?;
-    let role = format!("oh_s65m_{}", ownhealth_core::ids::token_hex(4));
-    let password = ownhealth_core::ids::token_hex(16);
-    for sql in [
-        format!("create role {role} login password '{password}'"),
-        format!("grant \"{owner}\" to {role}"),
-    ] {
-        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
-    }
-    let member = PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(
-            PgConnectOptions::from_str(&d.db.url)?
-                .username(&role)
-                .password(&password),
-        )
+    let role = TestLogin::new(&d.db, Some(owner.clone())).await?;
+    let name = &role.name;
+    sqlx::query(AssertSqlSafe(format!("grant \"{owner}\" to {name}")))
+        .execute(pool)
         .await?;
+    let member = role.connect(&d.db).await?;
     let outcome = async {
         let r = partition::run(&member, &opts(now)).await?;
         assert_eq!(state(&r), "converted", "{r}");
@@ -977,13 +968,6 @@ async fn a_member_of_the_owners_role_switches_and_the_owner_keeps_every_table() 
     }
     .await;
     member.close().await;
-    for sql in [
-        format!("reassign owned by {role} to \"{owner}\""),
-        format!("drop owned by {role}"),
-        format!("drop role {role}"),
-    ] {
-        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
-    }
     outcome
 }
 
@@ -1000,6 +984,8 @@ async fn a_busy_switch_keeps_its_cutoff_and_says_what_waits_for_the_next_run() -
     let src = watch(&mut c, d.alex).await?;
     store::write(&mut c, d.alex, None, vec![hr(far, 58.0, src)], Conflict::Keep).await?;
     drop(c);
+    let prepared = partition::prepare(pool, &opts(now)).await?;
+    assert_eq!(prepared["held_aside"], 1, "{prepared}");
     let mut writer = PgConnection::connect(&d.db.url).await?;
     let mut tx = writer.begin().await?;
     sqlx::query("update profile set display_name = display_name where id = $1")
@@ -1012,10 +998,9 @@ async fn a_busy_switch_keeps_its_cutoff_and_says_what_waits_for_the_next_run() -
     assert_eq!(state(&r), "busy", "{r}");
     assert_eq!(relkind(pool).await?, "r");
     assert_eq!(r["cutoff"], json!(cutoff_for(now).to_rfc3339()), "{r}");
-    assert_eq!(r["held_aside"], 1, "{r}");
     let note = r["note"].as_str().unwrap_or_default();
     assert!(!note.contains("readers"), "{note}");
-    assert!(note.contains("refused"), "{note}");
+    assert!(note.contains("refused") && note.contains("1 samples"), "{note}");
 
     let again = partition::run(pool, &opts(now)).await?;
     assert_eq!(state(&again), "converted", "{again}");
@@ -1103,5 +1088,299 @@ async fn an_import_the_cutoff_refuses_waits_for_the_switch_without_spending_an_a
             .execute(pool)
             .await?;
     }
+    Ok(())
+}
+
+struct TestLogin {
+    name: String,
+    password: String,
+    database_url: String,
+    owner: Option<String>,
+}
+
+impl TestLogin {
+    async fn new(db: &TestDb, owner: Option<String>) -> anyhow::Result<Self> {
+        let name = format!("oh_s65_{}", ownhealth_core::ids::token_hex(6));
+        let password = ownhealth_core::ids::token_hex(16);
+        sqlx::query(AssertSqlSafe(format!("create role {name} login password '{password}'")))
+            .execute(&db.pool)
+            .await?;
+        Ok(Self {
+            name,
+            password,
+            database_url: db.url.clone(),
+            owner,
+        })
+    }
+
+    async fn grant_app_rights(&self, db: &TestDb) -> R {
+        let name = &self.name;
+        for sql in [
+            format!("grant connect, temporary on database \"{}\" to {name}", db.name),
+            format!("grant usage on schema public to {name}"),
+            format!("grant select, insert, update, delete on all tables in schema public to {name}"),
+            format!("grant usage, select on all sequences in schema public to {name}"),
+        ] {
+            sqlx::query(AssertSqlSafe(sql)).execute(&db.pool).await?;
+        }
+        Ok(())
+    }
+
+    async fn connect(&self, db: &TestDb) -> anyhow::Result<PgPool> {
+        Ok(PgPoolOptions::new()
+            .max_connections(3)
+            .connect_with(
+                PgConnectOptions::from_str(&db.url)?
+                    .username(&self.name)
+                    .password(&self.password),
+            )
+            .await?)
+    }
+}
+
+impl Drop for TestLogin {
+    fn drop(&mut self) {
+        let name = self.name.clone();
+        let database_url = self.database_url.clone();
+        let owner = self.owner.clone();
+        // A panic can unwind the runtime thread. Use a private runtime so cleanup finishes first.
+        let cleanup = std::thread::spawn(move || -> R {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            runtime.block_on(async move {
+                let mut admin = PgConnection::connect(&database_url).await?;
+                if let Some(owner) = owner {
+                    let owner = owner.replace('"', r#""""#);
+                    sqlx::query(AssertSqlSafe(format!(r#"reassign owned by {name} to "{owner}""#)))
+                        .execute(&mut admin)
+                        .await?;
+                }
+                sqlx::query(AssertSqlSafe(format!("drop owned by {name}")))
+                    .execute(&mut admin)
+                    .await?;
+                sqlx::query(AssertSqlSafe(format!("drop role {name}")))
+                    .execute(&mut admin)
+                    .await?;
+                Ok(())
+            })
+        })
+        .join();
+        if let Ok(Err(error)) = cleanup {
+            eprintln!("partition test login cleanup failed: {error}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn partition_login_is_removed_after_an_error_or_panic() -> R {
+    let db = std::sync::Arc::new(TestDb::empty().await?);
+    for panic in [false, true] {
+        // Record only roles created by this fixture in this test.
+        let (send, recv) = tokio::sync::oneshot::channel();
+        let work_db = db.clone();
+        let task = tokio::spawn(async move {
+            let role = TestLogin::new(&work_db, None).await?;
+            let _ = send.send(role.name.clone());
+            role.grant_app_rights(&work_db).await?;
+            assert!(!panic, "exercise role cleanup during unwind");
+            Err::<(), _>(anyhow::anyhow!("exercise role cleanup after an error"))
+        });
+        let name = recv.await?;
+        match task.await {
+            Ok(outcome) => assert!(!panic && outcome.is_err()),
+            Err(error) => assert!(panic && error.is_panic()),
+        }
+        let leaked: bool = sqlx::query_scalar("select exists (select 1 from pg_roles where rolname = $1)")
+            .bind(&name)
+            .fetch_one(&db.pool)
+            .await?;
+        if leaked {
+            for sql in [format!("drop owned by {name}"), format!("drop role {name}")] {
+                sqlx::query(AssertSqlSafe(sql)).execute(&db.pool).await?;
+            }
+        }
+        assert!(!leaked, "the test login survived an error or panic");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn prepare_leaves_monthly_maintenance_to_run() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+    let later = add_months(month_start(now), 3);
+    let before = parts(pool).await?;
+    let report = partition::prepare(pool, &opts(later)).await?;
+    assert_eq!(state(&report), "partitioned", "{report}");
+    assert_eq!(parts(pool).await?, before, "{report}");
+    let report = partition::run(pool, &opts(later)).await?;
+    assert!(!report["made"].as_array().is_none_or(Vec::is_empty), "{report}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn analyze_during_preparation_counts_staged_rows_toward_the_threshold() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    store::write(
+        &mut c,
+        d.alex,
+        None,
+        vec![hr(cutoff_for(now), 58.0, src)],
+        Conflict::Keep,
+    )
+    .await?;
+    drop(c);
+    sqlx::query("analyze wearable_sample").execute(pool).await?;
+    let (rows, _) = fingerprint(pool).await?;
+    let options = Options {
+        threshold: u64::try_from(rows - 1)?,
+        ..opts(now)
+    };
+    assert_eq!(partition::prepare(pool, &options).await?["held_aside"], 1);
+    sqlx::query("analyze wearable_sample").execute(pool).await?;
+    let report = partition::run(pool, &options).await?;
+    assert_eq!(state(&report), "converted", "{report}");
+    assert_eq!(report["rows"], rows, "{report}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let mut c = pool.acquire().await?;
+    let src = watch(&mut c, d.alex).await?;
+    sqlx::query(
+        "insert into wearable_sample (profile_id, metric, t, source_id, v) \
+         select $1, 'hr', $2::timestamptz + n * interval '1 second', $3, 60 \
+         from generate_series(1, 50001) n",
+    )
+    .bind(d.alex)
+    .bind(cutoff_for(now))
+    .bind(src)
+    .execute(&mut *c)
+    .await?;
+    drop(c);
+    let before = fingerprint(pool).await?;
+    let mut reader = pool.begin().await?;
+    sqlx::query("lock table wearable_sample in access share mode")
+        .execute(&mut *reader)
+        .await?;
+    let report = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&report), "needs_maintenance", "{report}");
+    assert_eq!(report["ok"], false, "{report}");
+    assert!(
+        report["note"].as_str().unwrap_or_default().contains("50001"),
+        "{report}"
+    );
+    reader.rollback().await?;
+    let added: bool = sqlx::query_scalar(
+        "select to_regclass('wearable_sample_ahead') is not null \
+         or to_regclass('wearable_sample_hist_t_idx') is not null \
+         or exists (select 1 from pg_constraint where conrelid = 'wearable_sample'::regclass \
+                    and conname = 'wearable_sample_hist_bound')",
+    )
+    .fetch_one(pool)
+    .await?;
+    assert!(!added, "the refused run changed the schema");
+    assert_eq!(fingerprint(pool).await?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deleting_a_profile_as_the_app_cascades_to_its_private_staged_samples() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let role = TestLogin::new(&d.db, None).await?;
+    let outcome = async {
+        role.grant_app_rights(&d.db).await?;
+        let app = role.connect(&d.db).await?;
+        let other: Uuid = sqlx::query_scalar("select id from profile where id <> $1 order by slug limit 1")
+            .bind(d.alex)
+            .fetch_one(pool)
+            .await?;
+        let now = Utc::now();
+        let far = cutoff_for(now);
+        let mut c = pool.acquire().await?;
+        for profile in [d.alex, other] {
+            let source = watch(&mut c, profile).await?;
+            store::write(&mut c, profile, None, vec![hr(far, 60.0, source)], Conflict::Keep).await?;
+        }
+        drop(c);
+        assert_eq!(partition::prepare(pool, &opts(now)).await?["held_aside"], 2);
+        // This caller can delete profiles but cannot see staging through information_schema.
+        sqlx::query(AssertSqlSafe(format!(
+            "revoke all on wearable_sample_ahead from {}",
+            role.name
+        )))
+        .execute(pool)
+        .await?;
+        let mut tx = app.begin().await?;
+        ownhealth_auth::household::delete_profile(&mut tx, d.alex).await?;
+        tx.commit().await?;
+        app.close().await;
+        let remaining: Vec<Uuid> = sqlx::query_scalar("select profile_id from wearable_sample_ahead")
+            .fetch_all(pool)
+            .await?;
+        Ok::<_, anyhow::Error>((remaining, other))
+    }
+    .await;
+    let (remaining, other) = outcome?;
+    assert_eq!(remaining, [other]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn partitioning_does_not_inherit_new_table_default_grants() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let role = TestLogin::new(&d.db, None).await?;
+    let outcome = async {
+        let name = &role.name;
+        let now = Utc::now();
+        let mut c = pool.acquire().await?;
+        let source = watch(&mut c, d.alex).await?;
+        store::write(
+            &mut c,
+            d.alex,
+            None,
+            vec![hr(cutoff_for(now), 60.0, source)],
+            Conflict::Keep,
+        )
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "alter default privileges grant select on tables to {name}"
+        )))
+        .execute(&mut *c)
+        .await?;
+        drop(c);
+        let readable = |table: &'static str| async move {
+            sqlx::query_scalar::<_, bool>("select has_table_privilege($1, $2, 'SELECT')")
+                .bind(name)
+                .bind(table)
+                .fetch_one(pool)
+                .await
+        };
+        let before = readable("wearable_sample").await?;
+        assert_eq!(state(&partition::prepare(pool, &opts(now)).await?), "prepared");
+        let staged = readable("wearable_sample_ahead").await?;
+        assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
+        let parent = readable("wearable_sample").await?;
+        let default = readable("wearable_sample_default").await?;
+        let month: bool = sqlx::query_scalar("select has_table_privilege($1, $2, 'SELECT')")
+            .bind(name)
+            .bind(month_name(cutoff_for(now)))
+            .fetch_one(pool)
+            .await?;
+        Ok::<_, anyhow::Error>([before, staged, parent, default, month])
+    }
+    .await;
+    assert_eq!(outcome?, [false; 5], "a reporting role gained wearable access");
     Ok(())
 }

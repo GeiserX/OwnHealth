@@ -111,7 +111,7 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 ## Large wearable histories
 
-A watch that records every heartbeat adds millions of samples a year. Once the samples table holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50,000,000), a job splits it into one partition a month. A query over a few days then reads only the months it needs. Below the threshold, nothing changes.
+A watch that records every heartbeat adds millions of samples a year. Once the samples table holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50,000,000), a job splits it into one partition a month. A query over a few days then reads only the months it needs.
 
 The job changes tables, so it runs as the database owner, in the `admin` service. The app's own role cannot run it. The app checks every hour. When the table is past the threshold, it logs a warning that the job is due, and repeats it once a day until the job runs. If the app connects as the database owner (an install with one database role), it runs the job itself every hour. Run the job from cron once a day:
 
@@ -119,17 +119,23 @@ The job changes tables, so it runs as the database owner, in the `admin` service
 30 3 * * *  cd /opt/ownhealth && docker compose run --rm -T admin ownhealth partition >> partition.log 2>&1
 ```
 
-Below the threshold, a run reads the table's row estimate and stops. The first run past it does three things:
+Before a cutoff exists, a run below the threshold reads the table's row estimate and stops. The first run past the threshold has three steps.
 
 1. It builds two indexes on the table. The app keeps reading and writing.
 2. It checks every sample once against a cutoff date. The app keeps reading and writing.
-3. It puts the old table in place as the partition of every sample before the cutoff. No sample is copied. This step locks the table only for that change. If another session holds the table, or a table it references, the step waits up to 2 seconds, tries again a few times, and otherwise leaves the switch to the next run.
+3. It attaches the old table as the historical partition without copying or scanning its rows. The switch takes an exclusive lock while it attaches the table and restores any samples set aside. If another session holds a lock the switch needs, the switch waits up to 2 seconds per lock attempt. After several attempts it leaves the switch to the next run.
 
 The cutoff is the first day of a month, at least 7 days ahead. Between steps 2 and 3, a new sample dated on or after the cutoff is refused. A device with a correct clock sends none. An import that holds such a sample waits: it runs again every hour, and it does not use up its retries, so it lands after step 3. When step 3 is left to the next run, that wait lasts until the next run, so keep the daily cron. Samples that a device with a wrong clock dated after the cutoff are set aside during that time. They come back in step 3, unless their file was retracted or moved to another person meanwhile.
 
 Every later run makes next month's partition ahead of time. A sample dated after every month lands in a default partition. It moves into its month when a run makes that month.
 
-You can stop the job at any time and run it again: it goes on from where it stopped. It prints a JSON report and exits 1 when work is left for a later run: `busy` (another run or another session held the table) or `needs_owner` (it ran as the app's role). When such a run leaves the cutoff in place, the report gives the `cutoff`, and its `note` says that samples dated on or after it are refused until the next run. Backups, restores, the export and profile deletion work the same on the split table. To change the threshold, set `OWNHEALTH_PARTITION_ROWS` in `.env`.
+You can stop the job at any time and run it again. It prints a JSON report and exits 1 when work remains.
+
+- **`busy`** means another session held a lock the job needed.
+- **`needs_owner`** means the app's role cannot continue or clear a cutoff. Run the command as the database owner.
+- **`needs_maintenance`** means an exclusive step would move more than 50,000 samples. The report gives the count. Review the affected samples during a maintenance window.
+
+When the report includes a `cutoff`, new samples on or after it wait until the owner completes the switch or clears the cutoff. Backups, restores, export, and profile deletion work on the split table. Set `OWNHEALTH_PARTITION_ROWS` in `.env` to change the threshold.
 
 ## Monitoring the inboxes
 

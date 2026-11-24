@@ -171,6 +171,9 @@ pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
                                 Some("needs_owner") if warn => {
                                     tracing::warn!(report = %r, "wearable_sample needs the partition job: run `ownhealth partition` as the database owner");
                                 }
+                                Some("needs_maintenance") => {
+                                    tracing::warn!(report = %r, "wearable_sample partitioning needs a maintenance window");
+                                }
                                 Some("busy") => tracing::info!(report = %r, "the wearable_sample partition job will try again"),
                                 _ if r["made"].as_array().is_some_and(|m| !m.is_empty()) => {
                                     tracing::info!(report = %r, "made wearable_sample partitions ahead of time");

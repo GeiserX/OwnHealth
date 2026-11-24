@@ -43,6 +43,9 @@ pub enum Error {
     /// apart from a database that is down. HTTP 500, as any other server fault.
     #[error("{0}")]
     AuditUncheckable(String),
+    /// The wearable partition job found unexpected schema state. HTTP 500.
+    #[error("{0}")]
+    PartitionState(String),
     /// A profile key that does not open, or cannot be read or stored (`keys.rs`). Its message names
     /// no key. HTTP 500, as any other server fault.
     #[error(transparent)]

@@ -4451,6 +4451,7 @@ dependencies = [
  "image",
  "ownhealth-auth",
  "ownhealth-core",
+ "ownhealth-ingest-structured",
  "ownhealth-rules",
  "rand 0.10.3",
  "regex",
