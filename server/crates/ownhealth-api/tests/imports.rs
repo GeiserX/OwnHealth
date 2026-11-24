@@ -1401,21 +1401,18 @@ async fn round_5_job_reads_are_audited_by_profile() -> R {
         .get("sam", &format!("/jobs?ids={},{},{}", ids[0], ids[1], ids[2]))
         .await?;
     assert_eq!(status, StatusCode::OK, "{response}");
-    assert_eq!(response["jobs"].as_array().map(Vec::len), Some(3), "{response}");
-    assert!(
-        response["jobs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|j| j["result"]["accepted"] == 1)
-    );
+    let jobs = response["jobs"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no jobs: {response}"))?;
+    assert_eq!(jobs.len(), 3, "{response}");
+    assert!(jobs.iter().all(|j| j["result"]["accepted"] == 1), "{response}");
 
     for (slug, expected_ids) in [("alex", vec![ids[2], ids[0]]), ("lucia", vec![ids[1]])] {
         let (status, log) = a.get("alex", &format!("/audit?profile={slug}")).await?;
         assert_eq!(status, StatusCode::OK, "{log}");
         let rows: Vec<_> = log["items"]
             .as_array()
-            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("no audit items: {log}"))?
             .iter()
             .filter(|r| r["tool"] == "GET /api/jobs")
             .collect();
@@ -1523,7 +1520,9 @@ async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
     let route = "/profiles/alex/observations?category=laboratory";
     let (status, owner) = a.get("alex", route).await?;
     assert_eq!(status, StatusCode::OK, "{owner}");
-    let owner_rows = owner["items"].as_array().unwrap();
+    let owner_rows = owner["items"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no observations: {owner}"))?;
     assert_eq!(owner_rows.len(), 3, "{owner}");
     assert!(
         owner_rows
@@ -1542,7 +1541,7 @@ async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
     assert_eq!(status, StatusCode::OK, "{reader}");
     let reader_codes: Vec<_> = reader["items"]
         .as_array()
-        .unwrap()
+        .ok_or_else(|| anyhow::anyhow!("no observations: {reader}"))?
         .iter()
         .map(|o| &o["loinc"])
         .collect();

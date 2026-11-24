@@ -1864,7 +1864,10 @@ fn round_5_an_unsupported_structured_result_value_is_listed_as_unread() -> R {
     assert_eq!(observations[1]["valueQuantity"]["value"], json!(12));
     for obs in [observations[0], observations[2]] {
         assert!(
-            !obs.as_object().unwrap().keys().any(|key| key.starts_with("value")),
+            !obs.as_object()
+                .ok_or_else(|| anyhow::anyhow!("expected an Observation object: {obs}"))?
+                .keys()
+                .any(|key| key.starts_with("value")),
             "{obs}"
         );
     }
