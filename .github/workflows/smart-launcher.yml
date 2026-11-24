@@ -25,6 +25,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: smart-launcher-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   standalone:
     name: SMART standalone launch and PKCE
