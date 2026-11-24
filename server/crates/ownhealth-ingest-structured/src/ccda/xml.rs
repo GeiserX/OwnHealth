@@ -40,6 +40,17 @@ pub fn too_large(size: u64) -> Error {
     ))
 }
 
+/// The text an element points at (`first`) and the words written beside the pointer (`second`),
+/// joined, at most [`MAX_TEXT`] characters: `second` keeps up to half of them, so neither is lost.
+pub fn joined(first: &str, second: &str) -> String {
+    let keep = second.chars().count().min(MAX_TEXT / 2);
+    let first: String = first.chars().take(MAX_TEXT.saturating_sub(keep + 2)).collect();
+    let first = first.trim_end();
+    let room = MAX_TEXT.saturating_sub(first.chars().count() + 2);
+    let second: String = second.chars().take(room).collect();
+    format!("{first}; {}", second.trim_end())
+}
+
 /// The refusal of a document whose body is a `nonXMLBody` (a scan or an attached file): no coded
 /// section to read, and its reference is never followed.
 pub fn unstructured() -> Error {

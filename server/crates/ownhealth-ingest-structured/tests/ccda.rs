@@ -1606,3 +1606,24 @@ fn an_as_needed_precondition_is_kept_or_listed() -> R {
     assert_eq!(s.not_read, ["criterion 2.16.840.1.113883.10.20.22.4.25"]);
     Ok(())
 }
+
+/// T4: a sig that points at the narrative and goes on with its own words keeps both (the H&P's
+/// albuterol: "2 puffs QID PRN wheezing" is written inline), within the 2,000 characters a text has.
+#[test]
+fn a_sig_keeps_its_own_words_beside_the_narrative_it_points_at() -> R {
+    let c = convert(&fixture("history-and-physical.xml"))?;
+    let albuterol = ccd1_medicine(&c, "albuterol")?;
+    let text = albuterol["dosage"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("Proventil 0.09 MG/ACTUAT inhalant solution"), "{text}");
+    assert!(text.contains("2 puffs QID PRN wheezing"), "{text}");
+
+    let c = convert(&medicine_with(""))?;
+    let text = resources(&c, "MedicationStatement")[0]["dosage"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(text.starts_with("narrative "), "{text}");
+    assert!(text.contains("inline"), "{text}");
+    assert!(text.chars().count() <= 2_000, "{}", text.chars().count());
+    Ok(())
+}

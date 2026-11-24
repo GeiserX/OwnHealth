@@ -39,7 +39,8 @@
 //!   with that reason, never imported as active or as resolved (con-4).
 //! - A supply order or a dispense inside a Medication Activity is listed as not read. Its first
 //!   precondition that names something ("as needed for wheezing") is the dosage's
-//!   `asNeededCodeableConcept`; any other is listed as not read.
+//!   `asNeededCodeableConcept`; any other is listed as not read. A `<reference>` with words written
+//!   beside it keeps both (the narrative first).
 //! - Only an Immunization Activity in `EVN` mood that is not active is a vaccine given; a planned one
 //!   (`INT`), another mood or an active one is listed as not read.
 //! - A Results organizer is a DiagnosticReport with the Observations as its results; a Vital Signs
@@ -603,8 +604,11 @@ impl<'a, 'i> Conv<'a, 'i> {
         self.patient.as_ref().map(|p| json!({"reference": p}))
     }
 
-    /// The text an element holds: the narrative its `<reference value="#x"/>` points at, else its own.
+    /// The text an element holds: the narrative its `<reference value="#x"/>` points at, then any
+    /// words written beside the reference ("2 puffs QID PRN wheezing"), within the bound of a text
+    /// ([`xml::joined`]); else its own.
     fn narrative_of(&self, n: Node<'_, '_>) -> Option<String> {
+        let own = xml::text(n);
         if let Some(r) = child(n, "reference").and_then(|r| attr(r, "value"))
             && let Some(target) = self.narrative.get(r.trim_start_matches('#'))
             && let Some(t) = self
@@ -614,9 +618,12 @@ impl<'a, 'i> Conv<'a, 'i> {
                 .or_insert_with(|| xml::text(*target))
                 .clone()
         {
-            return Some(t);
+            return Some(match own {
+                Some(o) if !t.contains(&o) => xml::joined(&t, &o),
+                _ => t,
+            });
         }
-        xml::text(n)
+        own
     }
 
     fn coding(n: Node<'_, '_>) -> Option<Value> {
