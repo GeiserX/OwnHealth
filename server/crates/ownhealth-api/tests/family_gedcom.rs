@@ -484,7 +484,14 @@ async fn the_import_reveals_no_birth_year_the_family_list_hides() -> R {
             .await?;
     }
     // Alex sees the mother and her year: she is already there
-    let (s, v) = upload(&a, "alex", "/profiles/alex/family/gedcom", tree(1955).as_bytes(), Some("0")).await?;
+    let (s, v) = upload(
+        &a,
+        "alex",
+        "/profiles/alex/family/gedcom",
+        tree(1955).as_bytes(),
+        Some("0"),
+    )
+    .await?;
     assert_eq!(s, StatusCode::CREATED, "{v}");
     assert_eq!(answer(&v), (Some(0), Some(1)), "{v}");
     Ok(())
