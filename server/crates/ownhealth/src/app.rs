@@ -151,7 +151,8 @@ pub fn break_glass_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> Joi
 /// partitions, and then makes next month's partition ahead of time. Below the threshold a run reads
 /// the row estimate and changes nothing. When the app's role does not own the table (the compose
 /// files), it warns that the operator runs `ownhealth partition`: once, again after a run that ended
-/// otherwise, and once a day while nobody does.
+/// otherwise, and once a day while nobody does. A `needs_maintenance` run (too many future-dated
+/// samples to move, which no later run resolves by itself) warns on the same schedule.
 pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
     let rt = rt.clone();
     tokio::spawn(async move {
@@ -171,8 +172,8 @@ pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
                                 Some("needs_owner") if warn => {
                                     tracing::warn!(report = %r, "wearable_sample needs the partition job: run `ownhealth partition` as the database owner");
                                 }
-                                Some("needs_maintenance") => {
-                                    tracing::warn!(report = %r, "wearable_sample partitioning needs a maintenance window");
+                                Some("needs_maintenance") if warn => {
+                                    tracing::warn!(report = %r, "wearable_sample partitioning waits on future-dated samples: retract or correct the files the report names, then run `ownhealth partition`");
                                 }
                                 Some("busy") => tracing::info!(report = %r, "the wearable_sample partition job will try again"),
                                 _ if r["made"].as_array().is_some_and(|m| !m.is_empty()) => {
@@ -190,31 +191,33 @@ pub fn partition_job(rt: &Runtime, mut stop: watch::Receiver<bool>) -> JoinHandl
     })
 }
 
-/// When the hourly partition run warns that it needs the owner: at the first `needs_owner` of a
-/// stretch, then once a day (every 24th run) while the stretch lasts. A run that ends in another state
-/// ends the stretch, so a month missed later warns again.
+/// When the hourly partition run warns that a person must act (`needs_owner` or
+/// `needs_maintenance`): at the first run of a stretch in that state, then once a day (every 24th
+/// run) while the stretch lasts. A run that ends in another state ends the stretch, so a month missed
+/// later warns again.
 #[derive(Debug, Default)]
 struct OwnerDue {
-    /// `needs_owner` runs since the last warning, while a stretch lasts.
-    quiet: Option<u32>,
+    /// The state of the stretch, and its runs since the last warning.
+    quiet: Option<(&'static str, u32)>,
 }
 
 impl OwnerDue {
     const EVERY: u32 = 24;
+    const STATES: [&'static str; 2] = ["needs_owner", "needs_maintenance"];
 
     /// Whether a run that ended in `state` warns.
     fn warn(&mut self, state: Option<&str>) -> bool {
-        if state != Some("needs_owner") {
+        let Some(state) = Self::STATES.into_iter().find(|s| state == Some(*s)) else {
             self.quiet = None;
             return false;
-        }
+        };
         match self.quiet {
-            Some(n) if n + 1 < Self::EVERY => {
-                self.quiet = Some(n + 1);
+            Some((s, n)) if s == state && n + 1 < Self::EVERY => {
+                self.quiet = Some((s, n + 1));
                 false
             }
             _ => {
-                self.quiet = Some(0);
+                self.quiet = Some((state, 0));
                 true
             }
         }
@@ -373,5 +376,22 @@ mod tests {
         let quiet = (0..23).filter(|_| d.warn(Some("needs_owner"))).count();
         assert_eq!(quiet, 0);
         assert!(d.warn(Some("needs_owner")), "the 25th hourly run warns again");
+    }
+
+    /// A group of future-dated samples too large to move never resolves by itself, so the hourly
+    /// run of an owner-role app reports needs_maintenance every hour: it warns like needs_owner, once
+    /// per stretch and once a day. A change from one state to the other warns at once.
+    #[test]
+    fn needs_maintenance_warns_once_a_stretch_and_once_a_day() {
+        let mut d = OwnerDue::default();
+        assert!(d.warn(Some("needs_maintenance")));
+        let quiet = (0..23).filter(|_| d.warn(Some("needs_maintenance"))).count();
+        assert_eq!(quiet, 0);
+        assert!(d.warn(Some("needs_maintenance")), "the 25th hourly run warns again");
+        assert!(d.warn(Some("needs_owner")), "another state warns at once");
+        assert!(d.warn(Some("needs_maintenance")));
+        assert!(!d.warn(Some("needs_maintenance")));
+        assert!(!d.warn(Some("busy")));
+        assert!(d.warn(Some("needs_maintenance")), "a stretch that ended warns again");
     }
 }
