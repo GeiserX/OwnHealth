@@ -1102,6 +1102,39 @@ async fn a_reconnect_that_signs_in_as_another_patient_is_refused_and_changes_not
 }
 
 #[tokio::test]
+async fn a_refused_reconnect_on_a_profile_with_no_key_makes_no_key() -> R {
+    let s = setup().await?;
+    let (id, _) = s.connect(None, t0()).await?;
+    let url = s.launch(Some(id)).await?;
+    sqlx::query("delete from profile_key where profile_id = $1")
+        .bind(s.alex())
+        .execute(&s.db.pool)
+        .await?;
+    // a process with a fresh keyring, so no key of the profile is held in memory
+    let fresh =
+        SecretBox::new(&[5u8; 32])?.with_keys(Some(std::sync::Arc::new(Keyring::new(s.kek.clone(), s.db.url.clone()))));
+    let mut c = s.db.pool.acquire().await?;
+    let p = oauth::take_state(&mut c, &param(&url, "state").unwrap_or_default(), BINDER).await?;
+    let other = TokenSet {
+        access: SecretString::new("fake-access-of-someone-else"),
+        refresh: Some(SecretString::new("fake-refresh-of-someone-else")),
+        expires_in: Some(3600),
+        refresh_expires_in: None,
+        scope: None,
+        patient: Some("fake-patient-someone-else".into()),
+    };
+    let r = oauth::save_connection(&mut c, &fresh, &p, &s.client, &other, t0() + Duration::hours(1)).await;
+    assert_eq!(refused_code(r), "another_patient");
+    drop(c);
+    let keys: i64 = sqlx::query_scalar("select count(*) from profile_key where profile_id = $1")
+        .bind(s.alex())
+        .fetch_one(&s.db.pool)
+        .await?;
+    assert_eq!(keys, 0, "a refused reconnect made a key for the profile");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_reconnect_launched_for_another_profile_does_not_touch_the_source() -> R {
     let s = setup().await?;
     let (id, t) = s.connect(None, t0()).await?;

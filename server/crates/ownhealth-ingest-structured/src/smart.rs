@@ -1230,6 +1230,60 @@ mod tests {
         assert!(!fhir_id("sam rivera"));
     }
 
+    /// A resource identity starts exactly one slash after the base: no missing or doubled slash.
+    #[test]
+    fn a_resource_url_sits_exactly_under_the_base() {
+        let base = "https://fhir.labnorte.example/r4";
+        let id = |url: String, kind| smart_medication::entry_id(&url, base, kind).map(String::from);
+        assert_eq!(id(format!("{base}/Observation/x"), "Observation").as_deref(), Some("x"));
+        assert_eq!(id(format!("{base}Observation/x"), "Observation"), None);
+        assert_eq!(id(format!("{base}//Medication/m1"), "Medication"), None);
+        let order = json!({"resourceType": "MedicationRequest", "id": "o"});
+        let own = format!("{base}/MedicationRequest/o");
+        let named = |raw: &str| smart_medication::Reference::in_order(raw, base, Some(&own), &order);
+        assert!(named(&format!("{base}/Medication/m1")).is_some());
+        assert!(named(&format!("{base}//Medication/m1")).is_none());
+        assert!(named(&format!("{base}Medication/m1")).is_none());
+    }
+
+    /// An issuer typed with a trailing slash, or a server at the root of its host, gives the same base.
+    #[test]
+    fn a_trailing_slash_or_a_host_only_issuer_gives_a_usable_base() {
+        for (issuer, base) in [
+            ("https://fhir.labnorte.example/r4/", "https://fhir.labnorte.example/r4"),
+            ("https://fhir.labnorte.example/r4", "https://fhir.labnorte.example/r4"),
+            ("https://fhir.labnorte.example", "https://fhir.labnorte.example"),
+            ("https://fhir.labnorte.example/", "https://fhir.labnorte.example"),
+        ] {
+            let got = fhir_base(issuer);
+            assert_eq!(got.as_deref(), Some(base), "{issuer}");
+            let url = format!("{base}/Observation/x");
+            assert_eq!(
+                smart_medication::entry_id(&url, &got.unwrap_or_default(), "Observation"),
+                Some("x"),
+                "{issuer}"
+            );
+        }
+    }
+
+    /// A search entry whose fullUrl names another id than the resource it holds is not imported.
+    #[test]
+    fn a_search_entry_whose_url_names_another_id_is_refused() {
+        let base = "https://fhir.labnorte.example/r4";
+        let entry = |url_id: &str| {
+            json!({"fullUrl": format!("{base}/Condition/{url_id}"),
+                   "resource": {"resourceType": "Condition", "id": "c1",
+                                "subject": {"reference": "Patient/sam-rivera"}}})
+        };
+        let mut g = Gathered::default();
+        let found = json!({"resourceType": "Bundle", "type": "searchset", "entry": [entry("c2"), entry("c1")]});
+        gather_entries(&mut g, &found, (base, "sam-rivera"), "Condition", false);
+        let urls: Vec<_> = g.entries.iter().map(|(url, _)| url.clone()).collect();
+        assert_eq!(urls, [Some(format!("{base}/Condition/c1"))]);
+        assert_eq!(g.skipped.get("resource_url"), Some(&1));
+        assert!(g.problems.iter().any(|p| p.code == "resource_url"));
+    }
+
     fn obs(id: &str, v: f64) -> Value {
         json!({"resourceType": "Observation", "id": id, "meta": {"versionId": "1"}, "valueQuantity": {"value": v}})
     }

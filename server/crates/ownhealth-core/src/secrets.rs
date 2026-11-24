@@ -536,4 +536,27 @@ mod tests {
         assert!(format!("{b:?}").starts_with("SecretBox(") && !format!("{b:?}").contains("Keyring"));
         Ok(())
     }
+
+    /// An access token sealed for one grant of a source opens only as that grant.
+    #[tokio::test]
+    async fn an_access_token_sealed_for_one_grant_does_not_open_as_another() -> Result<()> {
+        let mut secret = [0u8; 32];
+        rand::fill(&mut secret[..]); // made at run time, never a literal
+        let ring = Arc::new(Keyring::in_memory(crate::keys::Kek::from_secret(&secret)?));
+        let b = sb().with_keys(Some(ring));
+        let (source, grant, other) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let token = SecretString::new("fake-access-LabNorte-0001");
+        for profile in [Some(Uuid::new_v4()), None] {
+            let sealed = seal_source_access(&b, profile, source, Some(grant), &token).await?;
+            let opened = open_source_access(&b, profile, source, Some(grant), &sealed).await?;
+            assert_eq!(opened.expose(), token.expose());
+            for (s, g) in [(source, Some(other)), (source, None), (Uuid::new_v4(), Some(grant))] {
+                assert!(
+                    open_source_access(&b, profile, s, g, &sealed).await.is_err(),
+                    "{profile:?} opened as {s} {g:?}"
+                );
+            }
+        }
+        Ok(())
+    }
 }
