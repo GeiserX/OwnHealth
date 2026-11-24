@@ -23,8 +23,9 @@
 //!   stored size, before the file is read), holds more than 2 million nodes or nests deeper than 256
 //!   levels is refused (`Error::Invalid`), never parsed further: no entity is ever expanded and
 //!   nothing recurses ([`xml`]). So is a file saved as UTF-16 (the reason says to save it as UTF-8),
-//!   and a document whose body is a `nonXMLBody` (a scan or an attached file, with no coded section;
-//!   its reference is never followed).
+//!   a document whose body is a `nonXMLBody` (a scan or an attached file, with no coded section;
+//!   its reference is never followed), and one that carries more than 64 different security labels
+//!   (every record gets every label of its document, so the labels are capped; none is dropped).
 //! - The import locks its document row first, so a move of the document waits for the run to commit
 //!   (and then retracts what it wrote) instead of slipping in while it converts. A document that is
 //!   no longer active (retracted after a move queued its run) is not read: the run writes nothing

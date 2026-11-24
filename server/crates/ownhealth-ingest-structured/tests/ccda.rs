@@ -1627,3 +1627,81 @@ fn a_sig_keeps_its_own_words_beside_the_narrative_it_points_at() -> R {
     assert!(text.chars().count() <= 2_000, "{}", text.chars().count());
     Ok(())
 }
+
+/// A document whose Privacy Markings Section carries `n` different DS4P labels, and one problem.
+fn labelled(n: usize) -> Vec<u8> {
+    let marks: String = (0..n)
+        .map(|i| format!("<entry>{}</entry>", security_label(&format!("L{i}"))))
+        .collect();
+    document(&format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.3.3445.4"/><title>Privacy Markings</title>{marks}</section></component>{}"#,
+        problems_section(&problem_entry(
+            "p",
+            r#"code="233604007" displayName="Pneumonia""#,
+            r#"<low value="20200110"/>"#,
+            "",
+        ))
+    ))
+}
+
+/// T2: every record gets every label of its document, so the labels a file may carry are capped: 64
+/// different ones are read in full, 65 refuse the file. No label is ever dropped.
+#[test]
+fn more_than_64_security_labels_refuse_the_file() -> R {
+    let c = convert(&labelled(64))?;
+    assert_eq!(
+        label_codes(&c, "Condition").iter().map(Vec::len).collect::<Vec<_>>(),
+        [64]
+    );
+    match convert(&labelled(65)) {
+        Err(Error::Invalid(m)) => assert!(m.contains("more than 64 different security labels"), "{m}"),
+        other => panic!("65 labels were read: {other:?}"),
+    }
+    // the same label many times is one label
+    let c = convert(
+        &String::from_utf8(labelled(1))?
+            .replace(
+                "</section></component>",
+                &(format!("<entry>{}</entry>", security_label("L0")).repeat(100) + "</section></component>"),
+            )
+            .into_bytes(),
+    )?;
+    assert_eq!(label_codes(&c, "Condition"), vec![vec!["L0".to_string()]]);
+    Ok(())
+}
+
+/// T2: a file refused for its labels writes nothing: no document, no record, no review item.
+#[tokio::test]
+async fn a_file_with_too_many_security_labels_writes_nothing() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = as_isabella(&mut tx, &fam, "lucia").await?;
+    tx.commit().await?;
+    let bytes = labelled(65);
+    let sha = env
+        .blobs
+        .put_bytes(ownhealth_core::blobs::BlobOwner::Profile(p), &bytes)?;
+    let settings = Arc::new(env.db.settings(env.dir.path())?);
+    let ctx = JobContext::new(env.db.pool.clone(), settings, env.blobs.clone());
+    let payload = json!({"profile_id": p.to_string(), "household_id": fam.household_id.to_string(),
+        "blob_sha256": sha, "filename": "labels.xml"});
+    let Err(e) = ccda::import_ccda_job(ctx, job(payload)).await else {
+        panic!("a file with 65 labels imported");
+    };
+    assert!(e.permanent, "{e}");
+    assert!(
+        e.to_string()
+            .contains("not a readable C-CDA document: the file carries more than 64 different security labels"),
+        "{e}"
+    );
+    let mut conn = env.db.pool.acquire().await?;
+    let docs: i64 = sqlx::query_scalar("select count(*) from document where blob_sha256 = decode($1, 'hex')")
+        .bind(&sha)
+        .fetch_one(&mut *conn)
+        .await?;
+    assert_eq!(docs, 0);
+    assert_eq!(count(&mut conn, "condition", p).await?, 0);
+    assert_eq!(count(&mut conn, "review_item", p).await?, 0);
+    Ok(())
+}

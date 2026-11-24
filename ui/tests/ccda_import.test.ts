@@ -60,3 +60,13 @@ test('a C-CDA upload\'s items speak of the uploaded file and count entries or se
 		assert.doesNotMatch(es[k], /descargad|recurso/i, k);
 	}
 });
+
+test('a C-CDA file refused for too many security labels says so in the person\'s language', () => {
+	const has = (k: string) => k in en;
+	const why = 'the file carries more than 64 different security labels; a C-CDA document needs far fewer';
+	assert.equal(errKey(null, `not a readable C-CDA document: ${why}`, has), 'err_ccda_too_many_labels');
+	assert.ok(en.err_ccda_too_many_labels && es.err_ccda_too_many_labels);
+	assert.notEqual(en.err_ccda_too_many_labels, es.err_ccda_too_many_labels);
+	assert.match(en.err_ccda_too_many_labels, /64/);
+	assert.match(es.err_ccda_too_many_labels, /64/);
+});

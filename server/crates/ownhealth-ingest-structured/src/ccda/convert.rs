@@ -33,7 +33,8 @@
 //!   the record sensitive as it does for a labelled FHIR file. A section's labels reach its
 //!   subsections at any depth. The labels in a Privacy Markings Section (templateId
 //!   `2.16.840.1.113883.3.3445.4`) and a confidentialityCode on the structuredBody go to every
-//!   resource of the document. A Security Observation is never a record of its own.
+//!   resource of the document. A Security Observation is never a record of its own. A file with more
+//!   than 64 different labels is refused.
 //! - An entered-in-error allergy or problem has no `clinicalStatus` (FHIR R4 ait-2, con-5). A problem
 //!   whose status observation says active while its effectiveTime has an end is listed for review
 //!   with that reason, never imported as active or as resolved (con-4).
@@ -49,7 +50,7 @@
 //!   the importer turns it into a review item. Nothing is thrown away and nothing throws.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use ownhealth_core::Result;
@@ -183,6 +184,11 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     if path(root, &["component", "structuredBody"]).is_none() && path(root, &["component", "nonXMLBody"]).is_some() {
         return Err(xml::unstructured());
     }
+    // every record carries every label of its document, its sections and its entry, so the labels a
+    // file may hold are capped: a file with more is refused, never read with labels dropped
+    if more_labels_than(root, MAX_LABELS) {
+        return Err(xml::too_many_labels(MAX_LABELS));
+    }
     let top = path(root, &["component", "structuredBody"]);
     // the document's confidentialityCode, and the structuredBody's, label every record
     let mut doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
@@ -251,6 +257,8 @@ const DS4P: &str = "2.16.840.1.113883.3.3445.";
 const PRIVACY_MARKINGS: &str = "2.16.840.1.113883.3.3445.4";
 const ALLERGY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.7";
 const SEVERITY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.8";
+/// The most different security labels a file may carry.
+const MAX_LABELS: usize = 64;
 
 /// C-CDA code system OIDs and the FHIR system URL each one has (Medplum `systems.ts`, with CVX and
 /// the ICD and NDC systems at their HL7 URLs). Any other OID becomes `urn:oid:<oid>`.
@@ -1545,12 +1553,39 @@ fn entry_labels(entry: Node<'_, '_>) -> Vec<Value> {
     out
 }
 
+/// Add the labels `to` does not hold yet, in one pass over both.
 fn add_labels(to: &mut Vec<Value>, labels: impl IntoIterator<Item = Value>) {
+    let mut seen: HashSet<String> = to.iter().map(Value::to_string).collect();
     for l in labels {
-        if !to.contains(&l) {
+        if seen.insert(l.to_string()) {
             to.push(l);
         }
     }
+}
+
+/// Whether the document carries more than `max` different labels (confidentialityCodes other than
+/// `N` and DS4P observation values, anywhere in it). One pass, stopped as soon as it is over.
+fn more_labels_than(root: Node<'_, '_>, max: usize) -> bool {
+    let mut seen = HashSet::new();
+    for d in root
+        .descendants()
+        .filter(|d| d.is_element() && d.tag_name().namespace() == Some(xml::NS))
+    {
+        let found = if d.tag_name().name() == "confidentialityCode" {
+            d.parent_element().and_then(confidentiality).into_iter().collect()
+        } else if is_security_observation(d) {
+            security_values(d)
+        } else {
+            continue;
+        };
+        for l in found {
+            seen.insert(l.to_string());
+            if seen.len() > max {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// How a part that was not read is listed: its element and first templateId.

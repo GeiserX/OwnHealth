@@ -40,6 +40,13 @@ pub fn too_large(size: u64) -> Error {
     ))
 }
 
+/// The refusal of a document that carries more than `max` different security labels.
+pub fn too_many_labels(max: usize) -> Error {
+    refused(format!(
+        "the file carries more than {max} different security labels; a C-CDA document needs far fewer"
+    ))
+}
+
 /// The text an element points at (`first`) and the words written beside the pointer (`second`),
 /// joined, at most [`MAX_TEXT`] characters: `second` keeps up to half of them, so neither is lost.
 pub fn joined(first: &str, second: &str) -> String {
