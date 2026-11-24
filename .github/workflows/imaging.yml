@@ -21,8 +21,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: imaging-cd-${{ github.ref }}
-  # Every commit on main keeps its own measurement.
+  # A PR shares one group, so a newer push supersedes its older run. Every main run gets its own group:
+  # a shared one would let a third push replace the second push's queued run and drop its measurement.
+  group: imaging-cd-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
