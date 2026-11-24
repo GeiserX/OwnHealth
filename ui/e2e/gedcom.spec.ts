@@ -11,6 +11,8 @@ const fixture = (name: string) => fileURLToPath(new URL(`../../fixtures/gedcom/$
 const CASES = [
 	{
 		lang: 'en',
+		transmission: 'This OwnHealth server receives the whole file and reads it in memory.',
+		retention: 'It stores no names, notes, or places.',
 		file: 'rivera-551.ged',
 		search: 'Alex',
 		pick: 'Alex Rivera Vexlorn',
@@ -21,6 +23,8 @@ const CASES = [
 	},
 	{
 		lang: 'es',
+		transmission: 'Este servidor de OwnHealth recibe el archivo completo y lo lee en memoria.',
+		retention: 'No guarda nombres, notas ni lugares.',
 		file: 'rivera-70.ged',
 		search: '',
 		pick: 'Persona 4',
@@ -62,6 +66,8 @@ for (const c of CASES) {
 		const before = await family();
 		await page.goto(`/family?lang=${c.lang}`);
 		const card = page.getByRole('region', { name: c.lang === 'en' ? 'Import a family tree' : 'Importar un árbol genealógico' });
+		await expect(card).toContainText(c.transmission);
+		await expect(card).toContainText(c.retention);
 		await card.locator('input[type=file]').setInputFiles(fixture(c.file));
 		const picker = card.getByRole('group');
 		await expect(picker).toBeVisible({ timeout: 30_000 });

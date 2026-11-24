@@ -110,7 +110,7 @@
 		{#if preview}
 			<fieldset class="pick" disabled={busy}>
 				<legend>{tf('gd_who', { name: profile.display_name })}</legend>
-				<div class="dim" style="font-size:11.5px">{hasNames ? t('gd_names_local') : t('gd_no_names')}</div>
+				{#if !hasNames}<div class="dim" style="font-size:11.5px">{t('gd_no_names')}</div>{/if}
 				<input class="p2in" type="search" bind:value={query} placeholder={hasNames ? t('gd_search') : t('gd_search_year')} aria-label={hasNames ? t('gd_search') : t('gd_search_year')} />
 				<ul>
 					{#each shown as p (p.i)}
