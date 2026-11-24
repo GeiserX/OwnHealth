@@ -472,8 +472,7 @@ async fn a_refresh_that_never_reached_cms_keeps_the_connection() -> common::R {
         .expect("connected source");
     let stop = bluebutton::pull(&setup.ctx, &source, &egress(), now, 200)
         .await
-        .err()
-        .expect("CMS is down");
+        .expect_err("CMS is down");
     assert!(
         !stop.permanent && stop.message.starts_with("token_unreachable"),
         "{}",
