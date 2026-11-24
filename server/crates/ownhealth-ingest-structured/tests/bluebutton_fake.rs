@@ -821,6 +821,30 @@ async fn a_grant_without_claims_never_searches_them() -> common::R {
     Ok(())
 }
 
+/// A latest pull that failed shows no claim count, although the cursor keeps the older one.
+#[tokio::test]
+async fn a_failed_latest_pull_shows_no_claim_count() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    assert_eq!(pull(&setup, 200).await?.cursor, Some(json!({"claim_count": 51})));
+    {
+        let mut mode = setup.fake.mode();
+        mode.coverage_fails = true;
+        mode.eob = Eob::Fails(503);
+    }
+    let mut conn = setup.ctx.pool.acquire().await?;
+    let source = get_source(&mut conn, setup.source_id).await?.expect("connected source");
+    let run = sources::begin_run(&mut conn, source.id, "poll", None).await?;
+    let stop = bluebutton::pull(&setup.ctx, &source, &egress(), Utc::now(), 200)
+        .await
+        .expect_err("neither data search answers");
+    assert!(stop.message.starts_with("bluebutton_no_answer"), "{}", stop.message);
+    sources::finish_run(&mut conn, run, Err(&stop.message)).await?;
+    let rows = sources::source_health(&mut conn, source.household_id).await?;
+    let row = rows.iter().find(|r| r.id == source.id).expect("the health row");
+    assert_eq!(row.last_run_status.as_deref(), Some("error"));
+    assert_eq!(row.managed.claim_count, None);
+    Ok(())
+}
 
 /// A grant that allows neither the coverage nor the claim search stops for good and sends nothing.
 #[tokio::test]

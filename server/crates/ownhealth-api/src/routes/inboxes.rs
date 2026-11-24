@@ -23,9 +23,9 @@
 //! and reconnects only those. Only then does the row also carry `created_at` and `poll_seconds`,
 //! `reconsent_needed_at`, `grant_expires_at`, `access_expires_at`, `server`, the open sync-gap
 //! alerts filed on the source's profile (`open_gaps`), and for Blue Button the distinct Medicare
-//! claims the latest pull read (`claim_count`, absent when that pull's claim search did not answer):
-//! a viewer is sent no more than before v1.0. A
-//! source token gets none of them and no `can_manage`.
+//! claims the latest pull read (`claim_count`, absent when that pull failed or its claim search did
+//! not answer): a viewer is sent no more than before v1.0. A source token gets none of them and no
+//! `can_manage`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
