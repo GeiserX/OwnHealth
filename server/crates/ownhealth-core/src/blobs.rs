@@ -1361,6 +1361,26 @@ pub type RestoreLosses = BTreeMap<Uuid, BTreeSet<String>>;
 
 const RESTORE_LOSSES: &str = ".restore-losses.json";
 
+/// Random bytes in the name of a staged loss record.
+const STAGED_LOSSES_TOKEN: usize = 8;
+
+/// The name [`write_restore_losses`] stages the loss record under, at the store root.
+fn staged_loss_record() -> String {
+    format!("{RESTORE_LOSSES}.{}.tmp", crate::ids::token_hex(STAGED_LOSSES_TOKEN))
+}
+
+fn is_staged_loss_record(rel: &Path) -> bool {
+    rel.to_str()
+        .and_then(|name| {
+            name.strip_prefix(RESTORE_LOSSES)?
+                .strip_prefix('.')?
+                .strip_suffix(".tmp")
+        })
+        .is_some_and(|token| {
+            token.len() == 2 * STAGED_LOSSES_TOKEN && token.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
 fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
     let mut digest = Sha256::new();
     let mut buf = vec![0u8; CHUNK];
@@ -1376,7 +1396,8 @@ fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
 
 /// A fresh restore needs a store without files. A checkpointed retry may find the
 /// loss record and complete blobs from the same archive. Discard interrupted copies
-/// of those blobs after the store passes inspection.
+/// of those blobs, and a loss record staged by an interrupted write, after the store
+/// passes inspection.
 pub fn check_restore_target(
     settings: &crate::config::Settings,
     expected: &BTreeMap<&str, &str>,
@@ -1432,7 +1453,12 @@ fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: b
             let entry = entry?;
             let path = entry.path();
             let kind = entry.file_type()?;
-            let rel = path.strip_prefix(root).expect("entry is under the blob root");
+            let rel = path.strip_prefix(root).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is outside the blob root", path.display()),
+                )
+            })?;
             let loss_record = rel == Path::new(RESTORE_LOSSES);
             if kind.is_dir() {
                 if loss_record || expected_paths.contains_key(rel) {
@@ -1447,7 +1473,7 @@ fn restore_files_match(root: &Path, expected: &BTreeMap<&str, &str>, resuming: b
             if loss_record {
                 continue;
             }
-            if expected_parts.contains(rel) {
+            if expected_parts.contains(rel) || is_staged_loss_record(rel) {
                 parts.push(path);
                 continue;
             }
@@ -1508,7 +1534,7 @@ fn check_loss_dir(dir: &Path) -> io::Result<()> {
 /// Replace the loss record while holding the keyring lock. A crash leaves the old or new record.
 pub fn write_restore_losses(settings: &crate::config::Settings, losses: &RestoreLosses) -> io::Result<()> {
     let dir = settings.blobs_path();
-    let staged = dir.join(format!("{RESTORE_LOSSES}.{}.tmp", crate::ids::token_hex(8)));
+    let staged = dir.join(staged_loss_record());
     let write = || -> io::Result<()> {
         fs::create_dir_all(&dir)?;
         check_loss_dir(&dir)?;
@@ -1603,6 +1629,41 @@ mod tests {
         assert_eq!(fs::read(&target)?, b"unrelated blob bytes");
         fs::write(&target, original)?;
         check_restore_target(&settings, &expected, true)?;
+        Ok(())
+    }
+
+    /// A stop inside `write_restore_losses` leaves its staged record in the store root. A resumed
+    /// restore removes that file and still refuses any other name.
+    #[test]
+    fn resumed_restore_removes_only_a_staged_loss_record() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let settings = crate::config::Settings {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let root = settings.blobs_path();
+        fs::create_dir_all(&root)?;
+        let expected = BTreeMap::new();
+        // The name and mode that write_restore_losses gives the file before the rename.
+        let staged_name = format!("{RESTORE_LOSSES}.{}.tmp", crate::ids::token_hex(8));
+        let staged = root.join(&staged_name);
+        drop(create_private(&staged)?);
+        let strays = [
+            root.join(format!("{RESTORE_LOSSES}.tmp")),
+            root.join(format!("{RESTORE_LOSSES}.not-a-token.tmp")),
+            root.join("sha256").join(&staged_name),
+        ];
+        for stray in strays {
+            fs::create_dir_all(stray.parent().expect("a stray file has a folder"))?;
+            fs::write(&stray, b"{}")?;
+            let error = check_restore_target(&settings, &expected, true).expect_err("a stray file is refused");
+            assert!(error.to_string().contains(&stray.display().to_string()), "{error}");
+            assert!(staged.exists() && stray.exists());
+            fs::remove_file(&stray)?;
+        }
+        check_restore_target(&settings, &expected, false).expect_err("a new restore needs an empty store");
+        check_restore_target(&settings, &expected, true)?;
+        assert!(!staged.exists(), "the staged loss record was left behind");
         Ok(())
     }
 
