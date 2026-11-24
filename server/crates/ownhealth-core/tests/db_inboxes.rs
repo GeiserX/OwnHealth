@@ -653,8 +653,13 @@ async fn a_failed_cursor_write_leaves_the_run_open() -> R {
         cursor: Some(json!({"uid": 2})),
         ..RunOutcome::default()
     };
-    assert!(finish_run(&mut c, run, Ok(&done)).await.is_err());
-    assert!(finish_run(&mut c, run, Err("mailbox unreachable")).await.is_err());
+    // both completions fail on the injected source write, not on an earlier statement
+    for result in [Ok(&done), Err("mailbox unreachable")] {
+        let failed = finish_run(&mut c, run, result)
+            .await
+            .expect_err("the source write fails");
+        assert_eq!(failed.db_message().as_deref(), Some("injected failure"), "{failed}");
+    }
     sqlx::raw_sql("drop trigger fail_source_write on source")
         .execute(&mut *c)
         .await?;
