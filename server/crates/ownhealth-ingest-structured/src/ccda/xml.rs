@@ -40,10 +40,22 @@ pub fn too_large(size: u64) -> Error {
     ))
 }
 
-/// The file as text: UTF-8 (a byte order mark dropped), or Latin-1 when it is not UTF-8.
+/// The refusal of a document whose body is a `nonXMLBody` (a scan or an attached file): no coded
+/// section to read, and its reference is never followed.
+pub fn unstructured() -> Error {
+    refused("the body is a nonXMLBody (a scan or an attached file), with no coded sections to read")
+}
+
+/// The file as text: UTF-8 (a byte order mark dropped), or Latin-1 when it is not UTF-8. A file with a
+/// UTF-16 byte order mark (either order) is refused with what to do instead.
 pub fn text_of_file(bytes: &[u8]) -> Result<std::borrow::Cow<'_, str>> {
     if bytes.len() > MAX_BYTES {
         return Err(too_large(bytes.len() as u64));
+    }
+    if bytes.starts_with(b"\xff\xfe") || bytes.starts_with(b"\xfe\xff") {
+        return Err(refused(
+            "the file is saved as UTF-16; save it as UTF-8 and upload it again",
+        ));
     }
     Ok(ownhealth_core::documents::decode_text(bytes))
 }

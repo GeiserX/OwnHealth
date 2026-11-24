@@ -22,6 +22,19 @@ test('a refused C-CDA file reads in the person\'s language', () => {
 	assert.ok(en.err_ccda_unreadable && es.err_ccda_unreadable && en.err_ccda_unreadable !== es.err_ccda_unreadable);
 });
 
+test('a C-CDA file saved as UTF-16, or with no coded body, says what to do in the person\'s language', () => {
+	const has = (k: string) => k in en;
+	for (const [why, key] of [
+		['the file is saved as UTF-16; save it as UTF-8 and upload it again', 'err_ccda_utf16'],
+		['the body is a nonXMLBody (a scan or an attached file), with no coded sections to read', 'err_ccda_unstructured']
+	]) {
+		assert.equal(errKey(null, `not a readable C-CDA document: ${why}`, has), key, why);
+		assert.ok(en[key] && es[key] && en[key] !== es[key], key);
+	}
+	assert.match(en.err_ccda_utf16, /UTF-8/);
+	assert.match(es.err_ccda_utf16, /UTF-8/);
+});
+
 test('a C-CDA upload\'s items speak of the uploaded file and count entries or sections, a pull\'s stay as they were', () => {
 	const item = (resource_type: string, kind = 'ccda') => ({
 		kind: 'fhir_unmapped_summary',

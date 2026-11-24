@@ -1058,3 +1058,48 @@ fn the_ccd_1_sample_reads_each_allergy_once() -> R {
     assert_eq!(allergies.not_read, ["observation 2.16.840.1.113883.10.20.22.4.8"]);
     Ok(())
 }
+
+// ------------------------------------------------------------- round 3 ----
+
+/// CR1: a CDA document whose body is a `nonXMLBody` (a scan or an attached file, never coded) is
+/// refused with its own reason. It is never imported as a document that holds nothing, which would
+/// leave its text unread and unflagged. A structured body still reads.
+#[test]
+fn an_unstructured_body_is_refused_never_read_as_empty() -> R {
+    let structured = String::from_utf8(document(""))?;
+    let unstructured = structured.replace(
+        "<component><structuredBody></structuredBody></component>",
+        r#"<component><nonXMLBody><text mediaType="text/plain">HIV test positive, see the attached letter.</text></nonXMLBody></component>"#,
+    );
+    assert_ne!(structured, unstructured);
+    match convert(unstructured.as_bytes()) {
+        Err(Error::Invalid(m)) => assert!(m.contains("nonXMLBody"), "{m}"),
+        other => panic!("a nonXMLBody was read: {other:?}"),
+    }
+    convert(structured.as_bytes())?;
+    Ok(())
+}
+
+/// CR5: a C-CDA document saved as UTF-16 (either byte order) reaches the importer, which refuses it
+/// with its own reason (save it as UTF-8) instead of an unknown file.
+#[test]
+fn a_utf16_document_is_refused_with_its_own_reason() -> R {
+    let text = String::from_utf8(fixture("ccd-2.xml"))?.replacen("encoding=\"UTF-8\"", "encoding=\"UTF-16\"", 1);
+    for le in [true, false] {
+        let bom: &[u8] = if le { b"\xff\xfe" } else { b"\xfe\xff" };
+        let bytes: Vec<u8> = bom
+            .iter()
+            .copied()
+            .chain(
+                text.encode_utf16()
+                    .flat_map(|u| if le { u.to_le_bytes() } else { u.to_be_bytes() }),
+            )
+            .collect();
+        assert_eq!(sniff("record.xml", &bytes[..4096], None), "ccda", "le {le}");
+        match convert(&bytes) {
+            Err(Error::Invalid(m)) => assert!(m.contains("UTF-16") && m.contains("UTF-8"), "{m}"),
+            other => panic!("le {le}: {other:?}"),
+        }
+    }
+    Ok(())
+}

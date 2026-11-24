@@ -167,6 +167,11 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     let text = xml::text_of_file(bytes)?;
     let doc = xml::parse(&text)?;
     let root = doc.root_element();
+    // a body that is a scan or an attached file holds no coded section: refused, its reference never
+    // followed, so it is never imported as a document with nothing unread
+    if path(root, &["component", "structuredBody"]).is_none() && path(root, &["component", "nonXMLBody"]).is_some() {
+        return Err(xml::unstructured());
+    }
     let mut doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
     // a Privacy Markings Section labels the whole document (DS4P document-level labels)
     for sec in root.descendants().filter(|n| is_privacy_markings(*n)) {

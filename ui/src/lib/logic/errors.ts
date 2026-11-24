@@ -23,7 +23,10 @@ const PATTERNS: [RegExp, string][] = [
 	[/^the export names more than \d+ sensors/i, 'err_cgm_too_many_sensors'],
 	[/^this file is already stored on this profile as another kind of document/i, 'err_cgm_other_type'],
 	[/^this file was read in the time zone .*, which this database does not know/i, 'err_cgm_zone_unknown'],
-	// a C-CDA file the import refused (slice 20): broken, too large, a DOCTYPE or too deep
+	// a C-CDA file the import refused (slice 20): saved as UTF-16, a body with no coded sections, then
+	// broken, too large, a DOCTYPE or too deep
+	[/^not a readable C-CDA document: the file is saved as UTF-16/i, 'err_ccda_utf16'],
+	[/^not a readable C-CDA document: the body is a nonXMLBody/i, 'err_ccda_unstructured'],
 	[/^not a readable C-CDA document/i, 'err_ccda_unreadable'],
 	[/^not a decimal|^the value is not a number/i, 'err_decimal'],
 	[/^the date is in the future/i, 'err_future_date'],
