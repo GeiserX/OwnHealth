@@ -116,6 +116,10 @@ services:
   #   mkdir -p secrets/imaging && openssl rand -hex 32 > secrets/imaging/orthanc_password && chmod 644 secrets/imaging/orthanc_password
   # then two lines in .env: COMPOSE_PROFILES=imaging (with OCR too: COMPOSE_PROFILES=ocr,imaging) and
   # OWNHEALTH_ORTHANC_URL=http://orthanc:8042.
+  # Orthanc must be this one, OwnHealth's own: the app deletes every study in it that its record does
+  # not name (the imaging.sweep job, at every start and every hour), so never point
+  # OWNHEALTH_ORTHANC_URL at an Orthanc that holds other studies. Its storage is not backed up: after a
+  # restore the app sends every recorded study back from the stored uploads (imaging.rebuild).
   orthanc:
     profiles: [imaging]
     image: orthancteam/orthanc:26.11.1
