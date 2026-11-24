@@ -71,7 +71,9 @@
 			const id = upload?.jobId;
 			if (id == null) return true;
 			const job = (await listJobs([id])).jobs.find((j) => j.id === id) ?? null;
-			if (upload) upload.job = job;
+			// an answer for an upload a newer one replaced is dropped; the poller stops on its own
+			if (upload?.jobId !== id) return true;
+			upload.job = job;
 			return !job || job.state === 'done' || job.state === 'failed' || job.state === 'dead';
 		},
 		ondone: () => {
@@ -80,7 +82,12 @@
 		},
 		onfail: (e) => (upError = { text: errText(e), raw: errRaw(e) })
 	});
-	onDestroy(follow.stop);
+	// an upload still on its way when the page goes must not start polling from a page that is gone
+	let destroyed = false;
+	onDestroy(() => {
+		destroyed = true;
+		follow.stop();
+	});
 	// an upload belongs to the profile it was sent for
 	$effect(() => {
 		if (upload && upload.slug !== profile?.slug) {
@@ -106,6 +113,7 @@
 		sending = files.length;
 		try {
 			const r = await importImaging(slug, files);
+			if (destroyed) return;
 			upload = { slug, files: r.files, duplicate: r.duplicate, jobId: r.job_id, job: null };
 			follow.start();
 		} catch (e) {

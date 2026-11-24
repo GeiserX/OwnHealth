@@ -7,6 +7,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const db = process.env.OWNHEALTH_E2E_DB ?? '';
 
@@ -170,3 +172,83 @@ test('after a Dismiss with a confirm step on /import-review, focus moves to the 
 		.toBe(next);
 	sql(`update review_item set status = 'dismissed' where id in ('${scans[0]}', '${scans[1]}') and status = 'open'`);
 });
+
+// Import polling races, with the import and job answers mocked so their order is fixed.
+const job = (id: number, state: string, result: Record<string, unknown> | null = null) => ({
+	id,
+	kind: 'import.dicom',
+	state,
+	attempts: 1,
+	max_attempts: 3,
+	last_error: null,
+	result,
+	created_at: '2026-11-24T10:00:00Z',
+	finished_at: state === 'done' ? '2026-11-24T10:00:05Z' : null,
+	profile_id: null
+});
+// two tiny files the mocked import never reads
+const discDir = `${tmpdir()}/oh-e2e-imaging-${run}`;
+mkdirSync(discDir, { recursive: true });
+const disc = `${discDir}/disc.zip`;
+const disc2 = `${discDir}/disc2.zip`;
+writeFileSync(disc, 'PK');
+writeFileSync(disc2, 'PK');
+
+test('an upload that answers after the person left the Imaging page starts no polling', async ({ page }) => {
+	let release: () => void = () => undefined;
+	const held = new Promise<void>((r) => (release = r));
+	await page.route((u) => u.pathname === '/api/imaging/import', async (route) => {
+		await held;
+		await route.fulfill({ json: { files: 1, duplicate: false, job_id: 424201 } });
+	});
+	let polls = 0;
+	// other parts of the app read /api/jobs too; only this upload's job counts
+	await page.route(
+		(u) => u.pathname === '/api/jobs' && u.searchParams.get('ids') === '424201',
+		async (route) => {
+			polls += 1;
+			await route.fulfill({ json: { jobs: [job(424201, 'running')] } });
+		}
+	);
+	await page.goto('/imaging?lang=en');
+	await page.locator('input[type=file][accept]').setInputFiles(disc);
+	await expect(page.getByRole('status')).toContainText('Uploading 1 file');
+	await page.locator('a[href="/timeline"]').first().click();
+	await expect(page).toHaveURL(/\/timeline/);
+	release();
+	await page.waitForTimeout(5000); // two and a half poll periods
+	expect(polls).toBe(0);
+});
+
+test('a poll answer for a replaced upload never shows on the newer one', async ({ page }) => {
+	let uploads = 0;
+	await page.route((u) => u.pathname === '/api/imaging/import', async (route) => {
+		uploads += 1;
+		await route.fulfill({ json: { files: uploads === 1 ? 1 : 2, duplicate: false, job_id: 424210 + uploads } });
+	});
+	let releaseFirst: () => void = () => undefined;
+	const firstHeld = new Promise<void>((r) => (releaseFirst = r));
+	let firstAsked: () => void = () => undefined;
+	const firstSeen = new Promise<void>((r) => (firstAsked = r));
+	await page.route((u) => u.pathname === '/api/jobs', async (route) => {
+		const ids = new URL(route.request().url()).searchParams.get('ids');
+		if (ids === '424211') {
+			firstAsked();
+			await firstHeld;
+			await route.fulfill({ json: { jobs: [job(424211, 'done', { imported: 7 })] } });
+		} else await new Promise(() => undefined); // the newer upload's poll never answers, so nothing overwrites a stale write
+	});
+	await page.goto('/imaging?lang=en');
+	const zip = page.locator('input[type=file][accept]');
+	await zip.setInputFiles(disc);
+	await firstSeen; // the first upload's poll is on its way
+	await zip.setInputFiles(disc2);
+	await expect(page.getByRole('status')).toContainText('Upload kept: 2 files');
+	releaseFirst();
+	await page.waitForTimeout(1500);
+	// read once, after the stale answer had time to land: a retrying assertion could wait it out
+	const banner = await page.getByRole('status').innerText();
+	expect(banner).toContain('Upload kept: 2 files');
+	expect(banner).not.toContain('7');
+});
+
