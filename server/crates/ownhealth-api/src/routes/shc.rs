@@ -54,8 +54,8 @@ use crate::routes::auth::{Fail, R};
 const MAX_BODY: usize = 20 * 1024 * 1024;
 /// A text field (the profile, a host, pasted text) holds at most 1 MiB.
 const MAX_FIELD: usize = 1024 * 1024;
-/// At most this many `approve` fields.
-const MAX_APPROVED: usize = shc::MAX_CARDS;
+/// At most this many `approve` fields: one issuer host per card, and the host of a link.
+const MAX_APPROVED: usize = shc::MAX_CARDS + 1;
 
 pub fn router() -> Router<Runtime> {
     Router::new().route("/shc", post(receive).layer(DefaultBodyLimit::max(MAX_BODY)))
@@ -65,23 +65,11 @@ fn bad(message: &str) -> Fail {
     Fail::Api(ApiError::new(StatusCode::BAD_REQUEST, "bad_request", message))
 }
 
-/// The dev issuer map, `OWNHEALTH_DEV_SHC_ISSUERS=https://issuer.example=http://127.0.0.1:9177`
-/// (comma separated). Only a debug build has it.
-#[cfg(debug_assertions)]
-fn dev_map() -> Option<String> {
-    std::env::var("OWNHEALTH_DEV_SHC_ISSUERS").ok()
-}
-
-/// A release build has no dev issuer map.
-#[cfg(not(debug_assertions))]
-fn dev_map() -> Option<String> {
-    None
-}
-
 /// Where an issuer's keys are fetched from: the issuer's own URL under the connector egress guard
 /// ([`shc::public`]). A debug build that runs with dev auth may also map a test issuer origin to a
-/// local server ([`dev_map`]), so the receiver can be tried end to end with an issuer we generate.
-/// Only a whole origin matches: the mapped prefix must be followed by `/`.
+/// local server (`Settings::dev_shc_issuers`, `OWNHEALTH_DEV_SHC_ISSUERS=https://issuer.example=
+/// http://127.0.0.1:9177`, comma separated), so the receiver can be tried end to end with an issuer
+/// we generate. Only a whole origin matches: the mapped prefix must be followed by `/`.
 fn issuer_route(dev_auth: bool, map: Option<&str>) -> impl Fn(&str) -> (String, Egress) + Send + Sync + use<> {
     let local: Vec<(String, String)> = if cfg!(debug_assertions) && dev_auth {
         map.unwrap_or_default()
@@ -201,8 +189,7 @@ async fn receive(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<J
             .map_err(|e| Error::Other(e.into()))?
     };
     let input = read.map_err(|refusal| refused(&refusal, None))?;
-    let map = dev_map();
-    let route = issuer_route(rt.settings.dev_auth, map.as_deref());
+    let route = issuer_route(rt.settings.dev_auth, rt.settings.dev_shc_issuers.as_deref());
     let cards = match shc::check(&input, &approved, &route, chrono::Utc::now()).await {
         Checked::NeedsApproval(asks) => return Ok(Json(asks_json(&asks))),
         Checked::Refused { refusal, iss } => return Err(refused(&refusal, iss)),
@@ -279,8 +266,7 @@ async fn receive_link(rt: &Runtime, caller: &Caller, profile: &str, form: LinkFo
             "link": link_json(&link),
         })));
     }
-    let map = dev_map();
-    let route = issuer_route(rt.settings.dev_auth, map.as_deref());
+    let route = issuer_route(rt.settings.dev_auth, rt.settings.dev_shc_issuers.as_deref());
     let held = if form.held.is_empty() {
         shl_receive::fetch(&link, form.passcode, &rt.blobs, chosen, &route)
             .await?

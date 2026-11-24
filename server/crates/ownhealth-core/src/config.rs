@@ -67,6 +67,10 @@ pub struct Settings {
     /// dump (`keyfile.rs`). It must sit outside the blob folder and every backup. Unset:
     /// `<data_dir>/keyring`.
     pub keyring_dir: Option<PathBuf>,
+    /// `OWNHEALTH_DEV_SHC_ISSUERS`: `https://issuer.example=http://127.0.0.1:9177,...`, test origins of
+    /// SMART Health Card issuers and SMART Health Link servers mapped to local servers. Only a debug
+    /// build that runs with dev auth reads it (routes/shc.rs `issuer_route`); a release build ignores it.
+    pub dev_shc_issuers: Option<String>,
 }
 
 impl Default for Settings {
@@ -99,6 +103,7 @@ impl Default for Settings {
             anchor_dir: None,
             orthanc: None,
             keyring_dir: None,
+            dev_shc_issuers: None,
         }
     }
 }
@@ -131,6 +136,7 @@ impl fmt::Debug for Settings {
             .field("anchor_dir", &self.anchor_dir)
             .field("orthanc", &self.orthanc)
             .field("keyring_dir", &self.keyring_dir)
+            .field("dev_shc_issuers", &self.dev_shc_issuers)
             .finish_non_exhaustive()
     }
 }
@@ -348,6 +354,7 @@ impl Settings {
             // serve's viewer proxy and every worker's DICOM import read the same Orthanc
             orthanc: OrthancConfig::from_env(env)?,
             keyring_dir: env_or(env, "KEYRING_DIR")?.map(PathBuf::from),
+            dev_shc_issuers: env_or(env, "DEV_SHC_ISSUERS")?,
         })
     }
 
