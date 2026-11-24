@@ -631,19 +631,34 @@ pub async fn session_report_enabled(conn: &mut PgConnection, household_id: Optio
     .unwrap_or(false))
 }
 
+/// The arguments the tool's input schema names. An unknown tool names none.
+fn schema_args(spec: Option<&ToolSpec>, args: &Map<String, Value>) -> Map<String, Value> {
+    let schema = spec.map(|s| (s.input_schema)());
+    let known = schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(Value::as_object);
+    args.iter()
+        .filter(|(k, _)| known.is_some_and(|p| p.contains_key(k.as_str())))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
 async fn write_tool_audit(
     conn: &mut PgConnection,
     mut event: AuditEvent,
     principal: &Principal,
+    spec: Option<&ToolSpec>,
     args: &Map<String, Value>,
     not_assessed: usize,
 ) -> Result<(), Error> {
     if session_report_enabled(conn, principal.household_id).await? {
         event.not_assessed_n = Some(i32::try_from(not_assessed).unwrap_or(i32::MAX));
         event.arg_bytes = Some(i32::try_from(serde_json::to_vec(args)?.len()).unwrap_or(i32::MAX));
-        // Opted-in tool rows carry measurements and identifiers. Drop fields that a caller can
-        // fill with text, even if it looks like an argument code or a client name.
-        event.client = None;
+        // Opted-in rows keep the audit detail (codes and ids, free text hashed), so the log still
+        // says which profile a refused call named. A key the tool's schema does not name is caller
+        // text, and so is the user agent: both stay out. The client is the token's own label.
+        event.args_summary = Some(args_summary(&schema_args(spec, args)));
         event.user_agent = None;
     } else {
         event.args_summary = Some(args_summary(args));
@@ -725,7 +740,7 @@ pub async fn execute(
             );
             e.rows_out = Some(0);
             e.bytes_out = Some(0);
-            write_tool_audit(&mut tx, e, principal, &args, 0).await?;
+            write_tool_audit(&mut tx, e, principal, spec, &args, 0).await?;
             tx.commit().await?;
             Ok(error_result(&err))
         }
@@ -935,7 +950,7 @@ async fn run(
         e.resource_ids = Some(ids);
     }
     let not_assessed = env.get("not_assessed").and_then(Value::as_array).map_or(0, Vec::len);
-    write_tool_audit(conn, e, principal, args, not_assessed).await?;
+    write_tool_audit(conn, e, principal, Some(spec), args, not_assessed).await?;
     let mut content = vec![json!({"type": "text", "text": body_text})];
     content.extend(extra_content);
     Ok(json!({
