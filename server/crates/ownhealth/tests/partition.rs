@@ -721,6 +721,21 @@ async fn the_app_role_keeps_its_rights_and_leaves_the_switch_to_the_owner() -> R
         assert_eq!(state(&r), "needs_owner", "{r}");
         assert_eq!(r["ok"], false, "{r}");
         assert_eq!(relkind(pool).await?, "r");
+        assert_eq!(r["cutoff"], Value::Null, "{r}");
+
+        // an owner's run stopped before the switch, with a sample set aside: the app's run names the
+        // cutoff that now refuses samples (it may not read the samples set aside)
+        let mut c = pool.acquire().await?;
+        let src = watch(&mut c, d.alex).await?;
+        let far = cutoff_for(now) + chrono::Duration::days(3);
+        store::write(&mut c, d.alex, None, vec![hr(far, 58.0, src)], Conflict::Keep).await?;
+        drop(c);
+        assert_eq!(partition::prepare(pool, &opts(now)).await?["held_aside"], 1);
+        let r = partition::run(&app, &opts(now)).await?;
+        assert_eq!(state(&r), "needs_owner", "{r}");
+        assert_eq!(r["cutoff"], json!(cutoff_for(now).to_rfc3339()), "{r}");
+        let note = r["note"].as_str().unwrap_or_default();
+        assert!(note.contains("refused"), "{note}");
 
         assert_eq!(state(&partition::run(pool, &opts(now)).await?), "converted");
         let mut c = app.acquire().await?;

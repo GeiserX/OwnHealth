@@ -377,15 +377,23 @@ async fn pending(conn: &mut PgConnection, report: &mut Report) -> Result<()> {
         return Ok(());
     };
     report.cutoff = Some(cutoff);
-    let aside: i64 = if exists(conn, AHEAD).await? {
-        sqlx::query_scalar(AssertSqlSafe(format!("select count(*) from {AHEAD}")))
-            .fetch_one(&mut *conn)
-            .await?
-    } else {
-        0
+    // the app's role may not read the table the owner's run made
+    let readable: Option<bool> = sqlx::query_scalar("select has_table_privilege(to_regclass($1), 'select')")
+        .bind(AHEAD)
+        .fetch_one(&mut *conn)
+        .await?;
+    let aside = match readable {
+        Some(true) => {
+            let n: i64 = sqlx::query_scalar(AssertSqlSafe(format!("select count(*) from {AHEAD}")))
+                .fetch_one(&mut *conn)
+                .await?;
+            format!(", and {n} samples set aside do not show")
+        }
+        Some(false) => ", and the samples set aside do not show".into(),
+        None => String::new(),
     };
     let wait = format!(
-        "Until a run as the table's owner finishes the switch, a sample dated on or after {} is refused and its import waits, and {aside} samples set aside do not show",
+        "Until a run as the table's owner finishes the switch, a sample dated on or after {} is refused and its import waits{aside}",
         cutoff.format("%Y-%m-%d")
     );
     report.note = Some(match report.note.take() {
