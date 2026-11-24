@@ -542,6 +542,12 @@ const OBSERVATION_CATEGORY: &str = "http://terminology.hl7.org/CodeSystem/observ
 
 // ---------------------------------------------------------------- converter ----
 
+enum ObservationValue {
+    Read(&'static str, Value),
+    Missing,
+    Unsupported,
+}
+
 struct Conv<'a, 'i> {
     /// The whole file, so an entry without an `id` is known by its bytes.
     text: &'i str,
@@ -1418,7 +1424,17 @@ impl<'a, 'i> Conv<'a, 'i> {
         let when = ts(child(obs, "effectiveTime")).or_else(|| organizer.and_then(|o| ts(child(o, "effectiveTime"))));
         put(&mut r, "effectiveDateTime", when.map(Value::String));
         if let Some(v) = child(obs, "value") {
-            self.value(&mut r, v);
+            match self.value(v) {
+                ObservationValue::Read(field, value) => {
+                    r.insert(field.into(), value);
+                }
+                ObservationValue::Missing => {}
+                ObservationValue::Unsupported => {
+                    let kind = xsi_type(v).filter(|kind| kind.len() <= 32).unwrap_or("unknown");
+                    rep.not_read
+                        .push(format!("observation (unsupported value type {kind})"));
+                }
+            }
         }
         let interpretation: Vec<Value> = children(obs, "interpretationCode")
             .filter_map(|i| attr(i, "code"))
@@ -1452,8 +1468,11 @@ impl<'a, 'i> Conv<'a, 'i> {
         Some(id)
     }
 
-    /// `value[x]` of an observation by the value's `xsi:type`.
-    fn value(&mut self, r: &mut Map<String, Value>, v: Node<'_, '_>) {
+    /// Read an observation's value by its CDA type, distinguishing absent and unread values.
+    fn value(&mut self, v: Node<'_, '_>) -> ObservationValue {
+        if attr(v, "nullFlavor").is_some() {
+            return ObservationValue::Missing;
+        }
         let kind = xsi_type(v).unwrap_or(if attr(v, "code").is_some() {
             "CD"
         } else if attr(v, "value").is_some() {
@@ -1461,25 +1480,22 @@ impl<'a, 'i> Conv<'a, 'i> {
         } else {
             "ST"
         });
-        let as_text = |s: Option<String>| s.map(Value::String);
-        match kind {
+        let field = match kind {
             "PQ" | "REAL" | "MO" => match quantity(v) {
-                Some(q) => {
-                    r.insert("valueQuantity".into(), q);
-                }
-                // a value that is not a number ("positive", "see note") is kept as written
+                Some(q) => Some(("valueQuantity", q)),
+                // A value like "positive" or "see note" is kept as written.
                 None => {
                     let written = [attr(v, "value"), attr(v, "unit")]
                         .into_iter()
                         .flatten()
                         .collect::<Vec<_>>()
                         .join(" ");
-                    put(r, "valueString", as_text(Some(written).filter(|w| !w.is_empty())));
+                    (!written.is_empty()).then_some(("valueString", Value::String(written)))
                 }
             },
             "IVL_PQ" => {
                 let (mut low, high) = (child(v, "low"), child(v, "high"));
-                // "0 to 5" is how C-CDA writes "5 or less": the 0 says nothing
+                // "0 to 5" is how C-CDA writes "5 or less": the 0 says nothing.
                 if high.is_some() && low.and_then(|l| attr(l, "value")).and_then(|x| x.parse::<f64>().ok()) == Some(0.0)
                 {
                     low = None;
@@ -1489,12 +1505,12 @@ impl<'a, 'i> Conv<'a, 'i> {
                     (None, Some(Value::Object(mut q))) => {
                         let cmp = if high.is_some_and(open) { "<" } else { "<=" };
                         q.insert("comparator".into(), json!(cmp));
-                        r.insert("valueQuantity".into(), Value::Object(q));
+                        Some(("valueQuantity", Value::Object(q)))
                     }
                     (Some(Value::Object(mut q)), None) => {
                         let cmp = if low.is_some_and(open) { ">" } else { ">=" };
                         q.insert("comparator".into(), json!(cmp));
-                        r.insert("valueQuantity".into(), Value::Object(q));
+                        Some(("valueQuantity", Value::Object(q)))
                     }
                     (Some(_), Some(_)) => {
                         let part = |b: Option<Node<'_, '_>>| {
@@ -1507,29 +1523,33 @@ impl<'a, 'i> Conv<'a, 'i> {
                             })
                             .unwrap_or_default()
                         };
-                        r.insert("valueString".into(), json!(format!("{} - {}", part(low), part(high))));
+                        Some(("valueString", json!(format!("{} - {}", part(low), part(high)))))
                     }
-                    _ => {}
+                    _ => None,
                 }
             }
-            "CD" | "CE" | "CV" | "CO" | "CS" => put(r, "valueCodeableConcept", self.concept(Some(v))),
+            "CD" | "CE" | "CV" | "CO" | "CS" => self.concept(Some(v)).map(|cc| ("valueCodeableConcept", cc)),
             "INT" => match attr(v, "value").and_then(|s| s.parse::<i32>().ok()) {
-                Some(i) => {
-                    r.insert("valueInteger".into(), json!(i));
-                }
-                None => put(r, "valueQuantity", quantity(v)),
+                Some(i) => Some(("valueInteger", json!(i))),
+                None => quantity(v).map(|q| ("valueQuantity", q)),
             },
-            "BL" => put(
-                r,
-                "valueBoolean",
-                attr(v, "value").and_then(|b| b.parse::<bool>().ok()).map(Value::Bool),
-            ),
-            "TS" => put(
-                r,
-                "valueDateTime",
-                attr(v, "value").and_then(fhir_datetime).map(Value::String),
-            ),
-            _ => put(r, "valueString", as_text(self.narrative_of(v))),
+            "BL" => attr(v, "value")
+                .and_then(|b| b.parse::<bool>().ok())
+                .map(|b| ("valueBoolean", Value::Bool(b))),
+            "TS" => attr(v, "value")
+                .and_then(fhir_datetime)
+                .map(|date| ("valueDateTime", Value::String(date))),
+            "RTO" | "RTO_PQ_PQ" => return ObservationValue::Unsupported,
+            _ => self.narrative_of(v).map(|text| ("valueString", Value::String(text))),
+        };
+        match field {
+            Some((key, value)) => ObservationValue::Read(key, value),
+            None if v.attributes().any(|a| a.namespace().is_none())
+                || elements(v).any(|el| attr(el, "nullFlavor").is_none()) =>
+            {
+                ObservationValue::Unsupported
+            }
+            None => ObservationValue::Missing,
         }
     }
 }

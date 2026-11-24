@@ -1832,3 +1832,41 @@ fn round_5_a_bounded_medication_dose_is_listed_as_unread() -> R {
     );
     Ok(())
 }
+
+#[test]
+fn round_5_an_unsupported_structured_result_value_is_listed_as_unread() -> R {
+    let mut entries = String::new();
+    for (id, value) in [
+        (
+            "ratio",
+            r#"<value xsi:type="RTO_PQ_PQ"><numerator value="11" unit="mg"/><denominator value="3" unit="dL"/></value>"#,
+        ),
+        ("present", r#"<value xsi:type="PQ" value="12" unit="mg/dL"/>"#),
+        ("missing", r#"<value xsi:type="PQ" nullFlavor="NI"/>"#),
+    ] {
+        entries.push_str(&format!(
+            r#"<entry><observation classCode="OBS" moodCode="EVN">
+              <id root="1.2.3" extension="{id}"/><code code="13457-7" codeSystem="2.16.840.1.113883.6.1"/>
+              <statusCode code="completed"/><effectiveTime value="20240101"/>{value}
+            </observation></entry>"#
+        ));
+    }
+    let c = convert(&document(&format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>RESULTS</title>
+          {entries}</section></component>"#
+    )))?;
+    assert_eq!(
+        c.sections[0].not_read,
+        ["observation (unsupported value type RTO_PQ_PQ)"]
+    );
+    let observations = resources(&c, "Observation");
+    assert_eq!(observations.len(), 3);
+    assert_eq!(observations[1]["valueQuantity"]["value"], json!(12));
+    for obs in [observations[0], observations[2]] {
+        assert!(
+            !obs.as_object().unwrap().keys().any(|key| key.starts_with("value")),
+            "{obs}"
+        );
+    }
+    Ok(())
+}
