@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { openAsBlob, writeFileSync } from 'node:fs';
+import { appendFileSync, openAsBlob } from 'node:fs';
 
 const studyUid = '1.2.826.0.1.3680043.10.999.44';
 const budgetMs = 5_000;
@@ -8,11 +8,14 @@ function report(label: string, ms: number) {
 	const line = `${label}: ${Math.round(ms)} ms`;
 	console.log(line);
 	if (process.env.GITHUB_STEP_SUMMARY) {
-		writeFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`, { flag: 'a' });
+		appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
 	}
 }
 
-test.skip(!process.env.OWNHEALTH_IMAGING_CD_URL, 'Needs the stack from the Imaging CD workflow.');
+test.beforeEach(({ baseURL }, { project }) => {
+	test.skip(project.name !== 'imaging-cd', 'Use the dedicated Imaging CD configuration.');
+	expect(baseURL, 'Set OWNHEALTH_IMAGING_CD_URL to the running stack').toBeTruthy();
+});
 
 test('imports the synthetic 2,000-image CT CD', async ({ request }) => {
 	test.setTimeout(300_000);

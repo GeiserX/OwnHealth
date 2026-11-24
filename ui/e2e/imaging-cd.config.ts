@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
+	name: 'imaging-cd',
 	testDir: '.',
 	testMatch: 'imaging-cd.spec.ts',
 	forbidOnly: !!process.env.CI,
