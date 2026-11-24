@@ -14,6 +14,7 @@
 	import { searchTarget } from '#lib/logic/search';
 	import LoginScreen from '#lib/components/pages2/LoginScreen.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
+	import NotificationOutbox from '#lib/components/NotificationOutbox.svelte';
 	import { AVATAR_COLORS, app, currentProfile, setProfile } from '#lib/state/app.svelte';
 
 	let { children }: { children: Snippet } = $props();
@@ -189,6 +190,7 @@
 				<span>{t('toreview')}</span>
 				{#if me}<b class="num" style="color:var(--watch)">{me.review_open}</b>{:else}<b class="dim">—</b>{/if}
 			</a>
+			<NotificationOutbox />
 			<div class="seg" role="group" aria-label={t('lang_label')}>
 				<LangButtons />
 			</div>

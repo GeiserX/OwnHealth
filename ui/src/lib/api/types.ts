@@ -1018,3 +1018,42 @@ export interface BreakGlassOwnerView {
 		allowed: BreakGlassCategory[];
 	};
 }
+/** One profile that named the caller, in GET /break-glass: what they would read, and their last request. */
+export interface BreakGlassNamed {
+	profile: { id: Uuid; slug: string; display_name: string };
+	categories: BreakGlassCategory[];
+	delay_hours: number;
+	request: BreakGlassRequest | null;
+}
+/** The PUT /profiles/{p}/break-glass/contacts/{user} body: what a named contact would read, and after how long. */
+export interface BreakGlassContactIn {
+	categories?: BreakGlassCategory[];
+	delay_hours?: number;
+}
+
+/** notification_outbox.kind (ownhealth_core::break_glass::OUTBOX_KINDS). */
+export type NoticeKind =
+	| 'break_glass.request'
+	| 'break_glass.cancel'
+	| 'break_glass.activate'
+	| 'break_glass.use'
+	| 'break_glass.expire'
+	| 'break_glass.revoke';
+/** One in-app notice, in GET /notifications. */
+export interface Notice {
+	id: Uuid;
+	kind: NoticeKind;
+	profile: { id: Uuid; slug: string; display_name: string };
+	request_id: Uuid | null;
+	/** who did it: the contact who asked or read, the owner who cancelled; null for the app's own steps */
+	actor: { user_id: Uuid; display_name: string } | null;
+	/** who asked for the request this notice is about */
+	contact: { user_id: Uuid; display_name: string } | null;
+	created_at: IsoDateTime;
+	read_at: IsoDateTime | null;
+}
+/** GET /notifications: the 200 newest notices plus older unread request and activation ones. */
+export interface Notices {
+	items: Notice[];
+	unread: number;
+}

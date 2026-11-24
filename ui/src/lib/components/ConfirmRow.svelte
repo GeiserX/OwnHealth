@@ -10,8 +10,10 @@
 		confirmLabel,
 		onconfirm,
 		oncancel,
-		busy = false
-	}: { text: string; confirmLabel: string; onconfirm: () => void; oncancel: () => void; busy?: boolean } = $props();
+		busy = false,
+		// when the action itself is a cancel, "Cancel" would read both ways
+		cancelLabel = ''
+	}: { text: string; confirmLabel: string; onconfirm: () => void; oncancel: () => void; busy?: boolean; cancelLabel?: string } = $props();
 	let cancelEl: HTMLButtonElement | undefined = $state();
 	let root: HTMLDivElement | undefined = $state();
 	// The button that opened this row, so Cancel or Escape hands focus back to it, as focusOnOpen does.
@@ -35,7 +37,7 @@
 <div class="confirm" role="group" aria-label={text} onkeydown={onKey} bind:this={root}>
 	<span class="txt">{text}</span>
 	<span class="acts">
-		<button type="button" class="btn sm" bind:this={cancelEl} onclick={oncancel}>{t('i2_cancel')}</button>
+		<button type="button" class="btn sm" bind:this={cancelEl} onclick={oncancel}>{cancelLabel || t('i2_cancel')}</button>
 		<button type="button" class="btn sm no" disabled={busy} onclick={onconfirm}>{confirmLabel}</button>
 	</span>
 </div>

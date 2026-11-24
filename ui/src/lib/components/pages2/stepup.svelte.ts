@@ -2,7 +2,7 @@
 // call; on 403 step_up_required it confirms it is you (passkey, or the password in StepUpDialog), then
 // retries once. A wrong password keeps the dialog open with the reason; it closes only on success or Cancel.
 import { ApiError } from '#lib/api/core';
-import { stepUpBegin, stepUpFinish } from '#lib/api/manage';
+import { getAuthState, stepUpBegin, stepUpFinish } from '#lib/api/manage';
 import { errText } from '#lib/components/pages1/util.svelte';
 import { askUntilRight } from '#lib/logic/people';
 import { usePasskey } from './webauthn';
@@ -78,4 +78,15 @@ export async function withStepUp<T>(fn: () => Promise<T>): Promise<T> {
 		if (!(await confirmItIsYou())) throw e;
 		return fn();
 	}
+}
+
+/**
+ * For a step reached from outside the app, such as the cancel link of a calendar event: confirm it is
+ * you first, unless this session logged in or confirmed in the last minutes (the server says which).
+ * Resolves false when the person cancels the confirmation.
+ */
+export async function confirmFresh(): Promise<boolean> {
+	const s = await getAuthState();
+	if (s.step_up_fresh) return true;
+	return confirmItIsYou();
 }
