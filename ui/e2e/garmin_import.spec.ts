@@ -5,7 +5,10 @@ test('Garmin history lists imported and omitted files in both languages', async 
 		['en', 'Upload', 'Garmin export', '3 files imported', '1 entry left out', 'File type is not supported', 'GPS routes were left out.'],
 		['es', 'Subir', 'Exportación de Garmin', '3 archivos importados', '1 elemento sin importar', 'Tipo de archivo no compatible', 'Las rutas GPS se dejaron fuera.']
 	]) {
-		await page.goto(`/import-review?lang=${lang}`);
+		await page.goto('/import-review');
+		const language = page.getByRole('button', { name: lang.toUpperCase(), exact: true });
+		await language.click();
+		await expect(language).toHaveAttribute('aria-pressed', 'true');
 		await page.getByRole('button', { name: 'Lucía Rivera', exact: true }).click();
 		const open = page.getByRole('button', { name: upload, exact: true });
 		if ((await open.getAttribute('aria-expanded')) !== 'true') await open.click();
@@ -16,9 +19,10 @@ test('Garmin history lists imported and omitted files in both languages', async 
 		await expect(panel.getByText(gps, { exact: true })).toBeVisible();
 		await panel.getByText(omitted, { exact: true }).click();
 		await expect(panel.getByText('DI_CONNECT/DI-Connect-Wellness/123_userSettings.json', { exact: true })).toBeVisible();
-		await expect(panel.getByText(why, { exact: true })).toBeVisible();
+		await expect(panel.getByRole('listitem').filter({ hasText: '123_userSettings.json' })).toContainText(why);
 		await page.screenshot({ path: test.info().outputPath(`garmin-${lang}.png`), fullPage: true });
 		await panel.getByRole('link', { name: 'lucia-history.zip', exact: true }).click();
+		await expect(page).toHaveURL(/[?&]doc=/);
 		await page.reload();
 		await expect(page.locator('section.up')).toHaveCount(0);
 		await expect(page.getByText(count, { exact: true })).toBeVisible();
