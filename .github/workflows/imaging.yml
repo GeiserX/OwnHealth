@@ -128,20 +128,31 @@ jobs:
         id: viewer
         working-directory: ui
         run: pnpm exec playwright test -c e2e/imaging-cd.config.ts
-      - name: A throttled viewer must fail the same 5 s gate
+      # Each control delays one part of the open past the budget, and the same assertion must fail.
+      # Delaying the viewer document catches a timer that starts late. Delaying the DICOMweb frames
+      # catches a frame check that passes before any pixel arrives.
+      - name: Both throttled viewers must fail the same 5 s gate
         if: ${{ !cancelled() && steps.viewer.outcome != 'skipped' }}
         working-directory: ui
-        env:
-          OWNHEALTH_IMAGING_CD_THROTTLE: "1"
         run: |
-          log="$RUNNER_TEMP/imaging-throttled.log"
-          if pnpm exec playwright test -c e2e/imaging-cd.config.ts --grep 'opens the CT study' 2>&1 | tee "$log"; then
-            echo 'The throttled viewer unexpectedly passed.' >&2
-            exit 1
-          fi
-          # A crash or a missing frame cannot satisfy the control.
-          grep -F 'Error: IMAGING_OPEN_BUDGET_EXCEEDED' "$log"
-          grep -E '^Throttled viewer open: [0-9]+ ms$' "$log"
+          failed=0
+          for control in document frames; do
+            log="$RUNNER_TEMP/imaging-control-$control.log"
+            if OWNHEALTH_IMAGING_CD_THROTTLE="$control" pnpm exec playwright test \
+              -c e2e/imaging-cd.config.ts --grep 'opens the CT study' \
+              --output "$RUNNER_TEMP/imaging-control-$control" 2>&1 | tee "$log"; then
+              echo "::error::The $control control passed, so it no longer proves the gate can fail."
+              failed=1
+              continue
+            fi
+            # A crash or a missing frame cannot satisfy the control.
+            if ! grep -F 'Error: IMAGING_OPEN_BUDGET_EXCEEDED' "$log" \
+              || ! grep -E '^Red control, .+ delayed [0-9]+ ms: [0-9]+ ms \(budget 5000 ms, failed as expected\)$' "$log"; then
+              echo "::error::The $control control failed for another reason than the 5 s budget."
+              failed=1
+            fi
+          done
+          exit "$failed"
       - name: Remove the throwaway imaging stack
         if: always()
         run: |

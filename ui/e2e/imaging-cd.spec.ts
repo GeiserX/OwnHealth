@@ -3,9 +3,22 @@ import { appendFileSync, openAsBlob } from 'node:fs';
 
 const studyUid = '1.2.826.0.1.3680043.10.999.44';
 const budgetMs = 5_000;
+const controlDelayMs = 5_250;
 
-function report(label: string, ms: number) {
-	const line = `${label}: ${Math.round(ms)} ms`;
+// The red controls. Each delays one part of the open by more than the budget, so the same assertion must
+// fail. `document` delays the viewer page. `frames` delays the DICOMweb pixel data, so a frame check that
+// passes before any pixel arrives lets this control pass, and the workflow fails.
+const controls = {
+	document: 'viewer document',
+	frames: 'DICOMweb frames'
+} as const;
+const control = process.env.OWNHEALTH_IMAGING_CD_THROTTLE as keyof typeof controls | undefined;
+if (control !== undefined && !Object.hasOwn(controls, control)) {
+	throw new Error(`OWNHEALTH_IMAGING_CD_THROTTLE must be one of: ${Object.keys(controls).join(', ')}.`);
+}
+
+function report(label: string, ms: number, outcome: string) {
+	const line = `${label}: ${Math.round(ms)} ms (${outcome})`;
 	console.log(line);
 	if (process.env.GITHUB_STEP_SUMMARY) {
 		appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
@@ -37,7 +50,7 @@ test('imports the synthetic 2,000-image CT CD', async ({ request }) => {
 		expect(job?.state, job?.last_error ?? 'Import job state').toBe('done');
 		result = job.result;
 	}).toPass({ timeout: 270_000, intervals: [250, 500, 1_000] });
-	report('CT CD import (upload through completed job)', performance.now() - start);
+	report('CT CD import (upload through completed job)', performance.now() - start, 'no budget, reported only');
 	expect(result).toMatchObject({ imported: 1, instances: 2_000, in_review: 0, refused: 0 });
 });
 
@@ -45,13 +58,22 @@ test('opens the CT study under five seconds', async ({ page, request, baseURL })
 	test.setTimeout(60_000);
 	const shots = process.env.OWNHEALTH_IMAGING_CD_SHOTS;
 	const lang = process.env.OWNHEALTH_IMAGING_CD_LANG ?? 'en';
-	const throttled = process.env.OWNHEALTH_IMAGING_CD_THROTTLE === '1';
-	if (throttled) {
+	const throttled = control !== undefined;
+	const delay = () => new Promise((resolve) => setTimeout(resolve, controlDelayMs));
+	if (control === 'document') {
 		await page.route('**/ohif/t/**', async (route) => {
-			if (route.request().isNavigationRequest()) await new Promise((resolve) => setTimeout(resolve, 5_250));
+			if (route.request().isNavigationRequest()) await delay();
+			await route.continue();
+		});
+	} else if (control === 'frames') {
+		await page.route('**/dicom-web/t/**', async (route) => {
+			if (new URL(route.request().url()).pathname.includes('/frames/')) await delay();
 			await route.continue();
 		});
 	}
+	const label = throttled
+		? `Red control, ${controls[control]} delayed ${controlDelayMs} ms`
+		: 'Viewer open to first drawn CT frame';
 
 	if (shots && !throttled) {
 		await page.goto(`/imaging?lang=${lang}`);
@@ -99,13 +121,17 @@ test('opens the CT study under five seconds', async ({ page, request, baseURL })
 			return false;
 		}, undefined, { timeout: 35_000 });
 	} catch (error) {
-		report('Timed out waiting for a drawn CT frame', performance.now() - start);
+		report(`${label}, no drawn CT frame`, performance.now() - start, `budget ${budgetMs} ms, timed out`);
 		if (shots) await page.screenshot({ path: `${shots}/viewer-timeout-${lang}.png` });
 		throw error;
 	}
 
 	const elapsed = performance.now() - start;
-	report(throttled ? 'Throttled viewer open' : 'Viewer open to first drawn CT frame', elapsed);
+	const over = elapsed >= budgetMs;
+	const outcome = throttled
+		? over ? 'failed as expected' : 'passed, so this control is broken'
+		: over ? 'fail' : 'pass';
+	report(label, elapsed, `budget ${budgetMs} ms, ${outcome}`);
 	if (shots && !throttled) await page.screenshot({ path: `${shots}/viewer-${lang}.png` });
 	expect(elapsed, 'IMAGING_OPEN_BUDGET_EXCEEDED').toBeLessThan(budgetMs);
 });
