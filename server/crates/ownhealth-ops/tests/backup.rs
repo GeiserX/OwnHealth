@@ -1353,6 +1353,56 @@ async fn round_eight_a_partial_restore_can_retry_after_blob_placement_is_interru
     Ok(())
 }
 
+/// With every key at hand nothing is lost, so this restore saves no checkpoint. A restore that
+/// stopped before a checkpoint starts over on an empty target, and the refusal says how.
+#[tokio::test]
+async fn round_nine_a_restore_without_a_checkpoint_is_refused_with_the_way_to_start_over() -> R {
+    use sqlx::Connection;
+
+    let l = live().await?;
+    let (db, settings) = fresh(&l).await?;
+    let archived = tree(&l.archive)?;
+    let (last, last_path) = archived.last_key_value().expect("last blob");
+    let shard = last_path
+        .parent()
+        .expect("blob shard")
+        .strip_prefix(l.archive.join("blobs"))?;
+    let blocked = settings
+        .blobs_path()
+        .join(shard)
+        .join(format!(".{}.part", last.replace('/', "-")));
+    fs::create_dir_all(&blocked)?;
+    let stopped = ownhealth_ops::restore(&settings, &l.archive).await;
+    fs::remove_dir(&blocked)?;
+    assert!(matches!(&stopped, Err(ownhealth_core::Error::Io(_))), "{stopped:?}");
+
+    let refused = err_text(ownhealth_ops::restore(&settings, &l.archive).await);
+    for needed in [
+        "target database is not empty",
+        "drop and recreate the database",
+        "empty the blob folder",
+        "run the same restore again",
+        "deploy/README.md",
+    ] {
+        assert!(refused.contains(needed), "{needed:?} is missing from: {refused}");
+    }
+
+    // Start over as the message says: an empty database and an empty blob folder.
+    db.pool.close().await;
+    let mut admin = sqlx::PgConnection::connect(&ownhealth_core::testing::admin_url()).await?;
+    for sql in [
+        format!("drop database \"{}\" with (force)", db.name),
+        format!("create database \"{}\"", db.name),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(sql)).execute(&mut admin).await?;
+    }
+    admin.close().await?;
+    fs::remove_dir_all(settings.blobs_path())?;
+    let report = ownhealth_ops::restore(&settings, &l.archive).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_damaged_present_key_is_rejected_before_restore_even_with_allow_missing() -> R {
     use ownhealth_core::keyfile;
