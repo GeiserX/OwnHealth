@@ -329,8 +329,8 @@ test('a request whose delay runs out while the pages are open shows open at the 
 	await expect(row.getByRole('status')).toContainText('Waiting. Access opens on');
 	await cs.goto(`/family/break-glass/${third}?lang=en`);
 	await expect(cs.getByTestId('bgc-status')).toContainText('Waiting.');
-	// End the delay on the server, then advance the owner pages past the deadline they already read.
-	sql(`update break_glass_request set activates_at = now() - interval '1 second' where id = '${third}'`);
+	// Use the earlier calendar fetch as the deadline, then advance the owner pages past the deadline they read.
+	sql(`update break_glass_request set activates_at = owner_feed_at where id = '${third}'`);
 	const pastSetupDeadline = (setupMinutes + 1) * 60_000;
 	await page.clock.fastForward(pastSetupDeadline);
 	await expect(row.getByRole('status')).toContainText('Open until');
