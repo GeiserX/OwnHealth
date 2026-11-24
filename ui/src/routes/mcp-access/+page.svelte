@@ -279,9 +279,6 @@
 				</div>
 			{/if}
 		</section>
-		{#if app.me}
-			{#key app.me.user.id}<SessionReport />{/key}
-		{/if}
 		<section class="card" style="padding:8px 6px 2px" aria-labelledby="who-h">
 			<h3 style="padding:0 8px">
 				<span id="who-h">{whoProfile ? tf('au_who', { name: name(whoProfile) }) : t('au_who_h0')}</span>
@@ -380,11 +377,18 @@
 			</table>
 		</section>
 	</div>
+	{#if app.me}
+		<!-- Full width: the eight report columns do not fit the left column of a desktop screen. -->
+		<div class="wide">{#key app.me.user.id}<SessionReport />{/key}</div>
+	{/if}
 </div>
 
 <StepUpDialog />
 
 <style>
+	.wide {
+		grid-column: 1 / -1;
+	}
 	.chip.w {
 		color: var(--watch);
 		border-color: rgba(224, 168, 74, 0.5);

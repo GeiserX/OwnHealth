@@ -3,6 +3,7 @@
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
 	import { Loader } from '#lib/components/pages1/util.svelte';
 	import { int } from '#lib/components/pages2/fmt';
+	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { intlLocale } from '#lib/i18n/langs';
 
@@ -17,13 +18,22 @@
 		load();
 	});
 
+	// A session with any shortfall opens, so a collapsed one never hides a failure.
+	const fellShort = (s: SessionReportOut['sessions'][number]) =>
+		s.tools.some((r) => r.not_assessed_calls + r.budget_cuts + r.denied + r.errors > 0);
+
 	async function toggle(input: HTMLInputElement) {
 		if (!report.data) return;
+		// The box stays focusable while a save runs (aria-disabled), so a change then is undone here.
+		if (saving) {
+			input.checked = !input.checked;
+			return;
+		}
 		const enabled = input.checked;
 		saving = true;
 		saveError = false;
 		try {
-			await setSessionReportConsent(enabled);
+			await withStepUp(() => setSessionReportConsent(enabled));
 			// Clear old results as soon as the server confirms the new setting.
 			report.data = { enabled, sessions: [] };
 			if (enabled) await load();
@@ -45,7 +55,7 @@
 			<p class="note">{t('i2_sr_gap')}</p>
 			<p class="note">{t('i2_sr_data')}</p>
 			<label class="sr-consent">
-				<input type="checkbox" checked={report.data.enabled} disabled={saving} onchange={(event) => toggle(event.currentTarget)} />
+				<input type="checkbox" checked={report.data.enabled} aria-disabled={saving} onchange={(event) => toggle(event.currentTarget)} />
 				{t('i2_sr_consent')}
 			</label>
 			{#if saveError}<p class="p2err" role="alert">{t('i2_sr_save_error')}</p>{/if}
@@ -58,7 +68,7 @@
 			{:else}
 				<p class="note">{t('i2_sr_recent')}</p>
 				{#each report.data.sessions as session, i}
-					<details open={i === 0}>
+					<details open={i === 0 || fellShort(session)}>
 						<summary>{time.formatRange(new Date(session.started_at), new Date(session.ended_at))}</summary>
 						<div class="tscroll">
 							<table class="t stack">
