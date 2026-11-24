@@ -42,6 +42,9 @@ pub const MAX_PEOPLE: usize = 50_000;
 pub const MAX_FAMILIES: usize = 50_000;
 /// The most relatives one import proposes; the rest are counted in `left_out`.
 pub const MAX_PROPOSALS: usize = 200;
+/// The parents of the person whose side of the family (grandparents, aunts and uncles, cousins) is
+/// walked. A person has two birth parents; a file may name a few more when parentage is uncertain.
+const MAX_SIDES: usize = 8;
 
 // ----------------------------------------------------------------- refusals ----
 
@@ -598,7 +601,10 @@ impl Tree {
     }
 
     fn of(lists: &[Vec<usize>], i: usize) -> &[usize] {
-        lists.get(i).map_or(&[], Vec::as_slice)
+        let list: &[usize] = lists.get(i).map_or(&[], Vec::as_slice);
+        #[cfg(test)]
+        tests::VISITED.with(|v| v.set(v.get().saturating_add(list.len())));
+        list
     }
 
     pub fn parents_of(&self, i: usize) -> BTreeSet<usize> {
@@ -636,7 +642,8 @@ impl Tree {
 
     /// Children of another family of one of `i`'s parents.
     fn half_siblings(&self, i: usize) -> BTreeSet<usize> {
-        let own = Self::of(&self.famc, i);
+        // a set: a person who is the child of thousands of families must not scan them per parent
+        let own: BTreeSet<usize> = Self::of(&self.famc, i).iter().copied().collect();
         let full = self.full_siblings(i);
         self.parents_of(i)
             .iter()
@@ -706,7 +713,10 @@ impl Tree {
         for &s in &half {
             add(s, by_sex(s, "HBRO", "HSIS", Some("HSIB")));
         }
-        // the side of the family: through the father (paternal) or the mother (maternal)
+        // the side of the family: through the father (paternal) or the mother (maternal). Each side walks
+        // that parent's parents and siblings, so only the first MAX_SIDES parents get one: a file that
+        // gives a person thousands of parents would otherwise walk every family once per parent. Their
+        // relatives past the cap count as people with no relationship we record.
         let sides: Vec<(usize, bool)> = parents
             .iter()
             .filter_map(|&p| match self.sex(p) {
@@ -714,6 +724,7 @@ impl Tree {
                 "female" => Some((p, false)),
                 _ => None,
             })
+            .take(MAX_SIDES)
             .collect();
         for &(p, paternal) in &sides {
             for g in self.parents_of(p) {
@@ -996,6 +1007,12 @@ mod tests {
         "/../../../fixtures/gedcom/rivera-70.ged"
     ));
 
+    thread_local! {
+        /// Family members the relationship walk has read on this thread, so a test can bound the work
+        /// a hostile file costs without timing it.
+        pub(super) static VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     fn codes(t: &Tree, me: usize) -> Vec<&'static str> {
         t.relatives(me).into_iter().map(|(_, c)| c).collect()
     }
@@ -1252,6 +1269,39 @@ mod tests {
         // a year before 1800 is not kept, but still says the person has died
         let older = member(&t, Uuid::nil(), 2, "PGRFTH");
         assert_eq!((older.born_year, older.deceased), (None, true));
+    }
+
+    #[test]
+    fn a_person_named_the_child_of_hundreds_of_couples_costs_a_bounded_walk() {
+        use std::fmt::Write as _;
+
+        // a hostile file: X is the birth child of 500 couples, each with its own father and mother, and
+        // all 1,000 parents are birth children of one shared family G. Walking the aunts and uncles of
+        // every parent reads the 1,000 children of G once per parent: millions of reads, not a few
+        // thousand, and 20,000 couples in a 10 MiB file would be billions inside the import transaction.
+        let n = 500;
+        let mut file = String::from("0 HEAD\n0 @X@ INDI\n");
+        for k in 0..n {
+            writeln!(file, "0 @H{k}@ INDI\n1 SEX M\n0 @W{k}@ INDI\n1 SEX F").expect("write a parent");
+        }
+        for k in 0..n {
+            writeln!(file, "0 @F{k}@ FAM\n1 HUSB @H{k}@\n1 WIFE @W{k}@\n1 CHIL @X@").expect("write a couple");
+        }
+        file.push_str("0 @G@ FAM\n");
+        for k in 0..n {
+            writeln!(file, "1 CHIL @H{k}@\n1 CHIL @W{k}@").expect("write a child of G");
+        }
+        file.push_str("0 TRLR\n");
+        let tree = parse(file.as_bytes()).expect("the hostile shape is a valid file");
+        // the file holds 2,500 links: 1,000 parents, 500 child links of X and 1,000 of G
+        let links = 5 * n;
+        VISITED.with(|v| v.set(0));
+        let relatives = tree.relatives(0);
+        let visited = VISITED.with(std::cell::Cell::get);
+        assert!(visited < 20 * links, "{visited} family members read for {links} links");
+        // every parent is still a relative; their siblings are all parents already
+        assert_eq!(relatives.len(), 2 * n);
+        assert!(relatives.iter().all(|(_, code)| matches!(*code, "FTH" | "MTH")));
     }
 
     #[test]
