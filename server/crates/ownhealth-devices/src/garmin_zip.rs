@@ -200,8 +200,8 @@ fn hide_email(name: &str) -> String {
         .collect()
 }
 
-/// Read a member into `out`, at most one byte past its declared size even if the header lies. True
-/// when exactly `size` bytes came; a read error is a broken member (false), a write error is returned.
+/// Read up to one byte beyond the member's declared size. A short, oversized or damaged member
+/// returns false. Storage errors and output failures propagate so the job can retry.
 fn read_member(reader: impl Read, size: u64, out: &mut impl Write) -> io::Result<bool> {
     let mut bounded = reader.take(size.saturating_add(1));
     let mut read = 0;
@@ -214,14 +214,46 @@ fn read_member(reader: impl Read, size: u64, out: &mut impl Write) -> io::Result
                 out.write_all(&chunk[..n])?;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return Ok(false),
+            Err(e) if damaged_member(&e) => return Ok(false),
+            Err(e) => return Err(e),
         }
+    }
+}
+
+fn damaged_member(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof
+    )
+}
+
+/// The ZIP decoder uses these I/O error kinds for damaged data. Preserve the distinction when
+/// storage reports one of the same kinds, such as an error opening a sealed blob block.
+struct ArchiveReader<R>(R);
+
+impl<R: Read> Read for ArchiveReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf).map_err(storage_error)
+    }
+}
+
+impl<R: Seek> Seek for ArchiveReader<R> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.0.seek(pos).map_err(storage_error)
+    }
+}
+
+fn storage_error(error: io::Error) -> io::Error {
+    if damaged_member(&error) {
+        io::Error::other(error)
+    } else {
+        error
     }
 }
 
 fn zip_error(error: ZipError) -> Error {
     match error {
-        ZipError::Io(e) if e.kind() != io::ErrorKind::UnexpectedEof => e.into(),
+        ZipError::Io(e) if !damaged_member(&e) => e.into(),
         _ => Error::Upload(UNREADABLE.into()),
     }
 }
@@ -229,7 +261,7 @@ fn zip_error(error: ZipError) -> Error {
 /// ZipArchive collapses duplicate directory entries. Refuse such an archive instead of silently
 /// losing a member or letting a second entry with the same name shadow the first.
 fn open(reader: impl Read + Seek) -> Result<ZipArchive<impl Read + Seek>> {
-    let zip = ZipArchive::new(reader).map_err(zip_error)?;
+    let zip = ZipArchive::new(ArchiveReader(reader)).map_err(zip_error)?;
     if zip.has_duplicate_names() {
         return Err(Error::Upload(UNREADABLE.into()));
     }
@@ -237,15 +269,14 @@ fn open(reader: impl Read + Seek) -> Result<ZipArchive<impl Read + Seek>> {
 }
 
 /// Traverse one outer ZIP and at most one UploadedFiles ZIP below it. The shared budget counts the
-/// members and their names across both levels, and the expanded bytes of every file it reads: an
-/// UploadedFiles part's own bytes and then its members' (both are unpacked).
+/// files and the names of all entries across both levels. Expanded bytes include an
+/// UploadedFiles part's own bytes and then its members' because both are unpacked.
 fn scan<R: Read + Seek>(
     zip: &mut ZipArchive<R>,
     parent: Option<&str>,
     budget: &mut Budget,
     report: &mut Report,
 ) -> Result<()> {
-    budget.add_members(zip.len())?;
     for index in 0..zip.len() {
         let header = zip.by_index_data(index).map_err(zip_error)?;
         let size = header.size();
@@ -260,15 +291,18 @@ fn scan<R: Read + Seek>(
             .map(|c| if c.is_control() { '\u{fffd}' } else { c })
             .collect();
         member.push_str(&hide_email(&shown));
+        let kind = MemberKind::detect(&display, parent.is_some());
+        if !header.is_dir() && !matches!(kind, Some(MemberKind::FitArchive)) {
+            budget.add_members(1)?;
+        }
         if decoded.is_err() || unsafe_name(&display) || header.is_symlink() {
             report.omit(member, "unsafe_path");
             continue;
         }
-        // a folder is no file: nothing to import or list
         if header.is_dir() {
             continue;
         }
-        let Some(kind) = MemberKind::detect(&display, parent.is_some()) else {
+        let Some(kind) = kind else {
             let reason = if parent.is_some() && display.to_ascii_lowercase().ends_with(".zip") {
                 "nesting_limit"
             } else {
@@ -285,13 +319,16 @@ fn scan<R: Read + Seek>(
             report.omit(member, OVER_BUDGET);
             continue;
         }
-        let Ok(file) = zip.by_index(index) else {
-            report.omit(member, "invalid_member");
-            continue;
+        let file = match zip.by_index(index).map_err(zip_error) {
+            Ok(file) => file,
+            Err(Error::Upload(_)) => {
+                report.omit(member, "invalid_member");
+                continue;
+            }
+            Err(error) => return Err(error),
         };
         if matches!(kind, MemberKind::FitArchive) {
             let mut local = tempfile::tempfile()?;
-            // a read error is a broken member; a disk write error may heal on a retry
             if !read_member(file, size, &mut local)? {
                 report.omit(member, "invalid_member");
                 continue;
@@ -355,7 +392,10 @@ fn instant(value: &Value) -> Option<DateTime<Utc>> {
 }
 
 fn offset(local: &Value, gmt: &Value) -> Option<i16> {
-    let seconds = (instant(local)? - instant(gmt)?).num_seconds();
+    let seconds = match local.as_str().and_then(|text| DateTime::parse_from_rfc3339(text).ok()) {
+        Some(time) => i64::from(time.offset().local_minus_utc()),
+        None => (instant(local)? - instant(gmt)?).num_seconds(),
+    };
     (seconds % 60 == 0 && seconds.abs() <= 14 * 3600).then_some((seconds / 60) as i16)
 }
 
@@ -369,7 +409,7 @@ fn valid_time(t: DateTime<Utc>, latest: DateTime<Utc>) -> bool {
 
 fn row_samples(kind: GarminMember, row: &Value, latest: DateTime<Utc>, samples: &mut Vec<Sample>) {
     let day = || date(&row["calendarDate"]).or_else(|| date(&row["metaData"]["calendarDate"]));
-    let weight = &row["weight"];
+    let weight = if row["weight"].is_object() { &row["weight"] } else { row };
     let (time, tz) = match kind {
         GarminMember::Daily => {
             let tz = offset(&row["wellnessStartTimeLocal"], &row["wellnessStartTimeGmt"]);
@@ -458,7 +498,7 @@ fn row_samples(kind: GarminMember, row: &Value, latest: DateTime<Utc>, samples: 
         GarminMember::Weight => {
             // A profile setting is different from an actual measurement. Garmin stores grams.
             if weight["sourceType"] != "USER_SETTING" {
-                let grams = weight["weight"].as_f64().or_else(|| weight.as_f64());
+                let grams = weight["weight"].as_f64();
                 push("weight", None, grams.map(|g| g / 1000.0), 1.0, 500.0);
             }
         }
@@ -802,6 +842,120 @@ mod tests {
         budget.add_name(1)?;
         assert!(matches!(budget.add_name(1), Err(Error::Upload(code)) if code == LIMIT));
         Ok(())
+    }
+
+    #[test]
+    fn folders_and_uploaded_files_containers_do_not_spend_the_file_budget() -> anyhow::Result<()> {
+        use std::io::Cursor;
+        use zip::write::SimpleFileOptions;
+
+        let mut inner = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..128 {
+            inner.add_directory(format!("folder{index}/"), SimpleFileOptions::default())?;
+        }
+        inner.start_file("run.fit", SimpleFileOptions::default())?;
+        let part = inner.finish()?.into_inner();
+
+        let mut outer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..128 {
+            outer.add_directory(format!("folder{index}/"), SimpleFileOptions::default())?;
+        }
+        outer.start_file("UploadedFiles_1.zip", SimpleFileOptions::default())?;
+        outer.write_all(&part)?;
+        let mut archive = open(outer.finish()?)?;
+        let mut budget = Budget {
+            members: MAX_MEMBERS - 1,
+            ..Budget::default()
+        };
+        scan(&mut archive, None, &mut budget, &mut Report::default())?;
+        assert_eq!(budget.members, MAX_MEMBERS);
+        assert!(matches!(
+            scan(&mut archive, None, &mut budget, &mut Report::default()),
+            Err(Error::Upload(code)) if code == LIMIT
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_storage_read_error_is_retryable() {
+        let storage = FailedRead(|| io::Error::other("storage temporarily unavailable"));
+        let error = read_member(storage, 10, &mut Vec::new()).expect_err("storage failure");
+        assert_eq!(error.to_string(), "storage temporarily unavailable");
+        assert!(!JobError::from(Error::Io(error)).permanent);
+
+        let damaged = || io::Error::new(io::ErrorKind::InvalidData, "invalid bytes");
+        assert!(!read_member(FailedRead(damaged), 10, &mut Vec::new()).expect("damaged member"));
+        let storage = ArchiveReader(FailedRead(damaged));
+        assert!(read_member(storage, 10, &mut Vec::new()).is_err());
+    }
+
+    struct FailedRead<F>(F);
+
+    impl<F: Fn() -> io::Error> Read for FailedRead<F> {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err((self.0)())
+        }
+    }
+
+    #[test]
+    fn explicit_local_offsets_are_kept_for_daily_sleep_and_pressure_readings() -> anyhow::Result<()> {
+        for (kind, row) in [
+            (
+                GarminMember::Daily,
+                json!({
+                    "calendarDate": "2024-01-04", "totalSteps": 6200,
+                    "wellnessStartTimeLocal": "2024-01-04T00:00:00+02:00",
+                    "wellnessStartTimeGmt": "2024-01-03T22:00:00Z",
+                }),
+            ),
+            (
+                GarminMember::Sleep,
+                json!({
+                    "sleepStartTimestampGMT": "2024-01-03T22:00:00Z",
+                    "sleepEndTimestampLocal": "2024-01-04T08:00:00+02:00",
+                    "sleepEndTimestampGMT": "2024-01-04T06:00:00Z",
+                    "sleepTimeSeconds": 25200,
+                }),
+            ),
+            (
+                GarminMember::BloodPressure,
+                json!({
+                    "measurementTimestampLocal": "2024-01-04T00:00:00+02:00",
+                    "measurementTimestampGMT": "2024-01-03T22:00:00Z",
+                    "systolic": 118, "diastolic": 75,
+                }),
+            ),
+        ] {
+            let mut samples = Vec::new();
+            row_samples(kind, &row, Utc::now(), &mut samples);
+            assert!(!samples.is_empty(), "{kind:?}");
+            for sample in samples {
+                assert_eq!(
+                    (sample.t, sample.tz),
+                    ("2024-01-03T22:00:00Z".parse()?, Some(120)),
+                    "{kind:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_flat_weight_setting_is_not_a_measurement() {
+        let flat = |source| {
+            json!({
+                "weight": 70000, "sourceType": source, "timestampGMT": "2024-01-04T08:00:00Z",
+            })
+        };
+        let nested = |source| {
+            json!({
+                "weight": {"weight": 61200, "sourceType": source, "timestampGMT": "2024-01-04T08:00:00Z"},
+            })
+        };
+        assert_eq!(rows(GarminMember::Weight, flat("MANUAL")), [("weight", 70.0)]);
+        assert_eq!(rows(GarminMember::Weight, nested("SCALE")), [("weight", 61.2)]);
+        assert!(rows(GarminMember::Weight, flat("USER_SETTING")).is_empty());
+        assert!(rows(GarminMember::Weight, nested("USER_SETTING")).is_empty());
     }
 
     fn steps(n: usize) -> Vec<Sample> {
