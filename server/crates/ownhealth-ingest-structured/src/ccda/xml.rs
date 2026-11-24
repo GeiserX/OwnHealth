@@ -1,7 +1,7 @@
 //! Reading a C-CDA file safely, and the small tree helpers the converter uses.
 //!
 //! The file comes from outside (a portal download, an email), so the parser takes no chances:
-//! - a file over [`MAX_BYTES`] is refused before it is read;
+//! - a file over [`MAX_BYTES`] is refused before it is read (the import checks the stored size first);
 //! - a DOCTYPE is refused (roxmltree's default), so no entity is ever declared: billion laughs and
 //!   external entities cannot start;
 //! - the tree holds at most [`MAX_NODES`] nodes and [`MAX_DEPTH`] levels;
@@ -20,7 +20,7 @@ const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
 pub const MAX_BYTES: usize = 32 * 1024 * 1024;
 /// The most nodes (elements, text, comments) one file may hold; about 100 MB of tree at most.
 pub const MAX_NODES: u32 = 2_000_000;
-/// The deepest nesting accepted. Real C-CDA stays under 40 levels.
+/// The deepest element nesting accepted, the root element being level 1. Real C-CDA stays under 40.
 pub const MAX_DEPTH: usize = 256;
 /// The longest text read out of one narrative node, in characters.
 const MAX_TEXT: usize = 2_000;
@@ -31,14 +31,19 @@ fn refused(why: impl Into<String>) -> Error {
     Error::Invalid(why.into())
 }
 
+/// The refusal of a file of `size` bytes, over [`MAX_BYTES`].
+pub fn too_large(size: u64) -> Error {
+    refused(format!(
+        "the file is {} MB, over the {} MB a C-CDA document may have",
+        size / (1024 * 1024),
+        MAX_BYTES / (1024 * 1024)
+    ))
+}
+
 /// The file as text: UTF-8 (a byte order mark dropped), or Latin-1 when it is not UTF-8.
 pub fn text_of_file(bytes: &[u8]) -> Result<std::borrow::Cow<'_, str>> {
     if bytes.len() > MAX_BYTES {
-        return Err(refused(format!(
-            "the file is {} MB, over the {} MB a C-CDA document may have",
-            bytes.len() / (1024 * 1024),
-            MAX_BYTES / (1024 * 1024)
-        )));
+        return Err(too_large(bytes.len() as u64));
     }
     Ok(ownhealth_core::documents::decode_text(bytes))
 }
@@ -59,9 +64,10 @@ pub fn parse(text: &str) -> Result<Document<'_>> {
     if root.tag_name().name() != "ClinicalDocument" || root.tag_name().namespace() != Some(NS) {
         return Err(refused("the root element is not a CDA ClinicalDocument"));
     }
-    // descendants come in document order, so the nodes still open before a node are its ancestors
+    // descendants come in document order, so the elements still open before an element are its
+    // ancestors
     let mut open: Vec<Node> = Vec::new();
-    for n in doc.root().descendants() {
+    for n in root.descendants().filter(Node::is_element) {
         while open.last().is_some_and(|top| n.parent() != Some(*top)) {
             open.pop();
         }
@@ -121,12 +127,13 @@ pub fn is_true(n: Node<'_, '_>, name: &str) -> bool {
     attr(n, name).is_some_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
-/// The text inside `n`, whitespace collapsed, at most [`MAX_TEXT`] characters.
+/// The text inside `n`, whitespace collapsed, at most [`MAX_TEXT`] characters. It stops reading at
+/// that length, also inside one long text node.
 pub fn text(n: Node<'_, '_>) -> Option<String> {
     let mut out = String::new();
     let mut last_space = true;
     let mut chars = 0usize;
-    for (seen, d) in n.descendants().enumerate() {
+    'nodes: for (seen, d) in n.descendants().enumerate() {
         if seen >= MAX_TEXT_NODES || chars >= MAX_TEXT {
             break;
         }
@@ -143,6 +150,9 @@ pub fn text(n: Node<'_, '_>) -> Option<String> {
             continue;
         };
         for c in t.chars() {
+            if chars >= MAX_TEXT {
+                break 'nodes;
+            }
             if c.is_whitespace() {
                 if !last_space {
                     out.push(' ');

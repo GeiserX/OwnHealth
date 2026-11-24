@@ -7,6 +7,7 @@ Every file is a copy, unchanged, of a sample in the HL7 C-CDA-Examples repositor
 | File | HL7 sample |
 |---|---|
 | `history-and-physical.xml` | `Documents/History and Physical/History_and_Physical.xml`: all six core sections and eleven others |
+| `ccd-1.xml` | `Documents/CCD/CCD 1/CCD.XML`: a CCD whose allergy concern act carries its own Severity Observation |
 | `ccd-2.xml` | `Documents/CCD/CCD 2/CCD.xml`: a CCD whose Medications and Problems sections say "no information" |
 | `sections/allergies-none-known.xml` | `Allergies/No Known Allergies/No Known Allergies with Author Timestamp(C-CDA2.1).xml` |
 | `sections/allergies-not-peanuts.xml` | `Allergies/Not Allergic to Peanuts/Not Allergic to Peanuts(C-CDAR2.1).xml` |

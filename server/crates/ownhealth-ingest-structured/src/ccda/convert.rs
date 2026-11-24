@@ -21,16 +21,27 @@
 //!   never becomes a plain record: a problem is `refuted`, an allergy keeps no substance code and a
 //!   medicine is `not-taken`, so the importer holds the last two for review.
 //! - A Medication Activity in `EVN` mood is a MedicationStatement (what the person takes), and every
-//!   SUBJ observation of a concern act is read, not only the first.
+//!   SUBJ observation of a concern act is read, not only the first. In an allergy concern act only an
+//!   Allergy-Intolerance Observation (or one without a templateId) is an allergy; a Severity
+//!   Observation there fills the severity of the reactions that have none, and any other observation
+//!   is listed as not read.
+//! - The Patient id never comes from the social security number: from the first other patientRole
+//!   `id`, else from the name, birth date and gender.
+//! - DS4P labels (a Security Observation, templateId `2.16.840.1.113883.3.3445.*`, in an entry or as
+//!   an entry of its section) and a confidentialityCode other than `N` (of the document, the section or
+//!   inside the entry) go to every resource made there as `meta.security`, so the FHIR importer marks
+//!   the record sensitive as it does for a labelled FHIR file. A Security Observation is never a
+//!   record of its own.
 //! - A Results organizer is a DiagnosticReport with the Observations as its results; a Vital Signs
 //!   organizer only groups, so its observations come alone.
 //! - Every section, entry or part the converter does not read is listed in the section's report, and
 //!   the importer turns it into a review item. Nothing is thrown away and nothing throws.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use ownhealth_core::Result;
-use roxmltree::Node;
+use roxmltree::{Node, NodeId};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -124,6 +135,9 @@ pub struct SectionReport {
     pub resources: BTreeMap<String, usize>,
     /// One line per entry, or part of an entry, that was not read (`observation 2.16.840...`).
     pub not_read: Vec<String>,
+    /// The section has narrative text of its own and does not say it has no information (no
+    /// `nullFlavor`).
+    pub narrative: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -152,11 +166,15 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
     let text = xml::text_of_file(bytes)?;
     let doc = xml::parse(&text)?;
     let root = doc.root_element();
+    let doc_labels = confidentiality(root).into_iter().collect::<Vec<_>>();
     let mut c = Conv {
         text: &text,
         narrative: xml::narrative_ids(&doc),
+        read: RefCell::new(HashMap::new()),
         ids: HashMap::new(),
         patient: None,
+        labels: doc_labels.clone(),
+        doc_labels,
         out: Vec::new(),
     };
     c.header(root);
@@ -196,11 +214,16 @@ fn subsections<'a, 'i>(n: Node<'a, 'i>) -> impl Iterator<Item = Node<'a, 'i>> {
 const OID_LOINC: &str = "2.16.840.1.113883.6.1";
 const OID_SNOMED: &str = "2.16.840.1.113883.6.96";
 const OID_SSN: &str = "2.16.840.1.113883.4.1";
+const OID_CONFIDENTIALITY: &str = "2.16.840.1.113883.5.25";
 const SNOMED: &str = "http://snomed.info/sct";
+/// The templateId root of every DS4P template (Security Observation `.21` and its kin).
+const DS4P: &str = "2.16.840.1.113883.3.3445.";
+const ALLERGY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.7";
+const SEVERITY_OBSERVATION: &str = "2.16.840.1.113883.10.20.22.4.8";
 
 /// C-CDA code system OIDs and the FHIR system URL each one has (Medplum `systems.ts`, with CVX and
 /// the ICD and NDC systems at their HL7 URLs). Any other OID becomes `urn:oid:<oid>`.
-const SYSTEMS: [(&str, &str); 22] = [
+const SYSTEMS: [(&str, &str); 23] = [
     (OID_LOINC, LOINC),
     (OID_SNOMED, SNOMED),
     ("2.16.840.1.113883.6.88", "http://www.nlm.nih.gov/research/umls/rxnorm"),
@@ -228,6 +251,10 @@ const SYSTEMS: [(&str, &str); 22] = [
     (
         "2.16.840.1.113883.5.1",
         "http://terminology.hl7.org/CodeSystem/v3-AdministrativeGender",
+    ),
+    (
+        OID_CONFIDENTIALITY,
+        "http://terminology.hl7.org/CodeSystem/v3-Confidentiality",
     ),
     (
         "2.16.840.1.113883.5.111",
@@ -281,6 +308,8 @@ pub fn fhir_datetime(ts: &str) -> Option<String> {
         return Some(format!("{year}-{month}"));
     }
     let day = part(6, 8).filter(|d| in_range(d, 1, 31))?;
+    // a day the month does not have (February 31) is no date
+    chrono::NaiveDate::from_ymd_opt(year.parse().ok()?, month.parse().ok()?, day.parse().ok()?)?;
     let date = format!("{year}-{month}-{day}");
     if value.len() < 10 {
         return Some(date);
@@ -460,14 +489,26 @@ struct Conv<'a, 'i> {
     /// The whole file, so an entry without an `id` is known by its bytes.
     text: &'i str,
     narrative: HashMap<&'a str, Node<'a, 'i>>,
+    /// The text of each narrative element a reference read, so a narrative many entries point at is
+    /// read once.
+    read: RefCell<HashMap<NodeId, Option<String>>>,
     /// `<type>/<id>` given so far, to tell apart entries of one file that share an `id`.
     ids: HashMap<String, usize>,
     patient: Option<String>,
+    /// The document's security labels, and the labels of the entry being read (the document's, its
+    /// section's and its own): each resource made gets them as `meta.security`.
+    doc_labels: Vec<Value>,
+    labels: Vec<Value>,
     out: Vec<Entry>,
 }
 
 impl<'a, 'i> Conv<'a, 'i> {
-    fn push(&mut self, rep: Option<&mut SectionReport>, pointer: &str, resource: Value) {
+    fn push(&mut self, rep: Option<&mut SectionReport>, pointer: &str, mut resource: Value) {
+        if !self.labels.is_empty()
+            && let Value::Object(r) = &mut resource
+        {
+            r.insert("meta".into(), json!({"security": self.labels}));
+        }
         let rtype = resource["resourceType"].as_str().unwrap_or_default().to_string();
         if let Some(rep) = rep {
             *rep.resources.entry(rtype).or_default() += 1;
@@ -493,6 +534,11 @@ impl<'a, 'i> Conv<'a, 'i> {
     fn new_id(&mut self, rtype: &str, ids_of: &[Node<'_, '_>], element: Node<'_, '_>) -> String {
         let basis = Self::first_id(ids_of)
             .unwrap_or_else(|| format!("bytes:{}", self.text.get(element.range()).unwrap_or_default()));
+        self.id_from(rtype, &basis)
+    }
+
+    /// [`Self::new_id`] from a given basis.
+    fn id_from(&mut self, rtype: &str, basis: &str) -> String {
         let mut id = format!("ccda-{}", &hex::encode(Sha256::digest(basis.as_bytes()))[..16]);
         let seen = self.ids.entry(format!("{rtype}/{id}")).or_default();
         *seen += 1;
@@ -530,7 +576,12 @@ impl<'a, 'i> Conv<'a, 'i> {
     fn narrative_of(&self, n: Node<'_, '_>) -> Option<String> {
         if let Some(r) = child(n, "reference").and_then(|r| attr(r, "value"))
             && let Some(target) = self.narrative.get(r.trim_start_matches('#'))
-            && let Some(t) = xml::text(*target)
+            && let Some(t) = self
+                .read
+                .borrow_mut()
+                .entry(target.id())
+                .or_insert_with(|| xml::text(*target))
+                .clone()
         {
             return Some(t);
         }
@@ -594,26 +645,14 @@ impl<'a, 'i> Conv<'a, 'i> {
 
     fn header(&mut self, root: Node<'_, '_>) {
         if let Some(role) = path(root, &["recordTarget", "patientRole"]) {
-            let id = self.new_id("Patient", &[role], role);
-            let mut r = Map::new();
-            r.insert("resourceType".into(), json!("Patient"));
-            r.insert("id".into(), json!(id));
-            // the social security number identifies no record: it stays in the file only
-            let ids: Vec<Node<'_, '_>> = vec![role];
-            if let Some(Value::Array(list)) = Self::identifiers(&ids) {
-                let ssn = system_url(OID_SSN);
-                let kept: Vec<Value> = list.into_iter().filter(|i| i["system"] != json!(ssn)).collect();
-                if !kept.is_empty() {
-                    r.insert("identifier".into(), Value::Array(kept));
-                }
-            }
             let patient = child(role, "patient");
             let names: Vec<Value> = patient
                 .map(|p| children(p, "name").filter_map(Self::name).collect())
                 .unwrap_or_default();
-            if !names.is_empty() {
-                r.insert("name".into(), Value::Array(names));
-            }
+            let birth = patient
+                .and_then(|p| child(p, "birthTime"))
+                .and_then(|b| attr(b, "value"))
+                .and_then(fhir_date);
             let gender = patient
                 .and_then(|p| child(p, "administrativeGenderCode"))
                 .and_then(|g| attr(g, "code"))
@@ -623,11 +662,34 @@ impl<'a, 'i> Conv<'a, 'i> {
                     "UN" => Some("other"),
                     _ => None,
                 });
+            // the social security number identifies no record: it stays in the file only, and the
+            // id comes from another id of the patient, else from who the patient is
+            let basis = children(role, "id")
+                .filter(|i| attr(*i, "nullFlavor").is_none() && attr(*i, "root") != Some(OID_SSN))
+                .find_map(|i| attr(i, "root").map(|r| format!("{r}|{}", attr(i, "extension").unwrap_or_default())))
+                .unwrap_or_else(|| {
+                    format!(
+                        "patient:{}|{}|{}",
+                        Value::Array(names.clone()),
+                        birth.as_deref().unwrap_or_default(),
+                        gender.unwrap_or_default()
+                    )
+                });
+            let id = self.id_from("Patient", &basis);
+            let mut r = Map::new();
+            r.insert("resourceType".into(), json!("Patient"));
+            r.insert("id".into(), json!(id));
+            if let Some(Value::Array(list)) = Self::identifiers(&[role]) {
+                let ssn = system_url(OID_SSN);
+                let kept: Vec<Value> = list.into_iter().filter(|i| i["system"] != json!(ssn)).collect();
+                if !kept.is_empty() {
+                    r.insert("identifier".into(), Value::Array(kept));
+                }
+            }
+            if !names.is_empty() {
+                r.insert("name".into(), Value::Array(names));
+            }
             put(&mut r, "gender", gender.map(|g| json!(g)));
-            let birth = patient
-                .and_then(|p| child(p, "birthTime"))
-                .and_then(|b| attr(b, "value"))
-                .and_then(fhir_date);
             put(&mut r, "birthDate", birth.map(Value::String));
             self.patient = Some(format!("Patient/{id}"));
             self.push(None, "/recordTarget", Value::Object(r));
@@ -684,6 +746,7 @@ impl<'a, 'i> Conv<'a, 'i> {
             code: child(sec, "code").and_then(|c| attr(c, "code")).map(String::from),
             kind: Section::of(sec),
             entries: entries.len(),
+            narrative: attr(sec, "nullFlavor").is_none() && child(sec, "text").and_then(xml::text).is_some(),
             pointer,
             ..SectionReport::default()
         };
@@ -691,12 +754,27 @@ impl<'a, 'i> Conv<'a, 'i> {
         let Some(kind) = rep.kind else {
             return rep;
         };
+        // the section's labels: its confidentialityCode, and Security Observations that are entries
+        let mut section_labels = self.doc_labels.clone();
+        add_labels(&mut section_labels, confidentiality(sec));
+        for el in entries
+            .iter()
+            .flat_map(|e| elements(*e))
+            .filter(|el| is_security_observation(*el))
+        {
+            add_labels(&mut section_labels, security_values(el));
+        }
         for (j, entry) in entries.into_iter().enumerate() {
             let at = format!("{}/entry/{j}", rep.pointer);
+            self.labels = section_labels.clone();
+            add_labels(&mut self.labels, entry_labels(entry));
             for (k, el) in elements(entry).enumerate() {
                 let at = if k == 0 { at.clone() } else { format!("{at}/{k}") };
+                if is_security_observation(el) {
+                    continue; // read above, as a label of the section
+                }
                 let read = match (kind, el.tag_name().name()) {
-                    (Section::Allergies, "act") => self.concern(el, &at, &mut rep, Self::allergy),
+                    (Section::Allergies, "act") => self.allergy_concern(el, &at, &mut rep),
                     (Section::Allergies, "observation") => {
                         self.allergy(el, None, &at, &mut rep);
                         true
@@ -729,10 +807,11 @@ impl<'a, 'i> Conv<'a, 'i> {
                 }
             }
         }
+        self.labels = self.doc_labels.clone();
         rep
     }
 
-    /// A concern act (allergy or problem): one resource per SUBJ observation. False when it holds none.
+    /// A problem concern act: one Condition per SUBJ observation. False when it holds none.
     fn concern(
         &mut self,
         act: Node<'_, '_>,
@@ -746,6 +825,32 @@ impl<'a, 'i> Conv<'a, 'i> {
             each(self, *obs, Some(act), &at, rep);
         }
         !subjects.is_empty()
+    }
+
+    /// An allergy concern act: one AllergyIntolerance per Allergy-Intolerance Observation (or SUBJ
+    /// observation without a templateId). A Severity Observation of the act gives the severity of
+    /// reactions that state none; one the converter cannot map, and any other observation, is listed
+    /// as not read. False when the act holds no allergy.
+    fn allergy_concern(&mut self, act: Node<'_, '_>, at: &str, rep: &mut SectionReport) -> bool {
+        let mut allergies = Vec::new();
+        let mut left = Vec::new();
+        for obs in related(act, Some("SUBJ")) {
+            let roots = templates(obs);
+            if roots.is_empty() || roots.contains(&ALLERGY_OBSERVATION) {
+                allergies.push(obs);
+            } else if !(roots.contains(&SEVERITY_OBSERVATION) && severity_of(obs).is_some()) {
+                left.push(describe(obs));
+            }
+        }
+        for (i, obs) in allergies.iter().enumerate() {
+            let at = if i == 0 { at.to_string() } else { format!("{at}#{i}") };
+            self.allergy(*obs, Some(act), &at, rep);
+        }
+        if allergies.is_empty() {
+            return false;
+        }
+        rep.not_read.extend(left);
+        true
     }
 
     fn allergy(&mut self, obs: Node<'_, '_>, act: Option<Node<'_, '_>>, at: &str, rep: &mut SectionReport) {
@@ -822,6 +927,10 @@ impl<'a, 'i> Conv<'a, 'i> {
             "criticality",
             lookup(&CRITICALITY, related_value(obs, &["2.16.840.1.113883.10.20.22.4.145"])).map(|c| json!(c)),
         );
+        // the act's own Severity Observation, for the reactions that state none
+        let act_severity = act
+            .and_then(|a| related(a, Some("SUBJ")).find(|o| has_template(*o, &[SEVERITY_OBSERVATION])))
+            .and_then(severity_of);
         let reactions: Vec<Value> = related(obs, Some("MFST"))
             .map(|ro| {
                 let mut rx = Map::new();
@@ -830,7 +939,10 @@ impl<'a, 'i> Conv<'a, 'i> {
                 });
                 rx.insert("manifestation".into(), json!([manifestation]));
                 put(&mut rx, "onset", bound(child(ro, "effectiveTime"), "low").map(Value::String));
-                let severity = lookup(&SEVERITY, related_value(ro, &["2.16.840.1.113883.10.20.22.4.8"]));
+                let severity = related(ro, None)
+                    .find(|o| has_template(*o, &[SEVERITY_OBSERVATION]))
+                    .and_then(severity_of)
+                    .or(act_severity);
                 put(&mut rx, "severity", severity.map(|s| json!(s)));
                 Value::Object(rx)
             })
@@ -1082,6 +1194,9 @@ impl<'a, 'i> Conv<'a, 'i> {
                     "{at}/component/{i}{}",
                     if k == 0 { String::new() } else { format!("/{k}") }
                 );
+                if is_security_observation(el) {
+                    continue; // a label of the entry
+                }
                 let id = match el.tag_name().name() {
                     "observation" => self.observation(el, Some(org), "laboratory", &at, rep),
                     _ => None,
@@ -1136,6 +1251,9 @@ impl<'a, 'i> Conv<'a, 'i> {
                     "{at}/component/{i}{}",
                     if k == 0 { String::new() } else { format!("/{k}") }
                 );
+                if is_security_observation(el) {
+                    continue; // a label of the entry
+                }
                 let read = el.tag_name().name() == "observation"
                     && self.observation(el, Some(org), "vital-signs", &at, rep).is_some();
                 if read {
@@ -1291,6 +1409,69 @@ fn attr_ts(n: Option<Node<'_, '_>>) -> Option<String> {
     n.and_then(|n| attr(n, "value")).and_then(fhir_datetime)
 }
 
+/// The FHIR severity of a Severity Observation, when its value maps.
+fn severity_of(obs: Node<'_, '_>) -> Option<&'static str> {
+    lookup(&SEVERITY, child(obs, "value").and_then(|v| attr(v, "code")))
+}
+
+// ------------------------------------------------------------------ labels ----
+
+/// A DS4P observation (Security Observation and its kin): a label, never a record.
+fn is_security_observation(n: Node<'_, '_>) -> bool {
+    n.tag_name().name() == "observation" && templates(n).iter().any(|t| t.starts_with(DS4P))
+}
+
+fn label(code_node: Node<'_, '_>) -> Option<Value> {
+    let code = attr(code_node, "code")?;
+    let mut c = Map::new();
+    put(
+        &mut c,
+        "system",
+        attr(code_node, "codeSystem").map(|s| json!(system_url(s))),
+    );
+    c.insert("code".into(), json!(code));
+    Some(Value::Object(c))
+}
+
+/// The confidentialityCode child of `n` as a label, unless it is `N` (normal).
+fn confidentiality(n: Node<'_, '_>) -> Option<Value> {
+    child(n, "confidentialityCode")
+        .filter(|c| attr(*c, "code").is_some_and(|code| !code.eq_ignore_ascii_case("N")))
+        .and_then(label)
+}
+
+/// The values of a DS4P observation as labels.
+fn security_values(obs: Node<'_, '_>) -> Vec<Value> {
+    children(obs, "value").filter_map(label).collect()
+}
+
+/// The labels inside one entry: every confidentialityCode (other than `N`) and every DS4P
+/// observation's values, at any depth.
+fn entry_labels(entry: Node<'_, '_>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for d in entry
+        .descendants()
+        .filter(|d| d.is_element() && d.tag_name().namespace() == Some(xml::NS))
+    {
+        if d.tag_name().name() == "confidentialityCode" {
+            if let Some(parent) = d.parent_element() {
+                add_labels(&mut out, confidentiality(parent));
+            }
+        } else if is_security_observation(d) {
+            add_labels(&mut out, security_values(d));
+        }
+    }
+    out
+}
+
+fn add_labels(to: &mut Vec<Value>, labels: impl IntoIterator<Item = Value>) {
+    for l in labels {
+        if !to.contains(&l) {
+            to.push(l);
+        }
+    }
+}
+
 /// How a part that was not read is listed: its element and first templateId.
 fn describe(el: Node<'_, '_>) -> String {
     let t = templates(el);
@@ -1330,6 +1511,16 @@ mod tests {
             assert_eq!(fhir_datetime(bad), None, "{bad}");
         }
         assert_eq!(fhir_date("20141015103026-0500").as_deref(), Some("2014-10-15"));
+    }
+
+    /// C-F8: a day the month does not have is no date.
+    #[test]
+    fn an_impossible_day_is_no_date() {
+        for bad in ["20230231", "20230229", "20230431", "2023023110"] {
+            assert_eq!(fhir_datetime(bad), None, "{bad}");
+        }
+        assert_eq!(fhir_datetime("20240229").as_deref(), Some("2024-02-29"));
+        assert_eq!(fhir_datetime("20230131").as_deref(), Some("2023-01-31"));
     }
 
     #[test]

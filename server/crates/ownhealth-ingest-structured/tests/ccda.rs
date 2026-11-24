@@ -28,6 +28,14 @@ fn fixture(name: &str) -> Vec<u8> {
 /// A minimal ClinicalDocument for Isabella Jones (born 2005-05-01) around `body`, the `component`
 /// elements of its structured body.
 fn document(body: &str) -> Vec<u8> {
+    document_with(
+        r#"<id root="2.16.840.1.113883.19.5.99999.2" extension="998991"/>"#,
+        body,
+    )
+}
+
+/// [`document`] with `ids` as the `id` elements of its patientRole.
+fn document_with(ids: &str, body: &str) -> Vec<u8> {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:sdtc="urn:hl7-org:sdtc">
@@ -37,7 +45,7 @@ fn document(body: &str) -> Vec<u8> {
   <title>Test document</title>
   <effectiveTime value="20151115"/>
   <recordTarget><patientRole>
-    <id root="2.16.840.1.113883.19.5.99999.2" extension="998991"/>
+    {ids}
     <patient><name><given>Isabella</given><family>Jones</family></name>
       <administrativeGenderCode code="F" codeSystem="2.16.840.1.113883.5.1"/><birthTime value="20050501"/></patient>
   </patientRole></recordTarget>
@@ -551,5 +559,456 @@ async fn an_uploaded_ccd_is_sniffed_and_imported_by_its_job_and_a_broken_one_fai
     };
     assert!(e.permanent, "{e}");
     assert!(e.to_string().contains("not a readable C-CDA document"), "{e}");
+    Ok(())
+}
+
+// ------------------------------------------------------------- round 1 ----
+
+/// A problem act around one Problem Observation with `value`, `times` (the observation's
+/// effectiveTime children) and `extra` (more children of the observation).
+fn problem_entry(id: &str, value: &str, times: &str, extra: &str) -> String {
+    format!(
+        r#"<entry><act classCode="ACT" moodCode="EVN"><templateId root="2.16.840.1.113883.10.20.22.4.3"/>
+          <id root="1.2.3.4" extension="act-{id}"/>
+          <entryRelationship typeCode="SUBJ"><observation classCode="OBS" moodCode="EVN">
+            <templateId root="2.16.840.1.113883.10.20.22.4.4"/><id root="1.2.3.4" extension="obs-{id}"/>
+            <code code="55607006" codeSystem="2.16.840.1.113883.6.96"/>
+            <effectiveTime>{times}</effectiveTime>
+            <value xsi:type="CD" codeSystem="2.16.840.1.113883.6.96" {value}/>{extra}
+          </observation></entryRelationship></act></entry>"#
+    )
+}
+
+fn problems_section(entries: &str) -> String {
+    format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.5.1"/><title>PROBLEMS</title>{entries}</section></component>"#
+    )
+}
+
+/// A DS4P Security Observation whose value is `code` (v3 ActCode).
+fn security_label(code: &str) -> String {
+    format!(
+        r#"<observation classCode="OBS" moodCode="EVN"><templateId root="2.16.840.1.113883.3.3445.21"/>
+          <code code="SECCLASSOBS" codeSystem="2.16.840.1.113883.5.4"/>
+          <value xsi:type="CE" code="{code}" codeSystem="2.16.840.1.113883.5.4"/></observation>"#
+    )
+}
+
+async fn as_isabella(conn: &mut PgConnection, fam: &ownhealth_core::demo::Family, slug: &str) -> anyhow::Result<Uuid> {
+    let p = fam.profile(slug);
+    sqlx::query("update profile set display_name = 'Isabella Jones', birth_date = '2005-05-01' where id = $1")
+        .bind(p)
+        .execute(&mut *conn)
+        .await?;
+    Ok(p)
+}
+
+/// C-F1: a narrative that many entries point at is read once, and only up to its first characters.
+#[test]
+fn a_large_narrative_referenced_many_times_converts_in_bounded_time() -> R {
+    let narrative = "word ".repeat(4 * 1024 * 1024 / 5);
+    let entry = r##"<entry><observation classCode="OBS" moodCode="EVN"><code><originalText><reference value="#n"/></originalText></code></observation></entry>"##;
+    let body = format!(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>RESULTS</title>
+          <text><paragraph ID="n">{narrative}</paragraph></text>{}</section></component>"#,
+        entry.repeat(500)
+    );
+    let bytes = document(&body);
+    let started = std::time::Instant::now();
+    let c = convert(&bytes)?;
+    let took = started.elapsed();
+    let observations = resources(&c, "Observation");
+    assert_eq!(observations.len(), 500);
+    assert!(
+        observations
+            .iter()
+            .all(|o| o["code"]["text"].as_str().is_some_and(|t| t.chars().count() <= 2_000))
+    );
+    // each reference used to walk the whole 4 MB text node: about 90 ms each in a debug build
+    assert!(took < std::time::Duration::from_secs(5), "{took:?}");
+    Ok(())
+}
+
+/// C-F2: the social security number gives no id, wherever the patientRole lists it.
+#[test]
+fn no_id_derives_from_the_social_security_number() -> R {
+    use sha2::{Digest, Sha256};
+    let ssn = r#"<id root="2.16.840.1.113883.4.1" extension="111-00-2330"/>"#;
+    let mrn = r#"<id root="2.16.840.1.113883.19.5.99999.2" extension="998991"/>"#;
+    let hash = hex::encode(Sha256::digest(b"2.16.840.1.113883.4.1|111-00-2330"));
+    let body = problems_section(&problem_entry(
+        "p",
+        r#"code="233604007" displayName="Pneumonia""#,
+        "",
+        "",
+    ));
+    let patient_id = |c: &Converted| resources(c, "Patient")[0]["id"].clone();
+    let plain = convert(&document_with(mrn, &body))?;
+    for ids in [format!("{ssn}{mrn}"), ssn.to_string()] {
+        let c = convert(&document_with(&ids, &body))?;
+        for e in &c.entries {
+            let text = e.resource.to_string();
+            assert!(
+                !text.contains(&hash[..16]) && !text.contains("111-00-2330"),
+                "{ids}: {text}"
+            );
+        }
+        if ids.contains("998991") {
+            // the other id names the patient, as in a file without the number
+            assert_eq!(patient_id(&c), patient_id(&plain));
+        }
+    }
+    Ok(())
+}
+
+/// C-F4: a core section that holds only narrative (Medications as a table, no entries) is listed
+/// with the other narrative-only sections; one that says "no information" (nullFlavor) is not.
+#[test]
+fn a_core_section_with_only_narrative_is_held_with_the_narrative() -> R {
+    let c = convert(&document(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.1"/>
+             <code code="10160-0" codeSystem="2.16.840.1.113883.6.1"/><title>MEDICATIONS</title>
+             <text><table><tr><td>Metformin 500 mg twice a day</td></tr><tr><td>Lisinopril 10 mg</td></tr></table></text>
+           </section></component>
+           <component><section nullFlavor="NI"><templateId root="2.16.840.1.113883.10.20.22.2.5.1"/>
+             <title>PROBLEMS</title><text>No information</text></section></component>
+           <component><section><templateId root="1.2.3.9"/><title>NOTES</title><text>free note</text></section></component>"#,
+    ))?;
+    let held = held_items(&c, "ccda-x", "meds.xml");
+    assert_eq!(held.len(), 1, "{}", json!(held));
+    assert_eq!(held[0]["resource_type"], ccda::NARRATIVE);
+    assert_eq!(
+        held[0]["notes"],
+        json!({"MEDICATIONS (2.16.840.1.113883.10.20.22.2.1)": 1, "NOTES (1.2.3.9)": 1})
+    );
+    assert_eq!(held[0]["count"], 2);
+    Ok(())
+}
+
+/// C-F5: "did not take aspirin" is never a medicine taken: no row, one item in review.
+#[tokio::test]
+async fn a_medicine_not_taken_is_never_recorded_as_taken() -> R {
+    let body = r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.1.1"/><title>MEDICATIONS</title>
+      <entry><substanceAdministration classCode="SBADM" moodCode="EVN" negationInd="true">
+        <templateId root="2.16.840.1.113883.10.20.22.4.16"/><id root="1.2.3.4" extension="med-neg-1"/>
+        <statusCode code="completed"/><effectiveTime xsi:type="IVL_TS"><low value="20230101"/></effectiveTime>
+        <consumable><manufacturedProduct><templateId root="2.16.840.1.113883.10.20.22.4.23"/>
+          <manufacturedMaterial><code code="1191" codeSystem="2.16.840.1.113883.6.88" displayName="Aspirin"/></manufacturedMaterial>
+        </manufacturedProduct></consumable></substanceAdministration></entry>
+    </section></component>"#;
+    let bytes = document(body);
+    let c = convert(&bytes)?;
+    let aspirin = resources(&c, "MedicationStatement")[0];
+    assert_eq!(aspirin["status"], "not-taken");
+    assert_eq!(aspirin["medicationCodeableConcept"]["coding"][0]["code"], "1191");
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = as_isabella(&mut tx, &fam, "lucia").await?;
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &bytes, "neg.xml", ccda::MIME).await?;
+    let s = import_ccda(&mut tx, &env.blobs, doc).await?;
+    assert_eq!((s.accepted, s.queued), (0, 1), "{s:?}");
+    assert_eq!(count(&mut tx, "medication_statement", p).await?, 0);
+    Ok(())
+}
+
+/// C-F7: a problem whose observation has an end date and no status observation is resolved.
+#[test]
+fn a_problem_with_an_end_date_is_resolved() -> R {
+    let c = convert(&document(&problems_section(&format!(
+        "{}{}",
+        problem_entry(
+            "ended",
+            r#"code="233604007" displayName="Pneumonia""#,
+            r#"<low value="20200110"/><high value="20200301"/>"#,
+            ""
+        ),
+        problem_entry(
+            "open",
+            r#"code="38341003" displayName="Hypertension""#,
+            r#"<low value="20190101"/>"#,
+            ""
+        )
+    ))))?;
+    let conditions = resources(&c, "Condition");
+    let status: Vec<(&str, &str)> = conditions
+        .iter()
+        .map(|r| {
+            (
+                r["code"]["coding"][0]["code"].as_str().unwrap_or_default(),
+                r["clinicalStatus"]["coding"][0]["code"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(status, [("233604007", "resolved"), ("38341003", "active")]);
+    assert_eq!(conditions[0]["abatementDateTime"], "2020-03-01");
+    Ok(())
+}
+
+/// C-F7: a Medication Activity in INT mood is a MedicationRequest (an order), not a medicine taken.
+#[test]
+fn an_intended_medicine_is_a_request() -> R {
+    let c = convert(&document(
+        r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.1.1"/><title>MEDICATIONS</title>
+          <entry><substanceAdministration classCode="SBADM" moodCode="INT">
+            <templateId root="2.16.840.1.113883.10.20.22.4.16"/><id root="1.2.3.4" extension="med-int-1"/>
+            <statusCode code="active"/>
+            <consumable><manufacturedProduct><manufacturedMaterial>
+              <code code="860975" codeSystem="2.16.840.1.113883.6.88" displayName="Metformin 500 MG Oral Tablet"/>
+            </manufacturedMaterial></manufacturedProduct></consumable></substanceAdministration></entry>
+        </section></component>"#,
+    ))?;
+    assert_eq!(made(&c, Section::Medications), counts(&[("MedicationRequest", 1)]));
+    let order = resources(&c, "MedicationRequest")[0];
+    assert_eq!(
+        (&order["intent"], &order["status"]),
+        (&json!("order"), &json!("active"))
+    );
+    Ok(())
+}
+
+/// C-F7: 256 levels of elements are read, 257 are refused.
+#[test]
+fn nesting_is_refused_one_level_past_the_limit() -> R {
+    // `levels` elements deep, the ClinicalDocument root being the first
+    let nested = |levels: usize| {
+        format!(
+            r#"<ClinicalDocument xmlns="urn:hl7-org:v3">{}{}</ClinicalDocument>"#,
+            "<a>".repeat(levels - 1),
+            "</a>".repeat(levels - 1)
+        )
+        .into_bytes()
+    };
+    assert_eq!(ccda::xml::MAX_DEPTH, 256);
+    convert(&nested(256))?;
+    match convert(&nested(257)) {
+        Err(Error::Invalid(m)) => assert!(m.contains("nests deeper"), "{m}"),
+        other => panic!("257 levels: {other:?}"),
+    }
+    Ok(())
+}
+
+/// C-F3: a stored file over the limit is refused by the import, as the converter refuses it.
+#[tokio::test]
+async fn an_oversized_stored_file_is_refused_by_the_import() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let mut huge = b"<ClinicalDocument xmlns=\"urn:hl7-org:v3\">".to_vec();
+    huge.resize(ccda::xml::MAX_BYTES + 1, b' ');
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &huge, "huge.xml", ccda::MIME).await?;
+    match import_ccda(&mut tx, &env.blobs, doc).await {
+        Err(Error::Invalid(m)) => assert!(m.contains("MB"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    Ok(())
+}
+
+/// C-F10: the import holds its document row from its first read, so a move waits for the import to
+/// commit instead of slipping in while it converts.
+#[tokio::test]
+async fn the_import_locks_its_document_before_it_reads_the_profile() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    as_isabella(&mut tx, &fam, "lucia").await?;
+    let bytes = document(&problems_section(&problem_entry(
+        "p",
+        r#"code="233604007" displayName="Pneumonia""#,
+        "",
+        "",
+    )));
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &bytes, "p.xml", ccda::MIME).await?;
+    tx.commit().await?;
+    // the profile table is held, so the import stops at its profile read
+    let mut gate = env.tx().await?;
+    sqlx::query("lock table profile in access exclusive mode")
+        .execute(&mut *gate)
+        .await?;
+    let (pool, blobs) = (env.db.pool.clone(), env.blobs.clone());
+    let run = tokio::spawn(async move {
+        let mut t = pool.begin().await?;
+        let s = import_ccda(&mut t, &blobs, doc).await?;
+        t.commit().await?;
+        anyhow::Ok(s)
+    });
+    let mut waiting = 0i64;
+    for _ in 0..200 {
+        waiting = sqlx::query_scalar(
+            "select count(*) from pg_locks l join pg_class c on c.oid = l.relation \
+             where c.relname = 'profile' and not l.granted",
+        )
+        .fetch_one(&env.db.pool)
+        .await?;
+        if waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(waiting, 1, "the import never reached its profile read");
+    let mut mover = env.tx().await?;
+    sqlx::query("set local lock_timeout = '500ms'")
+        .execute(&mut *mover)
+        .await?;
+    let moved = sqlx::query("update document set flags = flags where id = $1")
+        .bind(doc)
+        .execute(&mut *mover)
+        .await;
+    mover.rollback().await?;
+    gate.rollback().await?;
+    let s = run.await??;
+    assert_eq!(s.accepted, 1, "{s:?}");
+    let e = moved
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("the document row was free while the import ran"))?;
+    assert!(e.to_string().contains("lock timeout"), "{e}");
+    Ok(())
+}
+
+/// U-F1: a DS4P security label (an entry's Security Observation, a section's) or a confidentiality
+/// code reaches meta.security, so the record is as sensitive as the same label in a FHIR file.
+#[tokio::test]
+async fn ds4p_security_labels_make_the_records_sensitive() -> R {
+    let hiv = problem_entry(
+        "hiv",
+        r#"code="86406008" displayName="Human immunodeficiency virus infection""#,
+        r#"<low value="20200110"/>"#,
+        &format!(
+            r#"<entryRelationship typeCode="COMP">{}</entryRelationship>"#,
+            security_label("HIV")
+        ),
+    );
+    let flu = problem_entry(
+        "flu",
+        r#"code="6142004" displayName="Influenza""#,
+        r#"<low value="20200110"/>"#,
+        "",
+    );
+    let depression = problem_entry(
+        "dep",
+        r#"code="35489007" displayName="Depressive disorder""#,
+        r#"<low value="20200110"/>"#,
+        "",
+    );
+    let body = format!(
+        r#"{}<component><section><templateId root="2.16.840.1.113883.10.20.22.2.5.1"/>
+             <templateId root="2.16.840.1.113883.3.3445.3"/><title>PROBLEMS (restricted)</title>
+             <confidentialityCode code="R" codeSystem="2.16.840.1.113883.5.25"/>
+             <entry>{}</entry>{depression}</section></component>"#,
+        problems_section(&format!("{hiv}{flu}")),
+        security_label("PSY")
+    );
+    let bytes = document(&body);
+    let c = convert(&bytes)?;
+    let labels: BTreeMap<String, Vec<String>> = resources(&c, "Condition")
+        .iter()
+        .map(|r| {
+            let codes = r["meta"]["security"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s["code"].as_str().map(String::from))
+                .collect();
+            (
+                r["code"]["coding"][0]["code"].as_str().unwrap_or_default().to_string(),
+                codes,
+            )
+        })
+        .collect();
+    // the section's own label is no problem of its own
+    assert_eq!(
+        labels,
+        BTreeMap::from([
+            ("86406008".to_string(), vec!["HIV".to_string()]),
+            ("6142004".to_string(), vec![]),
+            ("35489007".to_string(), vec!["R".to_string(), "PSY".to_string()]),
+        ])
+    );
+    assert!(c.sections.iter().all(|s| s.not_read.is_empty()), "{:?}", c.sections);
+
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let p = as_isabella(&mut tx, &fam, "lucia").await?;
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &bytes, "ds4p.xml", ccda::MIME).await?;
+    import_ccda(&mut tx, &env.blobs, doc).await?;
+    let rows: Vec<(String, Vec<String>)> =
+        sqlx::query_as("select fhir->'code'->'coding'->0->>'code', sensitivity from condition where profile_id = $1")
+            .bind(p)
+            .fetch_all(&mut *tx)
+            .await?;
+    let rows: BTreeMap<String, Vec<String>> = rows.into_iter().collect();
+    assert_eq!(
+        rows,
+        BTreeMap::from([
+            ("86406008".to_string(), vec!["sexual_health".to_string()]),
+            ("6142004".to_string(), vec![]),
+            ("35489007".to_string(), vec!["mental_health".to_string()]),
+        ])
+    );
+    assert!(ownhealth_core::documents::document_is_sensitive(&mut tx, doc).await?);
+    Ok(())
+}
+
+/// U-F2: what no reader read (sections and parts left for review, narrative-only sections) keeps the
+/// stored file behind read:sensitive, as a connector pull's unprojected resources do. A file read in
+/// full stays open.
+#[tokio::test]
+async fn a_ccd_with_unread_sections_keeps_its_file_closed() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    as_isabella(&mut tx, &fam, "lucia").await?;
+    let hp = fixture("history-and-physical.xml");
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &hp, "hp.xml", ccda::MIME).await?;
+    import_ccda(&mut tx, &env.blobs, doc).await?;
+    let held: i64 = open_items(&mut tx, doc, "fhir_unmapped_summary")
+        .await?
+        .iter()
+        .map(|i| i.payload["count"].as_i64().unwrap_or(0))
+        .sum();
+    let flags: Value = sqlx::query_scalar("select flags from document where id = $1")
+        .bind(doc)
+        .fetch_one(&mut *tx)
+        .await?;
+    assert!(held > 0);
+    assert_eq!(flags["unprojected"], json!(held));
+    assert!(ownhealth_core::documents::document_is_sensitive(&mut tx, doc).await?);
+
+    let read = document(&problems_section(&problem_entry(
+        "p",
+        r#"code="233604007" displayName="Pneumonia""#,
+        "",
+        "",
+    )));
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "lucia", &read, "p.xml", ccda::MIME).await?;
+    import_ccda(&mut tx, &env.blobs, doc).await?;
+    let flags: Value = sqlx::query_scalar("select flags from document where id = $1")
+        .bind(doc)
+        .fetch_one(&mut *tx)
+        .await?;
+    assert!(flags.get("unprojected").is_none(), "{flags}");
+    assert!(!ownhealth_core::documents::document_is_sensitive(&mut tx, doc).await?);
+    Ok(())
+}
+
+/// U-F6: HL7 CCD 1 puts a Severity Observation on an allergy concern act. It is no allergy of its
+/// own; a severity the converter cannot map is listed for review.
+#[test]
+fn the_ccd_1_sample_reads_each_allergy_once() -> R {
+    let c = convert(&fixture("ccd-1.xml"))?;
+    assert_eq!(made(&c, Section::Allergies), counts(&[("AllergyIntolerance", 2)]));
+    let substances: Vec<&str> = resources(&c, "AllergyIntolerance")
+        .iter()
+        .map(|r| r["code"]["coding"][0]["code"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(substances, ["70618", "2670"]);
+    let allergies = c
+        .sections
+        .iter()
+        .find(|s| s.kind == Some(Section::Allergies))
+        .ok_or_else(|| anyhow::anyhow!("no allergies section"))?;
+    // "Moderate to severe" has no FHIR severity
+    assert_eq!(allergies.not_read, ["observation 2.16.840.1.113883.10.20.22.4.8"]);
     Ok(())
 }

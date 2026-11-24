@@ -11,11 +11,20 @@
 //!   its Observations) and Vital Signs. [`convert`] says per section what it made.
 //! - Any other section (encounters, procedures, notes and social history are part 2), and any entry
 //!   or part of an entry of a known section that the converter does not read, becomes one
-//!   `fhir_unmapped_summary` review item per section. Sections that hold only narrative text are
-//!   listed in one more item. The stored file keeps all of it; nothing is dropped without a count.
-//! - A file that is not well-formed XML, declares a DOCTYPE, is larger than 32 MB, holds more than
-//!   2 million nodes or nests deeper than 256 levels is refused (`Error::Invalid`), never parsed
-//!   further: no entity is ever expanded and nothing recurses ([`xml`]).
+//!   `fhir_unmapped_summary` review item per section. Sections that hold only narrative text (a core
+//!   section too, unless it says it has no information) are listed in one more item. The stored file
+//!   keeps all of it; nothing is dropped without a count.
+//! - What those items count was read by nothing, so nothing checked it for sensitive content: the
+//!   document is flagged `unprojected` with that count, as a connector pull is, and
+//!   `ownhealth_core::documents::document_is_sensitive` keeps the file and the items behind
+//!   read:sensitive. A file that carries a DS4P label that makes a record sensitive is flagged
+//!   `sensitive` the same way, even when the dedupe imports nothing from it.
+//! - A file that is not well-formed XML, declares a DOCTYPE, is larger than 32 MB (checked on the
+//!   stored size, before the file is read), holds more than 2 million nodes or nests deeper than 256
+//!   levels is refused (`Error::Invalid`), never parsed further: no entity is ever expanded and
+//!   nothing recurses ([`xml`]).
+//! - The import locks its document row first, so a move of the document waits for the run to commit
+//!   (and then retracts what it wrote) instead of slipping in while it converts.
 //!
 //! The mapping is a Rust port of the C-CDA to FHIR converter of Medplum
 //! (`packages/ccda/src/ccda-to-fhir.ts`, <https://github.com/medplum/medplum>), Copyright Orangebot,
@@ -53,11 +62,12 @@ const ITEM_REFS: usize = 20;
 
 /// Import a C-CDA document already stored as a blob. Its `flags.ccda` lists what each section gave.
 pub async fn import_ccda(conn: &mut PgConnection, blobs: &BlobStore, document_id: Uuid) -> Result<ImportSummary> {
-    let (profile_id, sha, filename, flags): (Option<Uuid>, String, Option<String>, Value) =
-        sqlx::query_as("select profile_id, encode(blob_sha256, 'hex'), filename, flags from document where id = $1")
-            .bind(document_id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let (profile_id, sha, filename, flags): (Option<Uuid>, String, Option<String>, Value) = sqlx::query_as(
+        "select profile_id, encode(blob_sha256, 'hex'), filename, flags from document where id = $1 for update",
+    )
+    .bind(document_id)
+    .fetch_one(&mut *conn)
+    .await?;
     if let Some(done) = flags.get("import").filter(|d| truthy(Some(d))) {
         return Ok(crate::fhir::summary_from(done)); // the job ran before
     }
@@ -66,7 +76,13 @@ pub async fn import_ccda(conn: &mut PgConnection, blobs: &BlobStore, document_id
     let profile = get_profile(&mut *conn, profile_id)
         .await?
         .ok_or_else(|| Error::NotFound(format!("unknown profile {profile_id}")))?;
-    let bytes = blobs.get_bytes(BlobOwner::Profile(profile_id), &sha)?;
+    let owner = BlobOwner::Profile(profile_id);
+    let size = blobs.size(owner, &sha)?;
+    if size > xml::MAX_BYTES as u64 {
+        // refused before a byte is read: the converter would refuse it after reading it all
+        return Err(xml::too_large(size));
+    }
+    let bytes = blobs.get_bytes(owner, &sha)?;
     let converted = tokio::task::spawn_blocking(move || convert(&bytes))
         .await
         .map_err(std::io::Error::other)??;
@@ -77,7 +93,14 @@ pub async fn import_ccda(conn: &mut PgConnection, blobs: &BlobStore, document_id
         .filter(|f| !f.is_empty())
         .or_else(|| converted.title.clone())
         .unwrap_or_else(|| "C-CDA".into());
-    for payload in held_items(&converted, &key, &label) {
+    let held = held_items(&converted, &key, &label);
+    let unread: i64 = held.iter().map(|h| h["count"].as_i64().unwrap_or(0)).sum();
+    let sensitive = converted
+        .entries
+        .iter()
+        .filter(|e| !crate::fhir::mapping::sensitivity(&e.resource).is_empty())
+        .count();
+    for payload in held {
         let count = payload["count"].as_i64().unwrap_or(0);
         create_item(
             &mut *conn,
@@ -95,18 +118,25 @@ pub async fn import_ccda(conn: &mut PgConnection, blobs: &BlobStore, document_id
         summary.queued += 1;
         *summary.reasons.entry("unmapped".into()).or_default() += count;
     }
-    sqlx::query("update document set flags = flags || jsonb_build_object('ccda', cast($1 as jsonb)) where id = $2")
-        .bind(sections_flag(&converted))
-        .bind(document_id)
-        .execute(&mut *conn)
-        .await?;
+    sqlx::query(
+        "update document set flags = flags || jsonb_build_object('ccda', cast($1 as jsonb)) \
+         || jsonb_strip_nulls(jsonb_build_object('unprojected', $2::bigint, 'sensitive', $3::bigint)) where id = $4",
+    )
+    .bind(sections_flag(&converted))
+    .bind((unread > 0).then_some(unread))
+    .bind((sensitive > 0).then_some(sensitive as i64))
+    .bind(document_id)
+    .execute(&mut *conn)
+    .await?;
     crate::fhir::mark_imported(conn, document_id, &summary, Some(&identity)).await?;
     Ok(summary)
 }
 
 /// The review payloads for what the converter did not read: one per section with entries or parts
 /// left (`resource_type` is the section's title), and one for every section that holds narrative
-/// only ([`NARRATIVE`]). The shape is a connector pull's `fhir_unmapped_summary`.
+/// only ([`NARRATIVE`]): a section this version does not read without entries, or a core section with
+/// narrative text and no entries that does not say it has no information. The shape is a connector
+/// pull's `fhir_unmapped_summary`.
 pub fn held_items(c: &Converted, key: &str, label: &str) -> Vec<Value> {
     let source = json!({"kind": "ccda", "label": label});
     let mut out = Vec::new();
@@ -119,8 +149,9 @@ pub fn held_items(c: &Converted, key: &str, label: &str) -> Vec<Value> {
             s.title.clone()
         };
         let template = s.templates.first().map_or("no templateId", String::as_str);
+        let narrative_only = s.entries == 0 && (s.kind.is_none() || s.narrative);
         let (count, notes) = match s.kind {
-            None if s.entries == 0 => {
+            _ if narrative_only => {
                 *narrative.entry(format!("{title} ({template})")).or_insert(0) += 1;
                 narrative_refs.push(format!("{key}{}", s.pointer));
                 continue;
