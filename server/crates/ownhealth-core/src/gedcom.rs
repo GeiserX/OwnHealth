@@ -1078,7 +1078,7 @@ mod tests {
 
         let mut file = String::from("0 HEAD\n1 GEDC\n2 VERS 7.0\n");
         for (i, sex) in ["U", "M", "M", "F", "F", "U"].into_iter().enumerate() {
-            writeln!(file, "0 @I{i}@ INDI\n1 SEX {sex}").unwrap();
+            writeln!(file, "0 @I{i}@ INDI\n1 SEX {sex}").expect("write a synthetic record");
         }
         file.push_str(concat!(
             "0 @F0@ FAM\n1 CHIL @I1@\n1 CHIL @I2@\n1 CHIL @I3@\n1 CHIL @I4@\n",
