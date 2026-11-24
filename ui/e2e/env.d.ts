@@ -17,3 +17,7 @@ declare module 'node:os' {
 declare module 'node:url' {
 	export function fileURLToPath(url: URL): string;
 }
+// The imaging checks pick the fake Orthanc's password and the synthetic rows' ids and hashes.
+declare module 'node:crypto' {
+	export function randomBytes(size: number): { toString(encoding: 'hex'): string };
+}

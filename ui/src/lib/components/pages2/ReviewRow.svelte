@@ -131,7 +131,7 @@
 	const id = $derived(`rr-${item.id.slice(0, 8)}`);
 </script>
 
-<div class="xr {tone}" class:sel={selected} role="group" aria-labelledby="{id}-n">
+<div class="xr {tone}" class:sel={selected} role="group" aria-labelledby="{id}-n" data-row={item.id}>
 	<input type="checkbox" {checked} onchange={(e) => oncheck(e.currentTarget.checked)} aria-label="{t('i2_select')} {obs.printed_name}" disabled={quarantined} />
 	<div class="c-nm">
 		<button class="nm" id="{id}-n" onclick={onselect} aria-pressed={selected} title={t('i2_show_on_page')}>{obs.printed_name}</button>
