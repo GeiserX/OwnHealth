@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use axum::http::StatusCode;
 use ownhealth_core::access::get_profile;
 use ownhealth_core::net::Egress;
-use ownhealth_ingest_structured::shc;
 use ownhealth_ingest_structured::shl_receive::{self as shl, CardsChecked, Refusal};
 use serde_json::json;
 use support::Env;
@@ -51,7 +50,8 @@ async fn a_link_of_our_own_sender_imports_through_our_own_receiver() -> R {
                 ..Egress::connector()
             },
         ),
-        _ => shc::public(url),
+        // nothing else is served here: a request anywhere else fails the test, never leaves the box
+        _ => panic!("the receiver reached for {url}, which this test does not serve"),
     };
 
     let link = shl::parse(&text, chrono::Utc::now())?;
