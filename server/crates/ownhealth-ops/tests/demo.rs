@@ -1,6 +1,6 @@
 //! The base demo seed (`tests/test_demo.py`).
 
-use ownhealth_core::access::{Principal, effective_permission, today_utc};
+use ownhealth_core::access::{Principal, effective_permission};
 use ownhealth_core::blobs::BlobStore;
 use ownhealth_core::demo::{DEMO_HOUSEHOLD, as_of, seed_demo};
 use ownhealth_core::testing::TestDb;
@@ -182,19 +182,21 @@ async fn fresh_demo_computes_score2_and_prevent() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Lucía's guardian sees the hint her mother's shared LDL feeds, on the demo date.
 #[tokio::test]
-async fn fresh_demo_shows_alex_a_shared_ldl_hint() -> anyhow::Result<()> {
+async fn fresh_demo_shows_lucia_a_hint_from_her_mothers_shared_ldl() -> anyhow::Result<()> {
     let (db, _dir) = fresh_demo().await?;
     let mut conn = db.pool.acquire().await?;
-    let (alex, household, user): (Uuid, Uuid, Uuid) = sqlx::query_as(
+    let (lucia, household, guardian): (Uuid, Uuid, Uuid) = sqlx::query_as(
         "select p.id, p.household_id, g.user_id from profile p join profile_grant g on g.profile_id = p.id \
-         where p.slug = 'alex' and g.role = 'owner'",
+         join app_user u on u.id = g.user_id where p.slug = 'lucia' and g.role = 'guardian' \
+         and u.display_name = 'Alex Rivera'",
     )
     .fetch_one(&mut *conn)
     .await?;
-    let principal = Principal::session(user, household);
-    let perm = effective_permission(&mut conn, &principal, alex).await?;
-    let hints = family::hints(&mut conn, &principal, &perm, today_utc()).await?;
+    let principal = Principal::session(guardian, household);
+    let perm = effective_permission(&mut conn, &principal, lucia).await?;
+    let hints = family::hints(&mut conn, &principal, &perm, as_of()).await?;
 
     assert!(
         hints
@@ -202,5 +204,73 @@ async fn fresh_demo_shows_alex_a_shared_ldl_hint() -> anyhow::Result<()> {
             .any(|hint| hint["rule"] == "lab.ldl_fh" && hint["rel"] == "MTH"),
         "{hints:#?}"
     );
+    Ok(())
+}
+
+/// The demo's one share is a consent a demo user made and can take back: its source's manager
+/// granted it, and the audit log holds the consent change, as `PUT /family-shares` writes them.
+#[tokio::test]
+async fn the_demo_share_is_made_by_its_source_manager() -> anyhow::Result<()> {
+    let (db, _dir) = fresh_demo().await?;
+    let mut conn = db.pool.acquire().await?;
+    let shares: Vec<(Uuid, Uuid, Vec<String>, Option<Uuid>)> =
+        sqlx::query_as("select source_profile_id, target_profile_id, categories, granted_by from family_share")
+            .fetch_all(&mut *conn)
+            .await?;
+    assert_eq!(shares.len(), 1, "{shares:?}");
+    let (source, target, categories, granted_by) = shares[0].clone();
+    assert_eq!(categories, ["labs"]);
+    let granted_by = granted_by.expect("the share names who granted it");
+    let household: Uuid = sqlx::query_scalar("select household_id from profile where id = $1")
+        .bind(source)
+        .fetch_one(&mut *conn)
+        .await?;
+    let perm = effective_permission(&mut conn, &Principal::session(granted_by, household), source).await?;
+    assert!(ownhealth_auth::household::can_manage(&perm), "role {}", perm.role);
+    type Row = (Option<Uuid>, Option<Vec<String>>, Option<String>);
+    let audit: Vec<Row> = sqlx::query_as(
+        "select actor_id, resource_ids, args_summary from audit_event \
+         where tool = 'family_share' and action = 'consent_change' and profile_id = $1",
+    )
+    .bind(source)
+    .fetch_all(&mut *conn)
+    .await?;
+    assert_eq!(
+        audit,
+        vec![(Some(granted_by), Some(vec![target.to_string()]), Some("categories=labs".into()))]
+    );
+    Ok(())
+}
+
+/// The docs' stale-TSH example (architecture.md section 16): Alex's last TSH is `src_a05`.
+#[tokio::test]
+async fn fresh_demo_keeps_alex_tsh_stale() -> anyhow::Result<()> {
+    let (db, _dir) = fresh_demo().await?;
+    let last: (Option<String>, String) = sqlx::query_as(
+        "select o.src_id, to_char(o.effective_at, 'YYYY-MM-DD') from observation o \
+         join profile p on p.id = o.profile_id where p.slug = 'alex' and o.alias_group = 'tsh' \
+         order by o.effective_at desc limit 1",
+    )
+    .fetch_one(&db.pool)
+    .await?;
+    assert_eq!(last, (Some("src_a05".into()), "2025-01-20".into()));
+    Ok(())
+}
+
+/// A dashboard change compares a profile's last two LDL draws; in the demo both are one method.
+#[tokio::test]
+async fn demo_ldl_changes_compare_one_method() -> anyhow::Result<()> {
+    let (db, _dir) = fresh_demo().await?;
+    let series: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "select p.slug, array_agg(coalesce(o.loinc, '') order by o.effective_at desc) from observation o \
+         join profile p on p.id = o.profile_id where o.alias_group = 'ldl_c' group by p.slug order by 1",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    for (slug, loincs) in &series {
+        if let [last, before, ..] = loincs.as_slice() {
+            assert_eq!(last, before, "{slug}: {loincs:?}");
+        }
+    }
     Ok(())
 }
