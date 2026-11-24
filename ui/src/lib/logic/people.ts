@@ -197,6 +197,8 @@ export function auditWhat(a: { via: string; tool: string | null; action: string 
  * A row the server wrote for a route ('POST /oauth/token') is not a tool call, so it gets its action too.
  */
 export function auditActionKey(a: { via: string; tool: string | null; action: string }): string | null {
+	if (a.tool === 'GET /api/mcp/session-report') return 'i2_sr_audit_read';
+	if (a.tool === 'PUT /api/mcp/session-report/consent') return 'i2_sr_audit_consent';
 	if (a.via === 'mcp' && a.tool && !/^[A-Z]+ \//.test(a.tool)) return null;
 	return 'i2_act_' + a.action.replace(/[^a-z0-9]+/gi, '_');
 }
@@ -219,6 +221,8 @@ export function auditDetail(
 ): string {
 	const args = a.args_summary ?? '';
 	if (a.action === 'consent_change') {
+		const sessionReport = /^mcp_session_report=(true|false)$/.exec(args);
+		if (sessionReport) return yesNo(sessionReport[1] === 'true' ? 'True' : 'False', w);
 		const m = /^ui=(True|False|None)[ ;]agents=(True|False|None)$/.exec(args);
 		if (m) {
 			const parts = [m[1] !== 'None' ? `${w.t('i2_sens_ui')}: ${yesNo(m[1], w)}` : null, m[2] !== 'None' ? `${w.t('i2_sens_ag')}: ${yesNo(m[2], w)}` : null];

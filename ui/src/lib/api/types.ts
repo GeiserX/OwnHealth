@@ -528,6 +528,26 @@ export interface AuditWhoOut {
 	items: { actor: string; actor_kind: string; via: string; events: number; first_ts: IsoDateTime; last_ts: IsoDateTime }[];
 }
 
+/** GET /api/mcp/session-report, visible only to the household owner. */
+export interface SessionReportOut {
+	enabled: boolean;
+	sessions: {
+		started_at: string;
+		ended_at: string;
+		tools: {
+			tool: string;
+			calls: number;
+			not_assessed_calls: number;
+			not_assessed_n: number;
+			budget_cuts: number;
+			denied: number;
+			errors: number;
+			arg_bytes: number;
+		}[];
+	}[];
+}
+
+
 export interface TokenUsageDay {
 	calls: number;
 	facts: number;
@@ -1036,6 +1056,63 @@ export interface BreakGlassOwnerView {
 		max_delay_hours: number;
 		allowed: BreakGlassCategory[];
 	};
+}
+/** One profile that named the caller, in GET /break-glass: what they would read, and their last request. */
+export interface BreakGlassNamed {
+	profile: { id: Uuid; slug: string; display_name: string };
+	categories: BreakGlassCategory[];
+	delay_hours: number;
+	request: BreakGlassRequest | null;
+}
+/** The PUT /profiles/{p}/break-glass/contacts/{user} body: what a named contact would read, and after how long. */
+export interface BreakGlassContactIn {
+	categories?: BreakGlassCategory[];
+	delay_hours?: number;
+}
+
+/** notification_outbox.kind (ownhealth_core::break_glass::OUTBOX_KINDS). */
+export type NoticeKind =
+	| 'break_glass.request'
+	| 'break_glass.cancel'
+	| 'break_glass.activate'
+	| 'break_glass.use'
+	| 'break_glass.expire'
+	| 'break_glass.revoke';
+/** One in-app notice, in GET /notifications. */
+export interface Notice {
+	id: Uuid;
+	kind: NoticeKind;
+	profile: { id: Uuid; slug: string; display_name: string };
+	request_id: Uuid | null;
+	/** who did it: the contact who asked or read, the owner who cancelled; null for the app's own steps */
+	actor: { user_id: Uuid; display_name: string } | null;
+	/** who asked for the request this notice is about */
+	contact: { user_id: Uuid; display_name: string } | null;
+	created_at: IsoDateTime;
+	read_at: IsoDateTime | null;
+}
+/** The reads through one request, counted over all of them: the list holds only the newest 200 notices. */
+export interface NoticeUses {
+	request_id: Uuid;
+	profile: { id: Uuid; slug: string; display_name: string };
+	contact: { user_id: Uuid; display_name: string };
+	count: number;
+	unread: number;
+	last_at: IsoDateTime;
+}
+/**
+ * GET /notifications: the 200 newest notices plus every older unread one other than a read, and the
+ * read count of each request that is in the list or has unread reads.
+ */
+export interface Notices {
+	items: Notice[];
+	uses: NoticeUses[];
+	unread: number;
+}
+/** GET /break-glass/requests/{id}: one request for the cancel screen, with the profile that holds it. */
+export interface BreakGlassOne {
+	request: BreakGlassRequest;
+	profile: { id: Uuid; slug: string; display_name: string };
 }
 
 // v1.0 the US endpoint directory (routes/brands.rs)

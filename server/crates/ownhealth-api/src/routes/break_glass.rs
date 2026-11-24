@@ -8,11 +8,12 @@
 //! DELETE /api/profiles/{p}/break-glass/contacts/{user}              also ends their open request
 //! POST   /api/profiles/{p}/break-glass/requests/{id}/cancel         a requested one
 //! POST   /api/profiles/{p}/break-glass/requests/{id}/revoke         an active one
+//! GET    /api/break-glass/requests/{id}                             {request, profile}; the cancel screen
 //! the contact
 //! GET    /api/break-glass                                           the profiles that named them
 //! POST   /api/break-glass/requests                      + step-up   {profile, reason}
 //! anyone logged in
-//! GET    /api/notifications                                         {items, unread}
+//! GET    /api/notifications                                         {items, uses, unread}; each names the contact
 //! POST   /api/notifications/read                                    {ids?} -> {read}
 //! ```
 //!
@@ -350,6 +351,42 @@ async fn end(rt: Runtime, caller: Caller, p: String, id: String, step: End) -> R
     ok(out)
 }
 
+/// One request by its id alone, for the cancel screen: the cancel link of the calendar event names no
+/// profile. 404 when the caller does not own the profile that holds it, as for a request that does
+/// not exist; one owner-view audit row on that profile.
+async fn owner_one(State(rt): State<Runtime>, caller: Caller, Path(id): Path<String>) -> R {
+    let id = uuid_path("id", &id)?;
+    let gone = || ApiError::new(StatusCode::NOT_FOUND, "unknown", "No such request.");
+    let mut tx = rt.pool.begin().await?;
+    let profile: Option<Uuid> = sqlx::query_scalar("select profile_id from break_glass_request where id = $1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(profile) = profile else {
+        return Err(gone().into());
+    };
+    let perm = match caller
+        .require(&mut tx, &profile.to_string(), None, Some("manage_grants"))
+        .await
+    {
+        Ok(perm) => perm,
+        Err(e) if matches!(e.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND) => return Err(gone().into()),
+        Err(e) => return Err(e.into()),
+    };
+    let request = one(&mut tx, id).await?;
+    audit_read(
+        &mut tx,
+        &caller,
+        "break_glass.owner_view",
+        "break_glass_request",
+        Some(perm.profile.id),
+    )
+    .await?;
+    tx.commit().await?;
+    ok(json!({"request": request,
+              "profile": {"id": perm.profile.id, "slug": perm.profile.slug, "display_name": perm.profile.display_name}}))
+}
+
 /// Taking access away needs no step-up.
 async fn cancel(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(String, String)>) -> R {
     end(rt, caller, p, id, End::Cancel).await
@@ -457,60 +494,107 @@ async fn ask(State(rt): State<Runtime>, caller: Caller, Body(b): Body<RequestIn>
 
 // ---------------------------------------------------------------- the outbox ----
 
-/// The caller's unread count, then one notice; the notice columns are null on the one row of an empty
-/// list, so the count and the list always come from one statement (one snapshot).
-type Notice = (
-    i64,
-    Option<Uuid>,
-    Option<String>,
-    Option<Uuid>,
-    Option<String>,
-    Option<String>,
-    Option<Uuid>,
-    Option<Uuid>,
-    Option<String>,
-    Option<DateTime<Utc>>,
-    Option<DateTime<Utc>>,
-);
+/// The reads through one request, counted over every use notice of the caller (the list itself holds
+/// only the newest 200 notices, and a long emergency session writes more).
+#[derive(Deserialize)]
+struct UsesRow {
+    request_id: Uuid,
+    count: i64,
+    unread: i64,
+    last_at: DateTime<Utc>,
+    profile: Value,
+    contact: Value,
+}
+
+/// One listed notice, as the statement aggregates it.
+#[derive(Deserialize)]
+struct ListedRow {
+    id: Uuid,
+    kind: String,
+    profile_id: Uuid,
+    slug: String,
+    display_name: String,
+    request_id: Option<Uuid>,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    created_at: DateTime<Utc>,
+    read_at: Option<DateTime<Utc>>,
+    contact_user_id: Option<Uuid>,
+    contact_name: Option<String>,
+}
+
+/// The caller's unread count, the use counts and the listed notices, as one row of one statement (one
+/// snapshot), each part once.
+type Notices = (i64, sqlx::types::Json<Vec<UsesRow>>, sqlx::types::Json<Vec<ListedRow>>);
 
 async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let mut tx = rt.pool.begin().await?;
-    let rows: Vec<Notice> = sqlx::query_as(
+    let (unread, uses, listed): Notices = sqlx::query_as(
         "with visible as (
              (select id from notification_outbox where user_id = $1 order by created_at desc, id limit 200)
              union
              select id from notification_outbox where user_id = $1 and read_at is null
-             and kind in ('break_glass.request', 'break_glass.activate')
+             and kind <> 'break_glass.use'
          ),
          unread as (select count(*) as n from notification_outbox where user_id = $1 and read_at is null),
+         counted as (
+             select request_id, count(*) as n, count(*) filter (where read_at is null) as unread,
+                    max(created_at) as last_at
+             from notification_outbox where user_id = $1 and kind = 'break_glass.use' group by request_id
+         ),
+         uses as (
+             select coalesce(json_agg(json_build_object(
+                        'request_id', u.request_id, 'count', u.n, 'unread', u.unread, 'last_at', u.last_at,
+                        'profile', json_build_object('id', p.id, 'slug', p.slug, 'display_name', p.display_name),
+                        'contact', json_build_object('user_id', c.id, 'display_name', c.display_name))
+                    order by u.last_at desc, u.request_id), '[]'::json) as j
+             from counted u join break_glass_request r on r.id = u.request_id join profile p on p.id = r.profile_id
+             join app_user c on c.id = r.contact_user_id
+             where u.unread > 0 or u.request_id in
+                   (select n.request_id from visible v join notification_outbox n on n.id = v.id)
+         ),
          listed as (
-             select n.id, n.kind, p.id as profile_id, p.slug, p.display_name, n.request_id, n.actor_id,
-                    a.display_name as actor_name, n.created_at, n.read_at
+             select coalesce(json_agg(json_build_object(
+                        'id', n.id, 'kind', n.kind, 'profile_id', p.id, 'slug', p.slug,
+                        'display_name', p.display_name, 'request_id', n.request_id, 'actor_id', n.actor_id,
+                        'actor_name', a.display_name, 'created_at', n.created_at, 'read_at', n.read_at,
+                        'contact_user_id', r.contact_user_id, 'contact_name', c.display_name)
+                    order by n.created_at desc, n.id), '[]'::json) as j
              from visible v join notification_outbox n on n.id = v.id join profile p on p.id = n.profile_id
              left join app_user a on a.id = n.actor_id
+             left join break_glass_request r on r.id = n.request_id
+             left join app_user c on c.id = r.contact_user_id
          )
-         select u.n, l.id, l.kind, l.profile_id, l.slug, l.display_name, l.request_id, l.actor_id,
-                l.actor_name, l.created_at, l.read_at
-         from unread u left join listed l on true order by l.created_at desc, l.id",
+         select u.n, us.j, l.j from unread u cross join uses us cross join listed l",
     )
     .bind(user)
-    .fetch_all(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    let unread = rows.first().map_or(0, |n| n.0);
-    audit_read(&mut tx, &caller, "break_glass.notices", "notification_outbox", None).await?;
-    tx.commit().await?;
-    let items: Vec<Value> = rows
+    let uses: Vec<Value> = uses
+        .0
         .iter()
-        .filter_map(|n| {
-            let (id, created_at) = (n.1?, n.9?);
-            Some(json!({"id": id, "kind": n.2,
-                   "profile": {"id": n.3, "slug": n.4, "display_name": n.5},
-                   "request_id": n.6, "actor": n.7.map(|user| json!({"user_id": user, "display_name": n.8})),
-                   "created_at": pydantic_datetime_utc(&created_at), "read_at": ts(&n.10)}))
+        .map(|u| {
+            json!({"request_id": u.request_id, "profile": u.profile, "contact": u.contact, "count": u.count,
+               "unread": u.unread, "last_at": pydantic_datetime_utc(&u.last_at)})
         })
         .collect();
-    ok(json!({"items": items, "unread": unread}))
+    audit_read(&mut tx, &caller, "break_glass.notices", "notification_outbox", None).await?;
+    tx.commit().await?;
+    let items: Vec<Value> = listed
+        .0
+        .iter()
+        .map(|n| {
+            json!({"id": n.id, "kind": n.kind,
+                   "profile": {"id": n.profile_id, "slug": n.slug, "display_name": n.display_name},
+                   "request_id": n.request_id,
+                   "actor": n.actor_id.map(|user| json!({"user_id": user, "display_name": n.actor_name})),
+                   // who asked: the activation and the expiry have no actor, and the screen names them
+                   "contact": n.contact_user_id.map(|user| json!({"user_id": user, "display_name": n.contact_name})),
+                   "created_at": pydantic_datetime_utc(&n.created_at), "read_at": ts(&n.read_at)})
+        })
+        .collect();
+    ok(json!({"items": items, "uses": uses, "unread": unread}))
 }
 
 #[derive(Deserialize)]
@@ -545,6 +629,7 @@ pub fn router() -> Router<Runtime> {
         .route("/profiles/{p}/break-glass/requests/{id}/revoke", post(revoke))
         .route("/break-glass", get(mine))
         .route("/break-glass/requests", post(ask))
+        .route("/break-glass/requests/{id}", get(owner_one))
         .route("/notifications", get(notices))
         .route("/notifications/read", post(mark_read))
 }
