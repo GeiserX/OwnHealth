@@ -1249,21 +1249,40 @@ async fn analyze_during_preparation_counts_staged_rows_toward_the_threshold() ->
     Ok(())
 }
 
+/// The query deploy/README.md ("Large wearable histories") gives for a `needs_maintenance` report
+/// with no `cutoff`: the files that hold the samples dated on or after a date, largest first.
+const FUTURE_FILES: &str = "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) \
+     from wearable_sample s join profile p on p.id = s.profile_id left join document d on d.id = s.document_id \
+     where s.t >= $1 group by d.id, d.filename, p.display_name order by count(*) desc";
+
+/// A row of [`FUTURE_FILES`]: document, file name, profile, samples, first and last sample time.
+type FutureFile = (Option<Uuid>, Option<String>, String, i64, DateTime<Utc>, DateTime<Utc>);
+
+/// More samples past the cutoff than the switch may move: the run changes nothing and says what to
+/// do. The way out the README gives works: the query names the file, its retraction removes the
+/// samples, and the next run converts the table.
 #[tokio::test]
 async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
     let d = demo().await?;
     let pool = &d.db.pool;
     let now = Utc::now();
+    let doc = document(
+        &d,
+        b"an export from a watch whose clock ran years ahead",
+        "application/x-sqlite3",
+    )
+    .await?;
     let mut c = pool.acquire().await?;
     let src = watch(&mut c, d.alex).await?;
     sqlx::query(
-        "insert into wearable_sample (profile_id, metric, t, source_id, v) \
-         select $1, 'hr', $2::timestamptz + n * interval '1 second', $3, 60 \
+        "insert into wearable_sample (profile_id, metric, t, source_id, v, document_id) \
+         select $1, 'hr', $2::timestamptz + n * interval '1 second', $3, 60, $4 \
          from generate_series(1, 50001) n",
     )
     .bind(d.alex)
     .bind(cutoff_for(now))
     .bind(src)
+    .bind(doc)
     .execute(&mut *c)
     .await?;
     drop(c);
@@ -1275,10 +1294,13 @@ async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
     let report = partition::run(pool, &opts(now)).await?;
     assert_eq!(state(&report), "needs_maintenance", "{report}");
     assert_eq!(report["ok"], false, "{report}");
-    assert!(
-        report["note"].as_str().unwrap_or_default().contains("50001"),
-        "{report}"
-    );
+    assert_eq!(report["cutoff"], Value::Null, "no cutoff is left to wait on: {report}");
+    let note = report["note"].as_str().unwrap_or_default();
+    let since = cutoff_for(now).format("%Y-%m-%d").to_string();
+    assert!(note.contains("50001"), "{report}");
+    assert!(note.contains(&format!("dated on or after {since}")), "{note}");
+    assert!(note.contains("run `ownhealth partition` again"), "{note}");
+    assert!(!note.contains("maintenance window"), "a window changes nothing: {note}");
     reader.rollback().await?;
     let added: bool = sqlx::query_scalar(
         "select to_regclass('wearable_sample_ahead') is not null \
@@ -1290,6 +1312,23 @@ async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
     .await?;
     assert!(!added, "the refused run changed the schema");
     assert_eq!(fingerprint(pool).await?, before);
+    let again = partition::run(pool, &opts(now)).await?;
+    assert_eq!(
+        state(&again),
+        "needs_maintenance",
+        "nothing resolves it by itself: {again}"
+    );
+
+    let since = DateTime::parse_from_rfc3339(&format!("{since}T00:00:00Z"))?.with_timezone(&Utc);
+    let files: Vec<FutureFile> = sqlx::query_as(FUTURE_FILES).bind(since).fetch_all(pool).await?;
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert_eq!((files[0].0, files[0].3), (Some(doc), 50001), "{files:?}");
+    let mut tx = pool.begin().await?;
+    let out = retract_document_facts(&mut tx, doc, "the watch clock was wrong").await?;
+    tx.commit().await?;
+    assert_eq!(out["wearable_samples"], 50001, "{out}");
+    let r = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&r), "converted", "{r}");
     Ok(())
 }
 

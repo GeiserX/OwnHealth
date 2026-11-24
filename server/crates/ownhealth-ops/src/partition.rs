@@ -273,7 +273,7 @@ async fn steps(
     if bound.is_some() {
         let staged = staged_count(conn).await?;
         if staged > MAX_MOVE {
-            return needs_maintenance(conn, report, staged).await;
+            return needs_maintenance(conn, report, staged, bound).await;
         }
         if !upgrade_staging(conn, opts).await? {
             return busy(conn, report).await;
@@ -286,7 +286,7 @@ async fn steps(
             }
             match retrying(conn, opts, |c| Box::pin(take_back(c))).await? {
                 Some(Move::Done(n)) => report.held_back = n,
-                Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n).await,
+                Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n, bound).await,
                 None => return busy(conn, report).await,
             }
         }
@@ -297,9 +297,10 @@ async fn steps(
     // Refuse an already oversized group before even building the indexes. It is checked again
     // with writers held out when a bound is added.
     if reusable_cutoff(bound, started).is_none() {
-        let late = future_count(conn, cutoff_for(started)).await?;
+        let cutoff = cutoff_for(started);
+        let late = future_count(conn, cutoff).await?;
         if late > MAX_MOVE {
-            return needs_maintenance(conn, report, late).await;
+            return needs_maintenance(conn, report, late, Some(cutoff)).await;
         }
     }
 
@@ -337,13 +338,13 @@ async fn steps(
                 }
                 match retrying(conn, opts, |c| Box::pin(take_back(c))).await? {
                     Some(Move::Done(n)) => report.held_back += n,
-                    Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n).await,
+                    Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n, bound).await,
                     None => return busy(conn, report).await,
                 }
             }
             match retrying(conn, opts, move |c| Box::pin(add_bound(c, cutoff))).await? {
                 Some(Move::Done(n)) => report.held_aside = n,
-                Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n).await,
+                Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n, Some(cutoff)).await,
                 None => return busy(conn, report).await,
             }
             cutoff
@@ -377,7 +378,7 @@ async fn steps(
             report.moved_from_default = done.moved;
             report.held_back += done.held_back;
         }
-        Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n).await,
+        Some(Move::TooMany(n)) => return needs_maintenance(conn, report, n, Some(cutoff)).await,
         None => return busy(conn, report).await,
     }
     // statistics for the new parent; the partitions keep their own
@@ -401,11 +402,25 @@ async fn busy(conn: &mut PgConnection, report: Report) -> Result<Report> {
     Ok(report)
 }
 
-async fn needs_maintenance(conn: &mut PgConnection, mut report: Report, count: i64) -> Result<Report> {
+/// A run that would move more samples than [`MAX_MOVE`] under its exclusive lock: samples a device
+/// with a wrong clock dated on or after `since` (the cutoff the step works with). The limit is fixed,
+/// so the group stays until a person retracts or corrects the files that hold it (deploy/README.md,
+/// "Large wearable histories").
+async fn needs_maintenance(
+    conn: &mut PgConnection,
+    mut report: Report,
+    count: i64,
+    since: Option<DateTime<Utc>>,
+) -> Result<Report> {
     report.state = "needs_maintenance";
+    // a check whose comment lost its cutoff reads as MIN_UTC (current_bound): no date to name
+    let since = since
+        .filter(|c| *c != DateTime::<Utc>::MIN_UTC)
+        .map_or_else(String::new, |c| format!(" dated on or after {}", c.format("%Y-%m-%d")));
     report.note = Some(format!(
-        "The partition step would move {count} samples under an exclusive lock (limit {MAX_MOVE}). \
-         Review the future-dated or staged samples during a maintenance window"
+        "The partition step would move {count} samples{since} under an exclusive lock, more than its limit of \
+         {MAX_MOVE}. Retract or correct the files that hold them, then run `ownhealth partition` again \
+         (deploy/README.md, \"Large wearable histories\")"
     ));
     pending(conn, &mut report).await?;
     Ok(report)

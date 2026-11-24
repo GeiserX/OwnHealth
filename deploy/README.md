@@ -111,7 +111,7 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 ## Large wearable histories
 
-A watch that records every heartbeat adds millions of samples a year. Once the samples table holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50,000,000), a job splits it into one partition a month. A query over a few days then reads only the months it needs.
+A watch that records every heartbeat adds millions of samples a year. Once the samples table holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50,000,000), a job splits it. All samples dated before a cutoff stay together in one historical partition, and one partition a month follows from the cutoff on. A query over a few days after the cutoff then reads only the months it needs. A query before the cutoff reads the historical partition through its indexes.
 
 The job changes tables, so it runs as the database owner, in the `admin` service. The app's own role cannot run it. The app checks every hour. When the table is past the threshold, it logs a warning that the job is due, and repeats it once a day until the job runs. If the app connects as the database owner (an install with one database role), it runs the job itself every hour. Run the job from cron once a day:
 
@@ -133,7 +133,18 @@ You can stop the job at any time and run it again. It prints a JSON report and e
 
 - **`busy`** means another session held a lock the job needed.
 - **`needs_owner`** means the app's role cannot continue or clear a cutoff. Run the command as the database owner.
-- **`needs_maintenance`** means an exclusive step would move more than 50,000 samples. The report gives the count. Review the affected samples during a maintenance window.
+- **`needs_maintenance`** means a device with a wrong clock dated too many samples in the future. The job would have to move them under its exclusive lock, and the limit is 50,000. The note gives the count and the date. The limit is fixed, so every run stops here until those samples are gone. The app logs this warning once a day while it lasts. To fix it:
+  1. Find the files that hold the samples. Put the date from the note in this query:
+
+     ```sh
+     docker compose exec db psql -U ownhealth -d ownhealth -c "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) from wearable_sample s join profile p on p.id = s.profile_id left join document d on d.id = s.document_id where s.t >= 'YYYY-MM-DD' group by d.id, d.filename, p.display_name order by count(*) desc"
+     ```
+
+     If the report also has a `cutoff`, the samples are already set aside. Query `wearable_sample_ahead` instead of `wearable_sample`.
+  2. Retract each file on its profile's Documents page. This removes its samples from the table, the set-aside samples and the rollups. To keep the data, set the device clock right, export again, upload the new file, and then retract the old one.
+  3. Run `ownhealth partition` again.
+
+  While the report has a `cutoff`, imports of samples dated on or after it wait. They go on after step 3.
 
 When the report includes a `cutoff`, new samples on or after it wait until the owner completes the switch or clears the cutoff. Backups, restores, export, and profile deletion work on the split table. Set `OWNHEALTH_PARTITION_ROWS` in `.env` to change the threshold.
 
