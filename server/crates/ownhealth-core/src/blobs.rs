@@ -1225,8 +1225,9 @@ impl BlobStore {
     }
 
     /// Remove upload spools a killed process left in `root/tmp`: regular files named `upload-*`
-    /// (the import route), `push-*` (the push inboxes), `copy-*` (a decrypted local copy) or 32 hex
-    /// characters (`put_reader`) last modified more than `older_than` ago. The age bound leaves
+    /// (the import route), `push-*` (the push inboxes), `copy-*` (a decrypted local copy), `brands-*`
+    /// (a provider directory vendor file) or 32 hex characters (`put_reader`) last modified more than
+    /// `older_than` ago. The age bound leaves
     /// another process's live upload alone, and a local copy is left while a [`LocalCopy`] of any
     /// process still holds it. Returns how many went.
     pub fn sweep_tmp(&self, older_than: std::time::Duration) -> io::Result<usize> {
@@ -1242,7 +1243,9 @@ impl BlobStore {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let spool = name.starts_with("upload-") || name.starts_with("push-") || name.starts_with("copy-");
+            let spool = ["upload-", "push-", "copy-", "brands-"]
+                .iter()
+                .any(|p| name.starts_with(p));
             let ours = spool || (name.len() == 32 && name.bytes().all(|c| c.is_ascii_hexdigit()));
             let meta = entry.metadata()?;
             if !ours || !meta.is_file() {
@@ -1547,7 +1550,9 @@ mod tests {
             ("push-0123abcd".to_string(), true),
             ("a".repeat(32), true),
             ("copy-0123abcd".to_string(), true),
+            ("brands-0123abcd-epic.json".to_string(), true),
             ("upload-fresh".to_string(), false),
+            ("brands-0123abcd-oracle.json".to_string(), false),
             ("notes.txt".to_string(), true),
         ] {
             let f = File::create(tmp.join(name))?;
@@ -1556,13 +1561,13 @@ mod tests {
             }
         }
         let one_hour = std::time::Duration::from_secs(3600);
-        assert_eq!(store.sweep_tmp(one_hour)?, 4);
+        assert_eq!(store.sweep_tmp(one_hour)?, 5);
         let mut left = Vec::new();
         for e in fs::read_dir(&tmp)? {
             left.push(e?.file_name().to_string_lossy().into_owned());
         }
         left.sort();
-        assert_eq!(left, ["notes.txt", "upload-fresh"]);
+        assert_eq!(left, ["brands-0123abcd-oracle.json", "notes.txt", "upload-fresh"]);
         assert_eq!(store.sweep_tmp(one_hour)?, 0);
         Ok(())
     }
