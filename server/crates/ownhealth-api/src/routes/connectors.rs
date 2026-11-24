@@ -5,7 +5,7 @@
 //! | Route | What |
 //! |---|---|
 //! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie |
-//! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>` |
+//! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>`; a connect or reconnect of a polled kind queues its first pull |
 //! | `POST /connectors/{id}/reconnect` | `{authorize_url}` for a new grant on the same source; clears the reconsent flag on return |
 //! | `DELETE /connectors/{id}` | revoke at the vendor when it offers it, then delete the tokens and the cursor: `{id, revocation, revoke_page}` |
 //!
@@ -36,6 +36,7 @@ use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::connector_oauth::{self as oauth, OAuthError, Revocation};
 use ownhealth_core::net::Egress;
 use ownhealth_core::secrets::SecretBox;
+use ownhealth_core::sources;
 use ownhealth_core::{Error, Runtime};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -75,25 +76,17 @@ pub struct EgressOverride(pub Egress);
 /// How connector requests go out: https to public addresses only, unless a test or a dev instance
 /// widened it (module docs).
 pub fn egress(rt: &Runtime, o: &Option<Extension<EgressOverride>>) -> Egress {
-    let switch = std::env::var("OWNHEALTH_DEV_CONNECTOR_LOOPBACK").ok();
+    let switch = std::env::var(oauth::DEV_LOOPBACK_SWITCH).ok();
     egress_for(rt.settings.dev_auth, switch.as_deref(), o)
 }
 
-/// [`egress`] with the dev switch's value given, so a test needs no process environment.
+/// [`egress`] with the dev switch's value given, so a test needs no process environment. The rule
+/// is `connector_oauth::configured_egress`, which the pollers use too.
 fn egress_for(dev_auth: bool, dev_loopback_switch: Option<&str>, o: &Option<Extension<EgressOverride>>) -> Egress {
     if let Some(Extension(EgressOverride(e))) = o {
         return e.clone();
     }
-    // never in a release build, as the SHC dev map (shc.rs)
-    let dev_loopback = cfg!(debug_assertions) && dev_auth && dev_loopback_switch == Some("1");
-    if dev_loopback {
-        return Egress {
-            allow_private: true,
-            https_only: false,
-            ..Egress::connector()
-        };
-    }
-    Egress::connector()
+    oauth::configured_egress(dev_auth, dev_loopback_switch)
 }
 
 fn fail(e: OAuthError) -> Fail {
@@ -468,8 +461,11 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
         "connector.connect"
     };
     audit(&mut tx, &p, action, pending.profile_id, id, None, false).await?;
+    // The first pull shows what the new grant brought. On reconnect it follows any active pull.
+    if sources::poller_for(&pending.kind).is_some() {
+        sources::enqueue_grant_poll(&mut tx, id).await?;
+    }
     tx.commit().await?;
-    oauth::remember(id, &tokens, now);
     Ok(redirect(&state, &format!("/connections?connected={id}")))
 }
 

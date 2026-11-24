@@ -54,8 +54,10 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await expect(page.getByRole('status').filter({ hasText: 'Hospital LabNorte is connected.' })).toBeVisible();
 	await expect(page).toHaveURL(`${app}/connections`); // the address no longer repeats the outcome
 	source = sql("select id from source where kind = 'smart'");
-	// the first daily poll ran (the SMART poller is slice 15): before it, a connection has no data yet
-	sql(`update source set last_run_at = now(), last_success_at = now() where id = '${source}'`);
+	// The fake Patient matches Alex, so the real first pull records a successful sync.
+	await expect.poll(() => sql(`select status from source_run where source_id = '${source}' order by id desc limit 1`), {
+		timeout: 15_000
+	}).toBe('ok');
 
 	const card = page.getByRole('article', { name: 'Hospital LabNorte' });
 	// a grant of 3 days shows before it ends
