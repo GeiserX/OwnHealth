@@ -473,13 +473,15 @@ pub async fn pull(
         for (code, n) in got.skipped {
             *outcome.skipped.entry(code).or_default() += n;
         }
-        if kind == Resource::Claim && got.answered {
-            let claims = got
-                .entries
-                .values()
-                .filter_map(|e| e["resource"]["id"].as_str())
-                .collect::<BTreeSet<_>>()
-                .len();
+        if kind == Resource::Claim {
+            // A claim search that did not answer leaves no count, so an older pull's never shows.
+            let claims = got.answered.then(|| {
+                got.entries
+                    .values()
+                    .filter_map(|e| e["resource"]["id"].as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len()
+            });
             outcome.cursor = Some(json!({"claim_count": claims}));
         }
         entries.extend(got.entries.into_values());

@@ -553,6 +553,22 @@ async fn v3_is_registered_to_pull_medicare_claims() -> common::R {
 }
 
 #[tokio::test]
+async fn a_pull_whose_claim_search_failed_shows_no_older_claim_count() -> common::R {
+    let setup = setup(Mode::default()).await?;
+    assert_eq!(pull(&setup, 200).await?.cursor, Some(json!({"claim_count": 51})));
+    setup.fake.mode().eob = Eob::Fails(500);
+    let failed = pull(&setup, 200).await?;
+    assert_eq!(failed.problems[0].code, "search_failed");
+    assert_eq!(failed.cursor, Some(json!({"claim_count": null})));
+    let shown: Option<i32> = sqlx::query_scalar("select (cursor->>'claim_count')::int4 from source where id = $1")
+        .bind(setup.source_id)
+        .fetch_one(&setup.ctx.pool)
+        .await?;
+    assert_eq!(shown, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn v3_page_cap_and_foreign_patient_reference_are_visible() -> common::R {
     let setup = setup(Mode {
         wrong_reference: true,

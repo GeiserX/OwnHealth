@@ -453,7 +453,7 @@ pub struct ManagedHealth {
     pub open_gaps: i32,
     /// The server a connection talks to (`config.endpoints.issuer`; SMART: the FHIR base URL).
     pub server: Option<String>,
-    /// Distinct claims returned by the most recent Blue Button claim search that answered.
+    /// Distinct claims the latest Blue Button pull read; absent when its claim search did not answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_count: Option<i32>,
 }
