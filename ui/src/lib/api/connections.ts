@@ -2,7 +2,7 @@
 // connector routes it calls (routes/connectors.rs). The launch from the add wizard is slice 19.
 import { del, get, post } from './core';
 import type { ConnectionRow } from '#lib/logic/connections';
-import type { Uuid } from './types';
+import type { BrandsFound, BrandsOpened, Uuid } from './types';
 
 /** How a disconnect ended at the vendor; `revoke_page` is the vendor's own page when ours could not finish it. */
 export type Revocation = 'revoked' | 'not_offered' | 'failed' | 'no_token';
@@ -18,38 +18,6 @@ export const listSourceHealth = () => get<ConnectionRow[]>('/inboxes/health');
 export const reconnectConnector = (id: Uuid) => post<{ authorize_url: string }>(`/connectors/${id}/reconnect`);
 /** Revoke at the vendor when it offers that, then delete the tokens and the cursor. */
 export const disconnectConnector = (id: Uuid) => del<DisconnectOut>(`/connectors/${id}`);
-
-/** One vendor's copy of the US endpoint directory (routes/brands.rs). */
-export interface BrandFeed {
-	vendor: string;
-	fetched_at: string | null;
-	entries: number;
-	stale: boolean;
-}
-/** The household's US endpoint directory; null before the wizard was first opened. */
-export interface BrandDirectory {
-	source_id: Uuid;
-	enabled: boolean;
-	last_run_at: string | null;
-	feeds: BrandFeed[];
-	stale: boolean;
-	ready: boolean;
-}
-/** A facility whose name holds every word of the query. */
-export interface BrandHit {
-	name: string;
-	endpoint: string;
-	state: string | null;
-	vendor: string;
-}
-export interface BrandsOpened {
-	created: boolean;
-	directory: BrandDirectory | null;
-}
-export interface BrandsFound {
-	directory: BrandDirectory | null;
-	results: BrandHit[];
-}
 
 /** The US connection wizard was opened: makes the household's directory source on the first call. */
 export const openBrands = () => post<BrandsOpened>('/brands');
