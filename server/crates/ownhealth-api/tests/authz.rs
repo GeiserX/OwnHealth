@@ -21,7 +21,7 @@ type R = anyhow::Result<()>;
 /// whose secrets are in theirs (shl_share.rs checks the 404s), and the connector callback, which a
 /// vendor sends the browser to and which counts only with the binder cookie and session that started
 /// the launch (connectors.rs checks every refusal).
-const PUBLIC: [&str; 19] = [
+const PUBLIC: [&str; 20] = [
     "/auth/state",
     "/auth/setup/begin",
     "/auth/setup/finish",
@@ -41,6 +41,7 @@ const PUBLIC: [&str; 19] = [
     "/ics/{file}",
     "/shl/{id}",
     "/shl/{id}/file/{ticket}",
+    "/shl/{id}/ice",
 ];
 
 /// Routes the imaging viewer is served on, outside `/api`: no login resolves there, a viewer link does

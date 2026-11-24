@@ -19,6 +19,7 @@ pub mod family;
 pub mod family_history;
 pub mod gaps;
 pub mod genome;
+pub mod ice;
 pub mod ics;
 pub mod imaging;
 pub mod imaging_proxy;
@@ -61,6 +62,7 @@ pub fn all() -> Router<Runtime> {
         .merge(genome::router())
         .merge(genome::couple::router())
         .merge(genome::events::router())
+        .merge(ice::router())
         .merge(ics::router())
         .merge(imaging::router())
         .merge(imaging_proxy::router())

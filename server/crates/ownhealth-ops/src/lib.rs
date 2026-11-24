@@ -17,6 +17,7 @@
 mod backup;
 mod demo_base;
 pub mod export;
+pub mod ice;
 pub mod ips;
 pub mod letter_pdf;
 pub mod next_draw_pdf;

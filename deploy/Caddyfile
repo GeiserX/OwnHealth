@@ -29,11 +29,11 @@
 }
 
 # The public site block for SMART Health Links (docs/design/security-privacy.md section 11). It
-# passes only the link routes to the app: the manifest (POST, and its CORS preflight) and the file
-# (GET). Everything else, the app, /login, /api, /mcp and /dicom-web included, gets 404 here.
+# passes only the link routes to the app: the manifest (POST and OPTIONS), the file (GET),
+# and the direct file for an ICE card (GET). Everything else gets 404 here.
 # Caddy matches the cleaned path, so a raw path such as /login/../api/shl/<id> also matches; each
-# route is therefore rewritten to its canonical form, without a query, before it goes upstream,
-# and the app never sees the path the client wrote.
+# route is rewritten to its canonical path. Only the direct file keeps its query, which the SHL
+# reader uses to name the recipient.
 # compose.homelab.yaml publishes this port on 127.0.0.1 only. Point a tunnel (Tailscale Funnel,
 # Cloudflare Tunnel) at it, never at the app or the site above, and set OWNHEALTH_SHARE_URL in .env
 # to the public https address the tunnel gives (deploy/README.md, Sharing a summary).
@@ -46,6 +46,10 @@ http://:8090 {
 		method GET
 		path_regexp f ^/api/shl/([A-Za-z0-9_-]{43})/file/([A-Za-z0-9_-]{43})$
 	}
+	@ice {
+		method GET
+		path_regexp i ^/api/shl/([A-Za-z0-9_-]{43})/ice$
+	}
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
@@ -57,6 +61,10 @@ http://:8090 {
 	}
 	handle @file {
 		rewrite * /api/shl/{re.f.1}/file/{re.f.2}?
+		reverse_proxy app:8080
+	}
+	handle @ice {
+		rewrite * /api/shl/{re.i.1}/ice
 		reverse_proxy app:8080
 	}
 	handle {

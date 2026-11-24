@@ -367,6 +367,7 @@ fn text_tables(
         ),
         ("timeline", ownhealth_api::routes::timeline::missing_langs(langs)),
         ("calendar feed", ownhealth_api::routes::ics::missing_langs(langs)),
+        ("emergency card", ownhealth_ops::ice::missing_langs(langs)),
         (
             "imaging viewer",
             ownhealth_api::routes::imaging_proxy::missing_langs(langs),
@@ -394,14 +395,14 @@ fn a_dummy_language_is_missing_from_every_text_table() {
     langs.push("xx");
     let pack = load_pack().map_err(anyhow::Error::from);
     let tables = text_tables(&langs, &pack);
-    assert_eq!(tables.len(), 11);
+    assert_eq!(tables.len(), 12);
     for (name, missing) in tables {
         assert!(!missing.is_empty(), "{name} does not see the dummy language");
         assert!(missing.iter().all(|m| m.contains("xx")), "{name}: {missing:?}");
     }
     let broken = text_tables(&langs, &Err(anyhow::anyhow!("template status.ok needs xx")));
     let names: Vec<&str> = broken.iter().map(|(n, _)| *n).collect();
-    assert_eq!(names.len(), 11, "{names:?}");
+    assert_eq!(names.len(), 12, "{names:?}");
     for (name, missing) in &broken {
         assert!(!missing.is_empty(), "{name}");
         if *name == "vaccines" {

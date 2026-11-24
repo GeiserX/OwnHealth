@@ -169,18 +169,19 @@
 		// the feedback is for the link that was copied: another one may be on screen by now
 		if (fresh?.id === f.id) copied = ok;
 	}
-	const title = (x: { label: string | null }) => x.label ?? t('shl_nolabel');
+	const title = (x: ShlLink) => x.ice ? t('ice_title') : x.label ?? t('shl_nolabel');
 	const madeTitle = (x: { label: string | null }) => (x.label ? tf('shl_made', { label: x.label }) : t('shl_made0'));
 	const cat = (c: string) => t('shl_c_' + c.replace('read:', ''));
 	// One line of what a link carries, one of its dates and use.
 	function carries(x: ShlLink): string {
+		if (x.ice) return t(x.online ? 'ice_link_online' : 'ice_link_offline');
 		const parts = shownCategories(x.categories).map((c) => t('shl_s_' + c.replace('read:', '')));
 		if (x.passcode) parts.push(x.attempts_left !== null && revocable(x, now) ? `${t('shl_pin_on')} (${tp('shl_tries', x.attempts_left)})` : t('shl_pin_on'));
 		return parts.join(' · ');
 	}
 	function when(x: ShlLink): string {
 		const parts = [`${t('shl_created')} ${day(x.created_at)}`, `${t(expiryKey(x, now))} ${day(x.expires_at)}`];
-		parts.push(x.opened ? tp('shl_opened', x.opened) : t('shl_opened0'));
+		if (!x.ice || x.online) parts.push(x.opened ? tp('shl_opened', x.opened) : t('shl_opened0'));
 		if (x.last_access_at) parts.push(`${t('shl_last')} ${ago(x.last_access_at)}`);
 		return parts.join(' · ');
 	}
@@ -301,7 +302,7 @@
 								</div>
 							</div>
 							{#if confirming === x.id}
-								<ConfirmRow text={t('shl_revoke_d')} confirmLabel={t('i2_revoke')} {busy} onconfirm={() => revoke(x)} oncancel={() => (confirming = null)} />
+								<ConfirmRow text={t(x.ice ? 'ice_revoke_d' : 'shl_revoke_d')} confirmLabel={t('i2_revoke')} {busy} onconfirm={() => revoke(x)} oncancel={() => (confirming = null)} />
 							{/if}
 							{#if rowError?.id === x.id}<div class="p2err" role="alert" title={rowError.raw}>{rowError.text}</div>{/if}
 							{#if logOf === x.id}

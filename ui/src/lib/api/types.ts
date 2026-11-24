@@ -910,6 +910,8 @@ export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed';
 /** One link in GET /profiles/{p}/shl. */
 export interface ShlLink {
 	id: Uuid;
+	ice?: true;
+	online?: boolean;
 	label: string | null;
 	passcode: boolean;
 	attempts_left: number | null;
@@ -920,7 +922,7 @@ export interface ShlLink {
 	revoked_at: IsoDateTime | null;
 	state: ShlState;
 	reason: ShlReason | null;
-	/** manifests served */
+	/** Manifests served, or direct file reads for an emergency card. */
 	opened: number;
 	last_access_at: IsoDateTime | null;
 }

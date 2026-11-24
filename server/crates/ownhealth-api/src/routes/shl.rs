@@ -1,12 +1,13 @@
 //! SMART Health Links that the instance serves itself (security-privacy.md section 11, migration
 //! 1270). The owner or a guardian shares a profile's summary; the recipient opens it with the link
 //! and, when there is one, the passcode, through the public site block of deploy/Caddyfile, which
-//! passes only the three public routes below.
+//! passes only the public routes below.
 //!
 //! ```text
 //! POST    /api/shl/{id}                      public: the manifest  {recipient, passcode?, embeddedLengthMax?}
 //! OPTIONS /api/shl/{id}                      public: the CORS preflight of that POST
 //! GET     /api/shl/{id}/file/{ticket}        public: the file (application/jose), at most 1 h after the manifest
+//! GET     /api/shl/{id}/ice?recipient=...    public: the current IPS for an ICE card (application/jose)
 //! GET     /api/profiles/{p}/shl              owner or guardian    the profile's links
 //! POST    /api/profiles/{p}/shl              owner or guardian + step-up
 //!                                            {categories?, days?, passcode?, label?, lang?}
@@ -36,7 +37,7 @@
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -48,6 +49,7 @@ use ownhealth_core::access::{Permission, Principal, Scopes, effective_permission
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::langs::lang_or_default;
 use ownhealth_ops::shl::{self as share, CONTENT_TYPE, LABEL_MAX, SHAREABLE, URL_MAX};
+use ownhealth_ops::{ice, ips};
 use ownhealth_rules::summary::LANGS;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -146,6 +148,8 @@ struct Live {
     passcode_hash: Option<String>,
     attempts_left: Option<i32>,
     expires_at: DateTime<Utc>,
+    categories: Scopes,
+    lang: String,
 }
 
 /// The live link of a manifest id, or None, with its row locked FOR UPDATE: two requests for one
@@ -158,14 +162,21 @@ struct Live {
 /// statement, and every condition is read after it on the clock (`clock_timestamp()`), never at the
 /// transaction's start: Postgres re-checks a FOR UPDATE row's conditions after a wait only when the
 /// holder changed the row, so a request that waited past a deadline behind a lock alone would pass.
-async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiError> {
+async fn live(conn: &mut PgConnection, id: &str, direct: bool) -> Result<Option<Live>, ApiError> {
     if !share::is_segment(id) {
         return Ok(None);
     }
-    sqlx::query("select 1 from shl where manifest_sha256 = $1 for update")
-        .bind(share::sha256(id))
-        .execute(&mut *conn)
-        .await?;
+    let sha = share::sha256(id);
+    let locked: Option<i32> = sqlx::query_scalar(
+        "select 1 from shl where manifest_sha256 = $1 and flag <> 'I' and (flag = 'LU') = $2 for update",
+    )
+    .bind(&sha)
+    .bind(direct)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if locked.is_none() {
+        return Ok(None);
+    }
     type Row = (
         Uuid,
         Uuid,
@@ -175,19 +186,21 @@ async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiErro
         Option<i32>,
         DateTime<Utc>,
         Vec<String>,
+        String,
     );
     let row: Option<Row> = sqlx::query_as(
         "select s.id, s.profile_id, s.created_by, p.household_id, s.passcode_hash, s.attempts_left, s.expires_at, \
-         s.categories from shl s \
+         s.categories, s.lang from shl s \
          join profile p on p.id = s.profile_id \
          join app_user u on u.id = s.created_by \
          join profile_grant g on g.user_id = s.created_by and g.profile_id = s.profile_id \
          where s.manifest_sha256 = $1 and s.revoked_at is null and s.expires_at > clock_timestamp() \
          and (s.attempts_left is null or s.attempts_left > 0) \
-         and u.disabled_at is null and g.role = any($2) and not g.break_glass \
+         and u.disabled_at is null and (case when s.flag = 'LU' then g.role = 'owner' else g.role = any($2) end)
+         and not g.break_glass \
          and (g.expires_at is null or g.expires_at > clock_timestamp())",
     )
-    .bind(share::sha256(id))
+    .bind(&sha)
     .bind(&ROLES[..])
     .fetch_optional(&mut *conn)
     .await?;
@@ -208,6 +221,8 @@ async fn live(conn: &mut PgConnection, id: &str) -> Result<Option<Live>, ApiErro
         passcode_hash: r.4,
         attempts_left: r.5,
         expires_at: r.6,
+        categories: r.7.into_iter().collect(),
+        lang: r.8,
     }))
 }
 
@@ -244,6 +259,13 @@ impl Asker {
     }
 }
 
+#[derive(Default)]
+struct Delivery<'a> {
+    ticket: Option<(&'a str, DateTime<Utc>)>,
+    bytes: usize,
+    srcs: Option<Vec<String>>,
+}
+
 /// One shl_access row and one audit row. Free text goes to the audit log only as a hash.
 async fn log_access(
     conn: &mut PgConnection,
@@ -251,8 +273,7 @@ async fn log_access(
     kind: &str,
     recipient: &str,
     who: &Asker,
-    ticket: Option<(&str, DateTime<Utc>)>,
-    bytes_out: usize,
+    delivery: Delivery<'_>,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "insert into shl_access (shl_id, kind, recipient, ip, user_agent, ticket_sha256, ticket_expires_at) \
@@ -263,8 +284,8 @@ async fn log_access(
     .bind(recipient)
     .bind(who.ip.as_deref())
     .bind(who.user_agent.as_deref())
-    .bind(ticket.map(|(t, _)| share::sha256(t)))
-    .bind(ticket.map(|(_, exp)| exp))
+    .bind(delivery.ticket.map(|(t, _)| share::sha256(t)))
+    .bind(delivery.ticket.map(|(_, exp)| exp))
     .execute(&mut *conn)
     .await?;
     let mut e = AuditEvent::new("share", "share", &format!("shl.{kind}"));
@@ -277,7 +298,8 @@ async fn log_access(
     e.resource_ids = Some(vec![link.id.to_string()]);
     e.args_summary = Some(format!("recipient_sha256={}", &hex(&share::sha256(recipient))[..16]));
     e.result_kind = Some(if kind.starts_with("passcode_") { "denied" } else { "ok" }.into());
-    e.bytes_out = Some(i32::try_from(bytes_out).unwrap_or(i32::MAX));
+    e.bytes_out = Some(i32::try_from(delivery.bytes).unwrap_or(i32::MAX));
+    e.src_ids = delivery.srcs;
     write_audit(conn, &e).await?;
     Ok(())
 }
@@ -305,7 +327,7 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
     // sharing off, or no such link: 404 before anything about the request is read
     let share_url = rt.settings.share_url.clone().ok_or_else(gone)?;
     let mut tx = rt.pool.begin().await?;
-    let link = live(&mut tx, id).await?.ok_or_else(gone)?;
+    let link = live(&mut tx, id, false).await?.ok_or_else(gone)?;
     let input: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let Some(recipient) = recipient(&input["recipient"]) else {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg("recipient")));
@@ -332,7 +354,7 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
                 .bind(link.id)
                 .fetch_one(&mut *tx)
                 .await?;
-                log_access(&mut tx, &link, "passcode_wrong", &recipient, &who, None, 0).await?;
+                log_access(&mut tx, &link, "passcode_wrong", &recipient, &who, Delivery::default()).await?;
                 if n == 0 {
                     // disabled for good: its file has no reader left
                     sqlx::query("delete from shl_file where shl_id = $1")
@@ -342,7 +364,15 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
                 }
                 n
             } else {
-                log_access(&mut tx, &link, "passcode_missing", &recipient, &who, None, 0).await?;
+                log_access(
+                    &mut tx,
+                    &link,
+                    "passcode_missing",
+                    &recipient,
+                    &who,
+                    Delivery::default(),
+                )
+                .await?;
                 left
             };
             tx.commit().await?;
@@ -383,8 +413,11 @@ async fn serve_manifest(rt: &Runtime, id: &str, meta: &Meta, body: &[u8]) -> Res
         "manifest",
         &recipient,
         &who,
-        Some((&ticket, until)),
-        text.len(),
+        Delivery {
+            ticket: Some((&ticket, until)),
+            bytes: text.len(),
+            srcs: None,
+        },
     )
     .await?;
     tx.commit().await?;
@@ -404,7 +437,7 @@ async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result
         return Err(gone());
     }
     let mut tx = rt.pool.begin().await?;
-    let link = live(&mut tx, id).await?.ok_or_else(gone)?;
+    let link = live(&mut tx, id, false).await?.ok_or_else(gone)?;
     let recipient: Option<String> = sqlx::query_scalar(
         "select recipient from shl_access where shl_id = $1 and ticket_sha256 = $2 \
          and ticket_expires_at > clock_timestamp()",
@@ -429,8 +462,10 @@ async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result
         "file",
         &recipient,
         &Asker::of(rt, meta),
-        None,
-        jwe.len(),
+        Delivery {
+            bytes: jwe.len(),
+            ..Delivery::default()
+        },
     )
     .await?;
     tx.commit().await?;
@@ -444,6 +479,70 @@ async fn serve_file(rt: &Runtime, id: &str, ticket: &str, meta: &Meta) -> Result
         jwe,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+struct DirectIn {
+    recipient: Option<String>,
+}
+
+async fn direct_file(
+    State(rt): State<Runtime>,
+    meta: Meta,
+    Path(id): Path<String>,
+    Query(input): Query<DirectIn>,
+) -> Response {
+    let mut response = cors(match serve_direct(&rt, &id, &meta, input).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    });
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// The U flag means the printed URL opens the file directly. Each access reads the current IPS
+/// with the card's original scope and a fresh JWE nonce. The key never changes during its lifetime.
+async fn serve_direct(rt: &Runtime, id: &str, meta: &Meta, input: DirectIn) -> Result<Response, ApiError> {
+    if rt.settings.share_url.is_none() {
+        return Err(gone());
+    }
+    let mut tx = rt.pool.begin().await?;
+    let link = live(&mut tx, id, true).await?.ok_or_else(gone)?;
+    let recipient = recipient(&json!(input.recipient))
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "bad_request", msg("recipient")))?;
+    if let Some(res) = rate_limited(&mut tx, link.id).await? {
+        return Ok(res);
+    }
+    let sealed: Vec<u8> = sqlx::query_scalar("select ice_key from shl_file where shl_id = $1 and ice_key is not null")
+        .bind(link.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(gone)?;
+    let profile = link.profile_id;
+    let dek = ice::dek(rt.blobs.keyring(), profile, false).await?;
+    let ips = ips::build_link(&mut tx, profile, &link.categories, &link.lang, today_utc()).await?;
+    let jwe = ice::encrypt(&dek, profile, link.id, &sealed, &ips.to_bytes()?)?;
+    if link.expires_at <= Utc::now() {
+        return Err(gone());
+    }
+    log_access(
+        &mut tx,
+        &link,
+        "file",
+        &recipient,
+        &Asker::of(rt, meta),
+        Delivery {
+            bytes: jwe.len(),
+            srcs: Some(ips.srcs),
+            ..Delivery::default()
+        },
+    )
+    .await?;
+    ice::notify_access(&mut tx, profile).await?;
+    tx.commit().await?;
+    Ok(([(header::CONTENT_TYPE, "application/jose")], jwe).into_response())
 }
 
 /// A HEAD would take one of the hour's answers and write a log row, and deliver no file.
@@ -477,7 +576,7 @@ async fn sharer(conn: &mut PgConnection, caller: &Caller, p: &str) -> Result<Per
 
 /// What a link of this creator may carry: their categories on the profile minus the profile's
 /// locks (an owner's own locks too: a lock means "never out of the house"), within SHAREABLE.
-fn open_categories(perm: &Permission) -> Scopes {
+pub(super) fn open_categories(perm: &Permission) -> Scopes {
     let locks = perm.profile.locks();
     perm.scopes
         .iter()
@@ -511,7 +610,7 @@ type Listed = (
 );
 
 const COLS: &str = "s.id, s.label, s.flag, s.attempts_left, s.categories, s.lang, s.created_at, s.expires_at, \
-                    s.revoked_at, (select count(*) from shl_access a where a.shl_id = s.id and a.kind = 'manifest'), \
+                    s.revoked_at, (select count(*) from shl_access a where a.shl_id = s.id and a.kind = case when s.flag = 'LU' then 'file' else 'manifest' end), \
                     (select max(a.at) from shl_access a where a.shl_id = s.id), s.revoked_reason";
 
 /// What a recipient would meet, and why: `active`; `paused` while sharing is off on the instance
@@ -524,7 +623,7 @@ fn state(r: &Listed, sharing: bool) -> (&'static str, Option<&str>) {
         ("expired", None)
     } else if r.3 == Some(0) {
         ("locked_out", None)
-    } else if !sharing {
+    } else if !sharing && r.2 != "I" {
         ("paused", Some("sharing_off"))
     } else {
         ("active", None)
@@ -533,11 +632,16 @@ fn state(r: &Listed, sharing: bool) -> (&'static str, Option<&str>) {
 
 fn link_out(r: &Listed, sharing: bool) -> Value {
     let (state, reason) = state(r, sharing);
-    json!({
+    let mut out = json!({
         "id": r.0, "label": r.1, "passcode": r.2 == "P", "attempts_left": r.3, "categories": r.4,
         "lang": r.5, "created_at": r.6, "expires_at": r.7, "revoked_at": r.8,
         "state": state, "reason": reason, "opened": r.9, "last_access_at": r.10,
-    })
+    });
+    if matches!(r.2.as_str(), "I" | "LU") {
+        out["ice"] = json!(true);
+        out["online"] = json!(r.2 == "LU");
+    }
+    out
 }
 
 /// Revoke the profile's links whose creator may no longer share what they carry. The writes that
@@ -578,9 +682,10 @@ async fn list(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>) 
     let perm = sharer(&mut tx, &caller, &p).await?;
     end_unshareable(&mut tx, perm.profile.id).await?;
     let rows: Vec<Listed> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "select {COLS} from shl s where s.profile_id = $1 order by s.created_at desc, s.id"
+        "select {COLS} from shl s where s.profile_id = $1 and ($2 or s.flag not in ('I', 'LU')) order by s.created_at desc, s.id"
     )))
     .bind(perm.profile.id)
+    .bind(perm.role == "owner")
     .fetch_all(&mut *tx)
     .await?;
     audit(
@@ -741,12 +846,15 @@ async fn create(State(rt): State<Runtime>, caller: Caller, Path(p): Path<String>
 /// One link of the profile, locked: its id, and whether it is already revoked.
 async fn one(conn: &mut PgConnection, perm: &Permission, id: &str) -> R<(Uuid, bool)> {
     let id = Uuid::parse_str(id).map_err(|_| ApiError::not_found())?;
-    let found: Option<(Uuid, bool)> =
-        sqlx::query_as("select id, revoked_at is not null from shl where id = $1 and profile_id = $2 for update")
-            .bind(id)
-            .bind(perm.profile.id)
-            .fetch_optional(conn)
-            .await?;
+    let found: Option<(Uuid, bool)> = sqlx::query_as(
+        "select id, revoked_at is not null from shl where id = $1 and profile_id = $2
+                   and ($3 or flag not in ('I', 'LU')) for update",
+    )
+    .bind(id)
+    .bind(perm.profile.id)
+    .bind(perm.role == "owner")
+    .fetch_optional(conn)
+    .await?;
     found.ok_or_else(|| gone().into())
 }
 
@@ -757,10 +865,11 @@ async fn access(State(rt): State<Runtime>, caller: Caller, Path((p, id)): Path<(
     type Row = (DateTime<Utc>, String, String, Option<String>, Option<String>);
     let rows: Vec<Row> = sqlx::query_as(
         "select a.at, a.kind, a.recipient, host(a.ip), a.user_agent from shl_access a join shl s on s.id = a.shl_id \
-         where s.id = $1 and s.profile_id = $2 order by a.at desc, a.id desc",
+         where s.id = $1 and s.profile_id = $2 and ($3 or s.flag not in ('I', 'LU')) order by a.at desc, a.id desc",
     )
     .bind(id)
     .bind(perm.profile.id)
+    .bind(perm.role == "owner")
     .fetch_all(&mut *tx)
     .await?;
     audit(
@@ -807,6 +916,7 @@ pub fn router() -> Router<Runtime> {
     Router::new()
         .route("/shl/{id}", post(manifest).options(preflight))
         .route("/shl/{id}/file/{ticket}", get(file).head(no_head))
+        .route("/shl/{id}/ice", get(direct_file).head(no_head))
         .route("/profiles/{p}/shl", get(list).post(create))
         .route("/profiles/{p}/shl/{id}", delete(revoke))
         .route("/profiles/{p}/shl/{id}/access", get(access))

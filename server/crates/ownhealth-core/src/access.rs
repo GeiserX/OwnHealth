@@ -242,6 +242,17 @@ impl Permission {
             })
     }
 
+    /// Sharing needs an ordinary grant and follows the profile's locks, including for the owner.
+    pub fn may_share_sensitive(&self, category_scope: &str) -> bool {
+        !self.break_glass
+            && self.may_read_sensitive(category_scope)
+            && self
+                .profile
+                .locks
+                .iter()
+                .all(|scope| scope != category_scope && scope != "read:sensitive")
+    }
+
     /// Record the request if it gave access to this profile or supplied a scope used by the read.
     pub fn record_read(&self, scopes: &[&str]) {
         if let Some(e) = &self.emergency
