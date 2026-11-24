@@ -987,3 +987,51 @@ async fn a_study_orthanc_holds_with_one_instance_missing_is_rebuilt() -> R {
     assert_eq!(e.orthanc.instances_under(U1), 6);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_study_recorded_before_the_upload_links_rebuilds_from_every_upload_that_holds_it() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    let (first, _) = e.upload("alex", &series_files(&three, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (later, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
+    e.import().await?;
+    // as migration 1234 left a study recorded before it: linked to its first upload only
+    sqlx::query("delete from imaging_import_study where import_id = $1")
+        .bind(later.import_id)
+        .execute(&e.rt.pool)
+        .await?;
+    let link = format!(
+        "select count(*) from imaging_import_study where study_instance_uid = '{U1}' and import_id = '{}'",
+        later.import_id
+    );
+    assert_eq!(e.count(&link).await?, 0);
+
+    e.orthanc.wipe();
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(
+        (rebuilt["rebuilt"].clone(), rebuilt["missing"].clone()),
+        (1.into(), 0.into()),
+        "{rebuilt}"
+    );
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        (0..3).map(|s| three.series_uid(s)).collect()
+    );
+    assert_eq!(e.orthanc.instances_under(U1), 9);
+    // the upload that held the third series is linked now, and the first one still
+    assert_eq!(e.count(&link).await?, 1);
+    let first_link = format!(
+        "select count(*) from imaging_import_study where study_instance_uid = '{U1}' and import_id = '{}'",
+        first.import_id
+    );
+    assert_eq!(e.count(&first_link).await?, 1);
+    Ok(())
+}

@@ -7,7 +7,9 @@
 //! and queues this job for their profile.
 //!
 //! The job replays, for each such study, every upload that holds it (`imaging_import_study`): a
-//! second disc can add series to a recorded study, so the first upload alone is not enough. It sends
+//! second disc can add series to a recorded study, so the first upload alone is not enough. A study
+//! recorded before that table names only its first upload; when one is still short after those
+//! replays, the profile's other uploads are read for its UID too, and each one that holds it is linked. It sends
 //! each file of the study under the one StudyInstanceUID lock every Orthanc writer takes
 //! ([`ownhealth_core::orthanc::lock_study`]), after it reads the record again under that lock.
 //! Orthanc files a study by PatientID and UID, so the rebuilt study gets the id the record names; a
@@ -135,52 +137,40 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     .bind(&uids)
     .fetch_all(&ctx.pool)
     .await?;
-    let owner = BlobOwner::Profile(profile_id);
-    let (mut unreadable, mut sent, mut refused, mut misfiled) = (0, 0, 0, 0);
+    let mut tally = Tally::default();
+    let mut replayed: Vec<Uuid> = Vec::new();
     for (import_id, zip, holds) in uploads {
-        let (files, scan) = match StudyFiles::open(&ctx.blobs, owner, &hex::encode(&zip)).await {
-            Ok(opened) => opened,
-            Err(e) => {
-                tracing::warn!(%import_id, error = %e, "an imaging upload does not open: the rebuild leaves it out");
-                unreadable += 1;
-                continue;
-            }
-        };
         let holds: BTreeSet<String> = holds.into_iter().collect();
-        for (uid, study) in scan.studies.iter().filter(|(uid, _)| holds.contains(*uid)) {
-            let Some((id, _)) = needed.get(uid) else {
-                continue;
-            };
-            let mut tx = ctx.pool.begin().await?;
-            lock_study(&mut tx, uid).await?;
-            let still: Option<Option<String>> = sqlx::query_scalar(
-                "select orthanc_id from imaging_study where study_instance_uid = $1 and profile_id = $2",
+        replay(
+            &ctx, &orthanc, profile_id, import_id, &zip, &holds, &needed, false, &mut tally,
+        )
+        .await?;
+        replayed.push(import_id);
+    }
+    // A study recorded before `imaging_import_study` existed names only its first upload (migration
+    // 1234 copied `imaging_study.import_id`), so a series a later upload added is not replayed above.
+    // When a study is still short, the profile's other uploads that hold its UID are replayed too, and
+    // each one that held it is linked to it.
+    let mut short: BTreeSet<String> = BTreeSet::new();
+    for (uid, (id, fhir)) in &needed {
+        if !complete(&orthanc, id, fhir).await? {
+            short.insert(uid.clone());
+        }
+    }
+    if !short.is_empty() {
+        let others: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+            "select id, zip_blob from imaging_import where profile_id = $1 and id <> all($2) \
+             order by created_at, id",
+        )
+        .bind(profile_id)
+        .bind(&replayed)
+        .fetch_all(&ctx.pool)
+        .await?;
+        for (import_id, zip) in others {
+            replay(
+                &ctx, &orthanc, profile_id, import_id, &zip, &short, &needed, true, &mut tally,
             )
-            .bind(uid)
-            .bind(profile_id)
-            .fetch_optional(&mut *tx)
             .await?;
-            if still.flatten().as_ref() != Some(id) {
-                tx.commit().await?;
-                continue;
-            }
-            for instance in &study.entries {
-                let Some(staged) = files.stage_instance(instance.index).await? else {
-                    continue;
-                };
-                match orthanc.store_file(staged.file, staged.size).await.map_err(retry)? {
-                    Stored::Kept { study: parent, .. } if parent == *id => sent += 1,
-                    Stored::Kept { id: other, new, .. } => {
-                        // not the study the record names: take back what this send added
-                        if new {
-                            orthanc.delete_instance(&other).await.map_err(retry)?;
-                        }
-                        misfiled += 1;
-                    }
-                    Stored::Refused => refused += 1,
-                }
-            }
-            tx.commit().await?;
         }
     }
     let (mut rebuilt, mut missing) = (0, 0);
@@ -198,9 +188,99 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         "studies": needed.len(),
         "rebuilt": rebuilt,
         "missing": missing,
-        "unreadable_uploads": unreadable,
-        "sent_files": sent,
-        "refused_files": refused,
-        "misfiled_files": misfiled,
+        "unreadable_uploads": tally.unreadable,
+        "sent_files": tally.sent,
+        "refused_files": tally.refused,
+        "misfiled_files": tally.misfiled,
+        "linked_uploads": tally.linked,
     })))
+}
+
+/// What the replays of one rebuild did.
+#[derive(Default)]
+struct Tally {
+    unreadable: usize,
+    sent: usize,
+    refused: usize,
+    misfiled: usize,
+    /// Uploads found to hold a study that `imaging_import_study` did not link them to.
+    linked: usize,
+}
+
+/// Sends again, from upload `import_id` (its stored `zip`), each study of `holds` that the rebuild
+/// `needed`, under the UID lock and after the record is read again under it. With `link`, an upload
+/// that held such a study (Orthanc filed a file of it under the recorded study) is linked to it in
+/// `imaging_import_study`.
+#[allow(clippy::too_many_arguments)]
+async fn replay(
+    ctx: &JobContext,
+    orthanc: &Orthanc,
+    profile_id: Uuid,
+    import_id: Uuid,
+    zip: &[u8],
+    holds: &BTreeSet<String>,
+    needed: &BTreeMap<String, (String, Value)>,
+    link: bool,
+    t: &mut Tally,
+) -> Result<(), JobError> {
+    let owner = BlobOwner::Profile(profile_id);
+    let (files, scan) = match StudyFiles::open(&ctx.blobs, owner, &hex::encode(zip)).await {
+        Ok(opened) => opened,
+        Err(e) => {
+            tracing::warn!(%import_id, error = %e, "an imaging upload does not open: the rebuild leaves it out");
+            t.unreadable += 1;
+            return Ok(());
+        }
+    };
+    for (uid, study) in scan.studies.iter().filter(|(uid, _)| holds.contains(*uid)) {
+        let Some((id, _)) = needed.get(uid) else {
+            continue;
+        };
+        let mut tx = ctx.pool.begin().await?;
+        lock_study(&mut tx, uid).await?;
+        let still: Option<Option<String>> = sqlx::query_scalar(
+            "select orthanc_id from imaging_study where study_instance_uid = $1 and profile_id = $2",
+        )
+        .bind(uid)
+        .bind(profile_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if still.flatten().as_ref() != Some(id) {
+            tx.commit().await?;
+            continue;
+        }
+        let mut kept = 0;
+        for instance in &study.entries {
+            let Some(staged) = files.stage_instance(instance.index).await? else {
+                continue;
+            };
+            match orthanc.store_file(staged.file, staged.size).await.map_err(retry)? {
+                Stored::Kept { study: parent, .. } if parent == *id => {
+                    t.sent += 1;
+                    kept += 1;
+                }
+                Stored::Kept { id: other, new, .. } => {
+                    // not the study the record names: take back what this send added
+                    if new {
+                        orthanc.delete_instance(&other).await.map_err(retry)?;
+                    }
+                    t.misfiled += 1;
+                }
+                Stored::Refused => t.refused += 1,
+            }
+        }
+        if link && kept > 0 {
+            let added = sqlx::query(
+                "insert into imaging_import_study (import_id, study_instance_uid) values ($1, $2) \
+                 on conflict do nothing",
+            )
+            .bind(import_id)
+            .bind(uid)
+            .execute(&mut *tx)
+            .await?;
+            t.linked += usize::try_from(added.rows_affected()).unwrap_or(0);
+        }
+        tx.commit().await?;
+    }
+    Ok(())
 }
