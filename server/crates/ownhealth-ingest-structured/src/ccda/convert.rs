@@ -41,7 +41,7 @@
 //! - An entered-in-error allergy or problem has no `clinicalStatus` (FHIR R4 ait-2, con-5). A problem
 //!   whose status observation says active while its effectiveTime has an end is listed for review
 //!   with that reason, never imported as active or as resolved (con-4).
-//! - A supply order or a dispense inside a Medication Activity is listed as not read. Its first
+//! - A supply order, dispense or bounded dose in a Medication Activity is listed as not read. Its first
 //!   precondition that names something ("as needed for wheezing") is the dosage's
 //!   `asNeededCodeableConcept`; any other is listed as not read. A `<reference>` with words written
 //!   beside it keeps both (the narrative first).
@@ -1206,13 +1206,15 @@ impl<'a, 'i> Conv<'a, 'i> {
         put(&mut dosage, "text", sig.map(Value::String));
         put(&mut dosage, "timing", repeat.map(|rp| json!({"repeat": rp})));
         put(&mut dosage, "route", self.concept(child(sa, "routeCode")));
-        put(
-            &mut dosage,
-            "doseAndRate",
-            child(sa, "doseQuantity")
-                .and_then(quantity)
-                .map(|q| json!([{"doseQuantity": q}])),
-        );
+        if let Some(dose) = child(sa, "doseQuantity") {
+            if let Some(q) = quantity(dose) {
+                dosage.insert("doseAndRate".into(), json!([{"doseQuantity": q}]));
+            } else if attr(dose, "nullFlavor").is_none()
+                && (child(dose, "low").is_some() || child(dose, "high").is_some())
+            {
+                rep.not_read.push("doseQuantity (bounded dose)".into());
+            }
+        }
         // "as needed for wheezing" (Precondition for Substance Administration 4.25): the first
         // criterion that names something; any other is listed as not read
         let mut as_needed = None;

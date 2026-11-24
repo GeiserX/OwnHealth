@@ -1812,3 +1812,23 @@ fn the_medplum_port_ships_the_apache_license_text() -> R {
     assert!(copies, "the image does not carry LICENSES/");
     Ok(())
 }
+#[test]
+fn round_5_a_bounded_medication_dose_is_listed_as_unread() -> R {
+    let bounded = convert(&medicine_with(
+        r#"<doseQuantity><low value="1" unit="mL"/><high value="2" unit="mL"/></doseQuantity>"#,
+    ))?;
+    assert_eq!(bounded.sections[0].not_read, ["doseQuantity (bounded dose)"]);
+    assert!(
+        resources(&bounded, "MedicationStatement")[0]["dosage"][0]
+            .get("doseAndRate")
+            .is_none()
+    );
+
+    let scalar = convert(&medicine_with(r#"<doseQuantity value="1" unit="mL"/>"#))?;
+    assert!(scalar.sections[0].not_read.is_empty());
+    assert_eq!(
+        resources(&scalar, "MedicationStatement")[0]["dosage"][0]["doseAndRate"][0]["doseQuantity"],
+        json!({"value": 1, "unit": "mL", "system": "http://unitsofmeasure.org", "code": "mL"})
+    );
+    Ok(())
+}
