@@ -99,6 +99,15 @@ impl GarminMember {
     }
 }
 
+/// Serialize import, replay, retraction and move for a profile's exports of this kind.
+pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str) -> Result<()> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("ownhealth:exports:{flag}:{profile_id}"))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// A zip whose member list cannot be read (a download cut short) is `broken_zip`, so the refusal can say so.
 fn classify_zip(reader: impl Read + Seek) -> UploadKind {
     let archive = match crate::zip_directory::open(reader) {

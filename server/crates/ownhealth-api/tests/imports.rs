@@ -1280,3 +1280,72 @@ async fn a_moved_garmin_export_takes_its_readings_to_the_new_profile() -> R {
     assert_eq!(items, 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn garmin_retract_replay_and_move_wait_for_the_profile_export_lock() -> R {
+    use ownhealth_core::jobs::{Job, handler_for};
+    use ownhealth_ingest_structured::retract::lock_exports;
+    use std::time::Duration;
+
+    let a = app().await?;
+    ownhealth_devices::register();
+    let alex = a.family.profile("alex");
+    let bytes = include_bytes!("../../../../fixtures/garmin/lucia-history.zip");
+    let (status, out) = a
+        .upload("alex", &[("profile", "alex")], &[("history.zip", bytes)])
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let ctx = a.rt.job_context();
+    ownhealth_core::jobs::drain(&ctx, "core", 10, Some(&["import.garmin_zip".into()])).await?;
+    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where filename = 'history.jsonl'")
+        .fetch_one(&ctx.pool)
+        .await?;
+    let mut barrier = ctx.pool.begin().await?;
+    lock_exports(&mut barrier, alex, "garmin").await?;
+    let probe = async {
+        for _ in 0..100 {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database()                  and wait_event_type = 'Lock' and wait_event = 'advisory' and query like '%pg_advisory_xact_lock%'",
+            ).fetch_one(&ctx.pool).await?;
+            if waiting == 3 {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        anyhow::bail!("retract, replay and move did not all wait for the Garmin lock")
+    };
+    let retract = format!("/documents/{doc}/retract");
+    let assign = format!("/documents/{doc}/assign");
+    let job = Job {
+        id: 0,
+        queue: "core".into(),
+        kind: "import.garmin_zip".into(),
+        payload: json!({"document_id": doc, "profile_id": alex}),
+        attempts: 1,
+        max_attempts: 1,
+        dedupe_key: None,
+    };
+    let handler = handler_for("import.garmin_zip").expect("Garmin handler");
+    let work = async {
+        tokio::join!(
+            a.post("alex", &retract, Some(json!({"reason": "old export"}))),
+            handler(ctx.clone(), job),
+            a.post("alex", &assign, Some(json!({"profile": "lucia"}))),
+        )
+    };
+    tokio::pin!(work);
+    tokio::select! {
+        settled = &mut work => anyhow::bail!("Garmin operations finished while the lock was held: {settled:?}"),
+        waited = probe => waited?,
+    }
+    sqlx::query("select 1 from document where id = $1 for update nowait")
+        .bind(doc)
+        .execute(&mut *barrier)
+        .await?;
+    barrier.rollback().await?;
+    let (retracted, replay, moved) = work.await;
+    assert!(!retracted?.0.is_server_error());
+    assert!(!moved?.0.is_server_error());
+    replay?;
+    Ok(())
+}

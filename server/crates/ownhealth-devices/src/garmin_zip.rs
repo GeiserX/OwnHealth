@@ -16,6 +16,7 @@ use ownhealth_core::zip_directory::{self, DIRECTORY_LIMIT, GARMIN_MAX_FILES, GAR
 use ownhealth_core::{Error, Result};
 use ownhealth_ingest_structured::fhir::mark_imported;
 use ownhealth_ingest_structured::jobs::document_of_type;
+use ownhealth_ingest_structured::retract::{lock_export_of, lock_exports};
 use ownhealth_ingest_structured::wearables::METRICS;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -715,6 +716,7 @@ async fn write(
 async fn import_document(ctx: &JobContext, job: &Job, source_id: Option<Uuid>) -> jobs::HandlerResult {
     let doc = job.uuid("document_id")?;
     let mut tx = ctx.pool.begin().await?;
+    lock_export_of(&mut tx, doc).await?;
     let row: Option<(Option<Uuid>, String, Value, String)> = sqlx::query_as(
         "select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1 for update",
     )
@@ -726,6 +728,14 @@ async fn import_document(ctx: &JobContext, job: &Job, source_id: Option<Uuid>) -
     };
     let mut summary = ImportSummary::new(doc.to_string());
     let details = flags.get("garmin").cloned().unwrap_or_else(|| json!({}));
+    if let Some(queued_for) = job.str("profile_id").and_then(|p| Uuid::parse_str(p).ok())
+        && profile != Some(queued_for)
+    {
+        // A later move queued its own run. This job's result belongs to the previous profile.
+        summary.reasons.insert("moved".into(), 1);
+        tx.commit().await?;
+        return Ok(Some(summary.to_value()));
+    }
     if status != "active" {
         // retracted while its run waited in the queue: it brings nothing back
         summary.reasons.insert("retracted".into(), 1);
@@ -794,6 +804,7 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
     };
     let details = report.details();
     let mut tx = ctx.pool.begin().await?;
+    lock_exports(&mut tx, profile, "garmin").await?;
     let mut out = if let Some(kept) = kept {
         let mut payload = job.payload.clone();
         payload["blob_sha256"] = json!(kept);

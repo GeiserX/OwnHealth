@@ -33,7 +33,7 @@ pub fn retract_document_facts<'c>(
     reason: &'c str,
 ) -> BoxFuture<'c, Result<Value>> {
     Box::pin(async move {
-        // a running import of a CGM export holds this lock: wait for it, so what it wrote leaves too
+        // Wait for a running CGM or Garmin import so its readings are retracted too.
         lock_export_of(&mut *conn, document_id).await?;
         let mut observations: Vec<Value> = Vec::new();
         let mut records = Map::new();
@@ -182,40 +182,27 @@ pub async fn queue_after(conn: &mut PgConnection, job: &str, base: &str, payload
     Err(ownhealth_core::Error::Other(why.into()))
 }
 
-/// Hold [`lock_exports`] for document `document_id` when it is a CGM export (`flags.cgm_csv`); nothing
-/// for any other document. A running CGM import holds that lock and then writes its document row, so
-/// whatever retracts or moves a document takes this before any lock on the document's row: a move that
-/// held the row first would wait for the import while the import waits for the row (40P01). A move that
-/// committed while this waited gives the export another owner, whose import the move queued: this then
-/// takes that owner's lock too, and reads the owner again, until the owner it read is one whose lock it
-/// holds (as the CGM import does).
+/// Take the CGM or Garmin export lock before locking its document row. If a move commits
+/// while this waits, take the new owner's lock and check the document again.
 pub async fn lock_export_of(conn: &mut PgConnection, document_id: Uuid) -> Result<()> {
-    let mut locked: Vec<Uuid> = Vec::new();
+    let mut locked = Vec::new();
     loop {
-        let cgm: Option<Option<Uuid>> =
-            sqlx::query_scalar("select profile_id from document where id = $1 and flags ? 'cgm_csv'")
-                .bind(document_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-        match cgm.flatten() {
-            Some(owner) if !locked.contains(&owner) => {
-                lock_exports(&mut *conn, owner, "cgm_csv").await?;
-                locked.push(owner);
-            }
-            _ => return Ok(()),
+        let export: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
+            "select profile_id, case when flags ? 'cgm_csv' then 'cgm_csv' when flags ? 'garmin' then 'garmin' end \
+             from document where id = $1",
+        )
+        .bind(document_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some((Some(owner), Some(flag))) = export else {
+            return Ok(());
+        };
+        if locked.contains(&owner) {
+            return Ok(());
         }
+        lock_exports(&mut *conn, owner, &flag).await?;
+        locked.push(owner);
     }
 }
 
-/// Hold the lock on one profile's exports of one kind (`flag`) until this transaction ends. A CGM
-/// import takes it first, so two imports of one profile never interleave: one that replaces its own
-/// readings and queues the others again never races another's run. A retraction or a move of a CGM
-/// export takes it before anything else ([`lock_export_of`]), so it never misses the readings of an
-/// import still running.
-pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str) -> Result<()> {
-    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("ownhealth:exports:{flag}:{profile_id}"))
-        .execute(conn)
-        .await?;
-    Ok(())
-}
+pub use ownhealth_core::documents::lock_exports;
