@@ -7,6 +7,7 @@
 	import { tf } from '#lib/components/pages1/util.svelte';
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { LANGS, type Lang } from '#lib/i18n/langs';
+	import { iceUntil, utcMidnights } from '#lib/logic/ice';
 
 	let { slug }: { slug: string } = $props();
 	type Contact = { name: string; phone: string };
@@ -31,13 +32,10 @@
 
 	const plainItems = $derived(options?.items.filter((item) => !item.sensitive) ?? []);
 	const sensitiveItems = $derived(options?.items.filter((item) => item.sensitive) ?? []);
-	// The server's rule: 00:00 UTC, the chosen number of days after today's UTC date.
-	const until = $derived.by(() => {
-		const n = Math.trunc(Number(days));
-		if (!Number.isFinite(n) || n < 1 || n > 365) return '';
-		const now = new Date();
-		return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + n)).toISOString();
-	});
+	// The server's rule: 00:00 UTC, the chosen number of days after today's UTC date. The clock moves at
+	// 00:00 UTC and when the tab comes back, so a page left open overnight previews the right date.
+	let now = $state(Date.now());
+	const until = $derived(iceUntil(days, now));
 
 	function clearFiles() {
 		if (files) {
@@ -70,8 +68,15 @@
 	onMount(() => {
 		mounted = true;
 		void readOptions();
+		const stop = utcMidnights(() => (now = Date.now()));
+		const onVisible = () => {
+			if (document.visibilityState === 'visible') now = Date.now();
+		};
+		document.addEventListener('visibilitychange', onVisible);
 		return () => {
 			mounted = false;
+			stop();
+			document.removeEventListener('visibilitychange', onVisible);
 			clearFiles();
 		};
 	});
