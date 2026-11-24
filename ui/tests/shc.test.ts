@@ -3,7 +3,21 @@
 // or verified.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SHC_DETAILS, SHC_REASONS, detailKey, identityWarning, refusalKey, refusalVars, shcCards } from '../src/lib/logic/shc.ts';
+import {
+	SHC_DETAILS,
+	SHC_REASONS,
+	SHL_NOT_IMPORTED,
+	SHL_REASONS,
+	detailKey,
+	identityWarning,
+	isLink,
+	linkRefusalKey,
+	linkRefusalVars,
+	notImportedKey,
+	refusalKey,
+	refusalVars,
+	shcCards
+} from '../src/lib/logic/shc.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
 
 const tables = dict as unknown as Record<string, Record<string, string>>;
@@ -84,4 +98,36 @@ test('the receiver says who signed a card, never that the signer is trusted or v
 	}
 	assert.equal(tables.en.shc_signed_by, 'Signed by');
 	assert.equal(tables.es.shc_signed_by, 'Firmada por');
+});
+
+// SMART Health Link receive (slice 23)
+
+test('every link refusal and every not-imported reason has an es and an en sentence', () => {
+	for (const lang of ['en', 'es']) {
+		for (const r of SHL_REASONS) assert.ok(tables[lang][linkRefusalKey(r, '1')], `${lang} ${r}`);
+		for (const r of SHL_NOT_IMPORTED) assert.ok(tables[lang][notImportedKey(r)], `${lang} ${r}`);
+		assert.ok(tables[lang][linkRefusalKey('passcode', null)], lang);
+		assert.ok(tables[lang].shlr_r_other, lang);
+	}
+	assert.equal(linkRefusalKey('something_new', null), 'shlr_r_other');
+	assert.equal(notImportedKey('something_new'), 'shlr_ni_unknown_type');
+});
+
+test('a wrong passcode says how many attempts are left, and a fetch detail never shows server text', () => {
+	const en = words('en');
+	assert.equal(
+		fill(tables.en[linkRefusalKey('passcode', '3')], linkRefusalVars('passcode', '3', en)),
+		'Not imported. The passcode is not right. The link allows 3 more attempts.'
+	);
+	assert.equal(fill(tables.es[linkRefusalKey('passcode', '3')], linkRefusalVars('passcode', '3', words('es'))), 'No importado. El código no es correcto. El enlace admite 3 intentos más.');
+	assert.equal(linkRefusalKey('passcode', null), 'shlr_r_passcode_nocount');
+	assert.match(linkRefusalVars('fetch', 'http_502', en).detail, /502/);
+	assert.equal(linkRefusalVars('fetch', 'dns', en).detail, tables.en.shlr_d_dns);
+	assert.equal(linkRefusalVars('fetch', 'shl.example does not resolve', en).detail, tables.en.shc_d_other);
+});
+
+test('a link is told from a card, alone or after a viewer URL', () => {
+	assert.ok(isLink('shlink:/eyJ1cmwiOiJodHRwczovL3NobC5leGFtcGxlIn0'));
+	assert.ok(isLink('https://viewer.example.org/#shlink:/eyJ1cmwiOiJ4In0'));
+	assert.ok(!isLink('shc:/5676290952432060346029243740446031'));
 });

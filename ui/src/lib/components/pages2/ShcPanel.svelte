@@ -2,11 +2,13 @@
 	// SMART Health Card receive (slice 22): pasted shc:/ text, a .smart-health-card file or a photo of
 	// the QR code. The server fetches an issuer's keys only for a host the person said yes to here, and
 	// a verified card shows who signed it ("signed by <iss>"), never that the signer deserves trust.
-	import { receiveCard, type ShcAnswer, type ShcHost, type ShcSource } from '#lib/api/shc';
+	// A SMART Health Link (slice 23) is pasted here too: its host is shown and approved before the
+	// server fetches anything, and its passcode is typed once and sent only with that request.
+	import { receiveCard, type ShcAnswer, type ShcHost, type ShcSource, type ShlExtra, type ShlHeld, type ShlLink } from '#lib/api/shc';
 	import { t } from '#lib/i18n/index.svelte';
 	import { errRaw, errText, tf } from '#lib/components/pages1/util.svelte';
 	import { day } from '#lib/components/pages2/fmt';
-	import { identityWarning, refusalKey, refusalVars } from '#lib/logic/shc';
+	import { identityWarning, isLink, linkRefusalKey, linkRefusalVars, notImportedKey, refusalKey, refusalVars } from '#lib/logic/shc';
 
 	let { profile, profileName, ondone }: { profile: string; profileName: string; ondone: (documentId: string) => void } = $props();
 
@@ -19,8 +21,12 @@
 	let error = $state<{ text: string; raw: string } | null>(null);
 	let busy = $state(false);
 	let fileEl: HTMLInputElement | undefined = $state();
+	// the link being asked about, the files an earlier answer stored, and the passcode as typed
+	let link = $state<ShlLink | null>(null);
+	let held = $state<ShlHeld[]>([]);
+	let passcode = $state('');
 
-	async function send(s: ShcSource, approve: string[]) {
+	async function send(s: ShcSource, approve: string[], extra: ShlExtra = {}) {
 		if (busy) return;
 		busy = true;
 		source = s;
@@ -29,11 +35,14 @@
 		error = null;
 		asking = [];
 		try {
-			const res = await receiveCard(profile, s, approve);
+			const res = await receiveCard(profile, s, approve, extra);
 			approved = approve;
-			if (res.status === 'needs_approval') asking = res.hosts;
-			else answer = res;
-			if (res.status === 'imported') ondone(res.document_id);
+			if (res.status === 'needs_approval') {
+				asking = res.hosts;
+				link = res.link ?? null;
+				held = res.held ?? [];
+			} else answer = res;
+			if (res.status === 'imported' && res.document_id) ondone(res.document_id);
 		} catch (e) {
 			error = { text: errText(e), raw: errRaw(e) };
 		} finally {
@@ -42,7 +51,17 @@
 	}
 
 	function approve(host: string) {
-		if (source) send(source, [...approved, host]);
+		if (!source) return;
+		// the passcode is sent once, with the request that opens the link, and then forgotten
+		const extra: ShlExtra = held.length ? { held } : link?.passcode ? { passcode } : {};
+		passcode = '';
+		send(source, [...approved, host], extra);
+	}
+
+	function read() {
+		link = null;
+		held = [];
+		send({ text }, []);
 	}
 
 	function decline(host: string) {
@@ -54,13 +73,20 @@
 		const input = e.currentTarget as HTMLInputElement;
 		const f = input.files?.[0];
 		input.value = '';
+		link = null;
+		held = [];
 		if (f) send({ file: f }, []);
 	}
 
-	const refusal = (a: ShcAnswer & { status: 'refused' }) => tf(refusalKey(a.reason), refusalVars(a.reason, a.detail, a.iss, t));
+	const refusal = (a: ShcAnswer & { status: 'refused' }) =>
+		a.kind === 'link' ? tf(linkRefusalKey(a.reason, a.detail), linkRefusalVars(a.reason, a.detail, t)) : tf(refusalKey(a.reason), refusalVars(a.reason, a.detail, a.iss, t));
+	// the link's host, asked about before anything is fetched; issuer hosts come after, with held files
+	const askingLink = $derived(link !== null && held.length === 0);
 	// a card that names someone else, or no one we could match, says so before its rows are accepted
 	const warning = $derived.by(() => {
 		if (answer?.status !== 'imported') return null;
+		// a link that held no card has no name to show: its files are FHIR, matched by the import
+		if (answer.link && answer.cards.length === 0) return answer.identity === 'matched' ? null : tf('shlr_w_unsure', { profile: profileName });
 		const w = identityWarning(answer.identity, answer.cards, profileName);
 		return w ? tf(w.key, w.vars) : null;
 	});
@@ -69,9 +95,9 @@
 <section class="card shc" aria-label={t('shc_title')}>
 	<h3>{tf('shc_t', { name: profileName })}<span class="r">{t('shc_kinds')}</span></h3>
 	<label class="dim" for="shc-text" style="font-size:11.5px">{t('shc_paste_l')}</label>
-	<textarea id="shc-text" class="mono" rows="3" bind:value={text} placeholder="shc:/5676290952432060346029243740446031…" disabled={busy}></textarea>
+	<textarea id="shc-text" class="mono" rows="3" bind:value={text} placeholder="shc:/5676290952432060346029243740446031… · shlink:/eyJ1cmwiOi…" disabled={busy}></textarea>
 	<div class="p2row" style="margin-top:8px">
-		<button class="btn pri" onclick={() => send({ text }, [])} disabled={busy || !text.trim()}>{t('shc_read')}</button>
+		<button class="btn pri" onclick={read} disabled={busy || !text.trim()}>{isLink(text) ? t('shlr_read') : t('shc_read')}</button>
 		<button class="btn" onclick={() => fileEl?.click()} disabled={busy}>{t('shc_file')}</button>
 		<input bind:this={fileEl} type="file" hidden accept=".smart-health-card,application/smart-health-card,.json,image/png,image/jpeg" onchange={picked} />
 	</div>
@@ -79,7 +105,25 @@
 	{#if busy}<div class="muted" role="status" style="margin-top:8px">{t('shc_busy')}</div>{/if}
 	{#if error}<div class="p2err" role="alert" style="margin-top:8px" title={error.raw || undefined}>{error.text}</div>{/if}
 
-	{#each asking as i (i.host)}
+	{#if askingLink && link}
+		{#each asking as i (i.host)}
+			<div class="ask" role="group" aria-label={t('shlr_ask_t')}>
+				<div style="font-weight:600">{t('shlr_ask_t')}</div>
+				{#if link.label}<div class="muted">{t('shlr_ask_label')} <span class="mono">{link.label}</span></div>{/if}
+				<div class="muted" style="margin-top:4px">{tf('shlr_ask_d', { host: i.host })}</div>
+				{#if link.expires}<div class="dim" style="font-size:11.5px">{tf('shlr_ask_expires', { date: day(link.expires) })}</div>{/if}
+				{#if link.passcode}
+					<label class="dim" for="shl-passcode" style="font-size:11.5px;display:block;margin-top:8px">{t('shlr_passcode_l')}</label>
+					<input id="shl-passcode" type="password" autocomplete="off" bind:value={passcode} disabled={busy} />
+				{/if}
+				<div class="p2row" style="margin-top:8px">
+					<button class="btn pri" onclick={() => approve(i.host)} disabled={busy || (link.passcode && !passcode)}>{tf('shlr_approve', { host: i.host })}</button>
+					<button class="btn" onclick={() => decline(i.host)} disabled={busy}>{t('shc_decline')}</button>
+				</div>
+			</div>
+		{/each}
+	{/if}
+	{#each askingLink ? [] : asking as i (i.host)}
 		<div class="ask" role="group" aria-label={t('shc_ask_t')}>
 			<div style="font-weight:600">{t('shc_ask_t')}</div>
 			<div class="muted">{t('shc_ask_signed')}</div>
@@ -99,14 +143,18 @@
 	{#if answer?.status === 'imported'}
 		{#if warning}<div class="p2err" role="alert" style="margin-top:8px">{warning}</div>{/if}
 		<div class="done" role="status">
+			{#if answer.link}<div class="dim" style="font-size:11.5px">{tf('shlr_from', { host: answer.link.host })}{#if answer.link.label}{' · '}<span class="mono">{answer.link.label}</span>{/if}</div>{/if}
 			{#each answer.cards as c, n (n)}
 				<div><span class="chip">{t('shc_signed_by')}</span> <span class="mono">{c.iss}</span></div>
 				<div class="dim" style="font-size:11.5px">{tf('shc_issued', { date: day(c.issued) })}{#if c.expires} · {tf('shc_expires', { date: day(c.expires) })}{/if}</div>
 			{/each}
 			<div style="margin-top:6px">{tf('shc_summary', { accepted: answer.summary.accepted, queued: answer.summary.queued, skipped: answer.summary.skipped })}</div>
+			{#each answer.not_imported ?? [] as n, k (k)}
+				<div class="dim" style="font-size:11.5px">{tf(notImportedKey(n.reason), { type: n.content_type })}</div>
+			{/each}
 			<div class="p2row" style="margin-top:6px;font-size:12px">
 				<a href="/timeline">{t('shc_open_timeline')}</a>
-				<a href="?doc={answer.document_id}">{t('shc_open_doc')}</a>
+				{#if answer.document_id}<a href="?doc={answer.document_id}">{answer.link ? t('shlr_open_doc') : t('shc_open_doc')}</a>{/if}
 			</div>
 		</div>
 	{/if}
@@ -140,6 +188,17 @@
 	}
 	.ask {
 		border-color: rgba(224, 168, 74, 0.55);
+	}
+	.ask input {
+		width: 100%;
+		max-width: 260px;
+		box-sizing: border-box;
+		margin-top: 4px;
+		background: var(--bg2, #091017);
+		color: var(--text);
+		border: 1px solid var(--line2);
+		border-radius: 6px;
+		padding: 6px 8px;
 	}
 	/* a long host wraps inside the card on a phone instead of running off it */
 	.ask .btn {

@@ -97,3 +97,58 @@ export function shcCards(flags: unknown): ShcDocCard[] | null {
 			: []
 	}));
 }
+
+// SMART Health Link receive (slice 23): the same panel takes a shlink:/ link, alone or after a
+// viewer URL. Its own refusals and the files it does not import are worded here.
+
+/** Every reason the server gives for a link (ownhealth_ingest_structured::shl_receive::REASONS). */
+export const SHL_REASONS = [
+	'link',
+	'private_host',
+	'expired',
+	'passcode_needed',
+	'passcode',
+	'inactive',
+	'redirect',
+	'rate_limited',
+	'fetch',
+	'manifest',
+	'no_files',
+	'too_many',
+	'decrypt',
+	'not_fhir',
+	'held'
+] as const;
+
+/** Why a file of a link was not imported (shl_receive::NOT_IMPORTED). */
+export const SHL_NOT_IMPORTED = ['api_access', 'unknown_type'] as const;
+
+/** True when the pasted text holds a SMART Health Link rather than a card. */
+export function isLink(text: string): boolean {
+	return text.includes('shlink:/');
+}
+
+/** The dict key for a link refusal; a reason this UI does not know gets the general sentence. */
+export function linkRefusalKey(reason: string, detail: string | null): string {
+	if (reason === 'passcode' && !detail) return 'shlr_r_passcode_nocount';
+	return (SHL_REASONS as readonly string[]).includes(reason) ? `shlr_r_${reason}` : 'shlr_r_other';
+}
+
+/**
+ * The values a link refusal sentence takes. A fetch detail is a code, worded here (`http_<status>`
+ * keeps its number), so no text from the link's server reaches the sentence.
+ */
+export function linkRefusalVars(reason: string, detail: string | null, t: (key: string) => string): Record<string, string> {
+	const vars: Record<string, string> = { detail: detail ?? '', left: detail ?? '' };
+	if (reason === 'fetch') {
+		const code = detail ?? '';
+		if (/^http_\d{3}$/.test(code)) vars.detail = t('shc_d_http').replace('{status}', code.slice(5));
+		else vars.detail = ['dns', 'timeout', 'connect', 'too_large'].includes(code) ? t(`shlr_d_${code}`) : t('shc_d_other');
+	}
+	return vars;
+}
+
+/** The dict key for a file the link held but OwnHealth did not import. */
+export function notImportedKey(reason: string): string {
+	return (SHL_NOT_IMPORTED as readonly string[]).includes(reason) ? `shlr_ni_${reason}` : 'shlr_ni_unknown_type';
+}
