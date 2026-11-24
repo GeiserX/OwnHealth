@@ -1306,13 +1306,29 @@ impl BlobStore {
         let part = restore_part_path(&target, key);
         let placed = fs::copy(from, &part)
             .and_then(|_| set_mode(&part, 0o440))
-            .and_then(|_| fs::rename(&part, &target));
+            .and_then(|_| rename_part(&part, &target));
         if let Err(e) = placed {
             let _ = fs::remove_file(&part);
             return Err(named(e));
         }
         Ok(true)
     }
+}
+
+// Run with the `.part` path right before [`BlobStore::place`] renames it, in this test thread only.
+#[cfg(test)]
+thread_local! {
+    static BEFORE_PLACE_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The last step of [`BlobStore::place`]: the `.part` file takes the blob's name.
+fn rename_part(part: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(observe) = BEFORE_PLACE_RENAME.with(|hook| hook.borrow_mut().take()) {
+        observe(part);
+    }
+    fs::rename(part, target)
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
@@ -2535,7 +2551,21 @@ mod tests {
         let sha = sha256_reader(&b"reference table"[..])?;
         let fresh = BlobStore::new(dir.path().join("fresh"))?;
         let mode = |p: &Path| fs::metadata(p).map(|m| m.permissions().mode() & 0o777);
+        // the .part file is read-only before it takes the blob's name, so the blob is never there
+        // writable, even for a moment
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let observed = seen.clone();
+        BEFORE_PLACE_RENAME.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |part: &Path| {
+                observed.set(Some(fs::metadata(part).map(|m| m.permissions().mode() & 0o777).ok()));
+            }));
+        });
         assert!(fresh.place(&sha, &from)?);
+        assert_eq!(
+            seen.get(),
+            Some(Some(0o440)),
+            "the .part file was renamed before it was made read-only"
+        );
         let target = plain_at(&dir.path().join("fresh"), &sha);
         assert_eq!(mode(&target)?, 0o440);
         // a placement stopped between its rename and its mode change left the source's mode
