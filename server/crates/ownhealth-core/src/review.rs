@@ -26,7 +26,7 @@ use crate::observations::{CommitOptions, ObservationIn, commit_observation, supe
 use crate::provenance::{SrcIn, SrcRef, region_label};
 use crate::pyjson::row;
 
-pub const REVIEW_KINDS: [&str; 15] = [
+pub const REVIEW_KINDS: [&str; 16] = [
     "candidate_row",
     "agent_proposal",
     "fhir_unmapped",
@@ -42,6 +42,7 @@ pub const REVIEW_KINDS: [&str; 15] = [
     "source_gap",
     "fhir_unmapped_summary",
     "family_proposal",
+    "imaging_study",
 ];
 
 /// Edits correct what was read; they never move a fact to another profile, household, document or
@@ -769,11 +770,22 @@ impl Default for ItemQuery {
 }
 
 pub async fn list_items(conn: &mut PgConnection, q: &ItemQuery) -> Result<Vec<ReviewItem>> {
+    list_items_with_kind_profiles(conn, q, None).await
+}
+
+/// When a kind has a narrower set of allowed profiles, apply it before pagination.
+pub async fn list_items_with_kind_profiles(
+    conn: &mut PgConnection,
+    q: &ItemQuery,
+    profiles_for_kind: Option<(&str, &[Uuid])>,
+) -> Result<Vec<ReviewItem>> {
     Ok(sqlx::query_as(
         "select * from review_item where ($1::uuid is null or household_id = $1) \
          and ($2::uuid[] is null or profile_id = any($2) or profile_id is null) \
          and ($3::text is null or status = $3) and ($4::text is null or kind = $4) \
-         and ($5::uuid is null or document_id = $5) order by created_at, id limit $6 offset $7",
+         and ($5::uuid is null or document_id = $5) \
+         and ($8::text is null or kind <> $8 or profile_id = any($9::uuid[])) \
+         order by created_at, id limit $6 offset $7",
     )
     .bind(q.household_id)
     .bind(&q.profile_ids)
@@ -782,6 +794,8 @@ pub async fn list_items(conn: &mut PgConnection, q: &ItemQuery) -> Result<Vec<Re
     .bind(q.document_id)
     .bind(q.limit)
     .bind(q.offset)
+    .bind(profiles_for_kind.map(|(kind, _)| kind))
+    .bind(profiles_for_kind.map(|(_, ids)| ids))
     .fetch_all(conn)
     .await?)
 }

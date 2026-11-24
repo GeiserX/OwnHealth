@@ -25,6 +25,7 @@ ownhealth-api = { path = "crates/ownhealth-api" }
 ownhealth-devices = { path = "crates/ownhealth-devices" }
 ownhealth-inbox = { path = "crates/ownhealth-inbox" }
 ownhealth-ocr = { path = "crates/ownhealth-ocr" }
+ownhealth-imaging = { path = "crates/ownhealth-imaging" }
 
 # runtime and web
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs", "process", "io-util"] }
@@ -116,6 +117,10 @@ qrcode = { version = "0.14", default-features = false, features = ["image"] }
 tempfile = "3"
 # an independent RFC 5545 parser for the calendar feed tests (ownhealth-api ics_feed.rs)
 icalendar = { version = "0.17", default-features = false, features = ["parser"] }
+# an independent DICOM writer for the hospital CDs the imaging tests make (ownhealth-imaging, tests only)
+dicom-core = "0.10"
+dicom-dictionary-std = "0.10"
+dicom-object = "0.10"
 
 # errors, cli, logs
 thiserror = "2"
