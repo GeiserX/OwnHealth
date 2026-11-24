@@ -1735,6 +1735,21 @@ mod tests {
         .unwrap_or_else(|_| "the connect thread panicked".to_string())
     }
 
+    /// Settings for a live database at `url`, as `TestDb::settings` makes them.
+    fn settings_for(url: &str, data_dir: &Path) -> anyhow::Result<Settings> {
+        let env = HashMap::from([
+            (
+                "OWNHEALTH_SECRETS_KEY".to_string(),
+                ownhealth_core::testing::random_secrets_key(),
+            ),
+            ("OWNHEALTH_DATABASE_URL".to_string(), url.to_string()),
+            ("OWNHEALTH_DATA_DIR".to_string(), data_dir.display().to_string()),
+            ("OWNHEALTH_DEV_AUTH".to_string(), "1".to_string()),
+            ("OWNHEALTH_RUN_JOBS".to_string(), "0".to_string()),
+        ]);
+        Ok(Settings::from(&env)?)
+    }
+
     #[test]
     fn restore_reports_a_database_error_and_how_to_retry() {
         let original = sqlx::Error::PoolClosed;
@@ -1955,6 +1970,145 @@ mod tests {
             "the first check dropped the second database's scratch"
         );
         assert!(!first_left && !second_left, "a scratch database was left behind");
+        Ok(())
+    }
+
+    /// The lock is held through pg_restore: a second check of the same database refuses and
+    /// leaves the first check's scratch database alone.
+    #[tokio::test]
+    async fn round_nine_a_second_verification_refuses_while_the_first_restores() -> anyhow::Result<()> {
+        use ownhealth_core::testing::TestDb;
+
+        crate::register();
+        let db = TestDb::new().await?;
+        let dir = tempfile::tempdir()?;
+        let settings = db.settings(dir.path())?;
+        let archive = backup(&settings, &dir.path().join("backup")).await?;
+        let scratch = format!("{}_restore_check", db.name);
+        let (at_restore, mut reached) = tokio::sync::mpsc::unbounded_channel();
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            let first_check = OBSERVE_PG_RESTORE.scope(
+                Box::new(move |url| {
+                    at_restore.send(url.to_string()).expect("record the scratch database");
+                    Ok(())
+                }),
+                verify_restore(&settings, &archive),
+            );
+            tokio::pin!(first_check);
+            tokio::select! {
+                result = &mut first_check => anyhow::bail!("first check finished before pg_restore: {result:?}"),
+                target = reached.recv() => target.expect("observe pg_restore"),
+            };
+            // The first check is now inside pg_restore and is not polled while the second runs.
+            let second = verify_restore(&settings, &archive).await;
+            let mut conn = PgConnection::connect(&db.url).await?;
+            let kept = scratch_exists(&mut conn, &scratch).await?;
+            conn.close().await?;
+            let first = first_check.await?;
+            Ok::<_, anyhow::Error>((second, kept, first))
+        })
+        .await;
+        let mut cleanup = PgConnection::connect(&db.url).await?;
+        let left = scratch_exists(&mut cleanup, &scratch).await?;
+        if left {
+            drop_scratch(&mut cleanup, &scratch).await?;
+        }
+        cleanup.close().await?;
+
+        let (second, kept, first) = result??;
+        let error = second.expect_err("a second check of the same database must refuse");
+        assert!(
+            error.to_string().contains("verify-restore is already running"),
+            "{error}"
+        );
+        assert!(kept, "the second check dropped the first check's scratch database");
+        assert_eq!(first["ok"], true);
+        assert!(!left, "the first check left its scratch database");
+        Ok(())
+    }
+
+    /// A live database whose name needs quoting and percent-encoding (mixed case, space, double
+    /// quote, slash, percent): the check replaces its own leftover scratch and keeps another
+    /// database's scratch.
+    #[tokio::test]
+    async fn round_nine_verification_quotes_the_live_database_name() -> anyhow::Result<()> {
+        use ownhealth_core::testing::{TestDb, admin_url};
+
+        crate::register();
+        let base = TestDb::new().await?;
+        base.pool.close().await;
+        let live = format!("{}_Mx \"q/%", base.name);
+        let scratch = format!("{live}_restore_check");
+        let neighbour = format!("{}_restore_check", base.name);
+        let mut admin = PgConnection::connect(&admin_url()).await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "create database {} template {}",
+            database_ident(&live),
+            database_ident(&base.name)
+        )))
+        .execute(&mut admin)
+        .await?;
+        let dir = tempfile::tempdir()?;
+        let outcome = async {
+            create_scratch(&mut admin, &scratch).await?; // a leftover of this live database
+            create_scratch(&mut admin, &neighbour).await?; // the scratch of another live database
+            let settings = settings_for(&with_db(&base.url, &live), dir.path())?;
+            let archive = backup(&settings, &dir.path().join("backup")).await?;
+            Ok::<_, anyhow::Error>(verify_restore(&settings, &archive).await?)
+        }
+        .await;
+        let scratch_left = scratch_exists(&mut admin, &scratch).await?;
+        let neighbour_left = scratch_exists(&mut admin, &neighbour).await?;
+        for name in [&scratch, &neighbour, &live] {
+            sqlx::query(AssertSqlSafe(format!(
+                "drop database if exists {} with (force)",
+                database_ident(name)
+            )))
+            .execute(&mut admin)
+            .await?;
+        }
+        admin.close().await?;
+        assert_eq!(outcome?["ok"], true);
+        assert!(!scratch_left, "the check left its scratch database");
+        assert!(neighbour_left, "the check dropped another database's scratch");
+        Ok(())
+    }
+
+    /// PostgreSQL cuts a longer name back to 63 bytes, so `<live>_restore_check` of a 63-byte
+    /// live name would name the live database itself. The check refuses before any DDL.
+    #[tokio::test]
+    async fn round_nine_verification_refuses_a_scratch_name_past_the_identifier_limit() -> anyhow::Result<()> {
+        use ownhealth_core::testing::{TestDb, admin_url};
+
+        let base = TestDb::empty().await?;
+        let live = format!("{}_{}", base.name, "x".repeat(62 - base.name.len()));
+        assert_eq!(live.len(), 63);
+        let mut admin = PgConnection::connect(&admin_url()).await?;
+        sqlx::query(AssertSqlSafe(format!("create database {}", database_ident(&live))))
+            .execute(&mut admin)
+            .await?;
+        let dir = tempfile::tempdir()?;
+        let result = async {
+            let settings = settings_for(&with_db(&base.url, &live), dir.path())?;
+            Ok::<_, anyhow::Error>(verify_restore(&settings, &dir.path().join("no-backup")).await)
+        }
+        .await;
+        let live_left = scratch_exists(&mut admin, &live).await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "drop database if exists {} with (force)",
+            database_ident(&live)
+        )))
+        .execute(&mut admin)
+        .await?;
+        admin.close().await?;
+        let error = result?.expect_err("an overlong scratch name must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the PostgreSQL identifier length limit"),
+            "{error}"
+        );
+        assert!(live_left, "the live database is gone");
         Ok(())
     }
 
