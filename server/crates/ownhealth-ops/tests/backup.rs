@@ -2192,3 +2192,100 @@ async fn round_ten_an_uppercase_key_id_is_refused_as_a_bad_manifest() -> R {
     assert_eq!(public_tables(&db).await?, 0);
     Ok(())
 }
+
+/// A profile deleted after a keyed backup comes back closed when that backup is restored: a
+/// shredded key row, and no sealed file. The next backup holds no key for it, and lists it under
+/// `keys.closed`. Restoring that backup keeps the profile closed, so it stays closed through any
+/// number of backups and restores. A manifest from before `keys.closed` gives the profile no row,
+/// as before.
+#[tokio::test]
+async fn round_eleven_a_closed_profile_stays_closed_after_another_backup_and_restore() -> R {
+    use ownhealth_core::blobs::BlobError;
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::shred;
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let first = TestDb::empty().await?;
+    let s1 = first.settings(&dir.path().join("first"))?;
+    ownhealth_ops::restore(&s1, &fixture).await?;
+    migrate::migrate_embedded(&first.pool).await?;
+    let (alex, household): (Uuid, Uuid) = sqlx::query_as("select id, household_id from profile where slug = 'alex'")
+        .fetch_one(&first.pool)
+        .await?;
+    let bytes = b"%PDF-1.4 LabNorte report of Alex Rivera, sealed".to_vec();
+    let sha = BlobStore::for_settings(&s1)?.put_bytes(BlobOwner::Profile(alex), &bytes)?;
+    let mut c = first.pool.acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(household, Some(alex), &sha, "application/pdf", bytes.len() as i64),
+    )
+    .await?;
+    drop(c);
+    let keyed = ownhealth_ops::backup(&s1, &dir.path().join("keyed")).await?;
+    let mut tx = first.pool.begin().await?;
+    shred(&mut tx, alex).await?;
+    tx.commit().await?;
+    let mut c = first.pool.acquire().await?;
+    keyfile::rewrite(&mut c, &s1).await?;
+    drop(c);
+    async fn shredded_row(db: &TestDb, profile: Uuid) -> anyhow::Result<Option<bool>> {
+        Ok(
+            sqlx::query_scalar("select wrapped_dek is null from profile_key where profile_id = $1")
+                .bind(profile)
+                .fetch_optional(&db.pool)
+                .await?,
+        )
+    }
+    let later = b"%PDF-1.4 LabNorte report of Alex Rivera, after the restore".to_vec();
+    let stack = |db: &TestDb, name: &str| -> anyhow::Result<Settings> {
+        let mut s = db.settings(&dir.path().join(name))?;
+        s.secrets_key = s1.secrets_key.clone();
+        s.keyring_dir = Some(s1.keyring_path());
+        Ok(s)
+    };
+
+    let second = TestDb::empty().await?;
+    let s2 = stack(&second, "second")?;
+    let report = ownhealth_ops::restore(&s2, &keyed).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(shredded_row(&second, alex).await?, Some(true));
+    let refused = BlobStore::for_settings(&s2)?.put_bytes(BlobOwner::Profile(alex), &later);
+    assert!(matches!(refused, Err(BlobError::Key(_))), "{refused:?}");
+
+    let next = ownhealth_ops::backup(&s2, &dir.path().join("next")).await?;
+    assert!(!strs(&manifest(&next)?["keys"]["keyring"]).contains(&alex.to_string()));
+
+    let mut archive = next.clone();
+    for name in ["third", "fourth"] {
+        let db = TestDb::empty().await?;
+        let s = stack(&db, name)?;
+        let report = ownhealth_ops::restore(&s, &archive).await?;
+        assert_eq!(report["ok"], true, "{report:#}");
+        assert_eq!(
+            shredded_row(&db, alex).await?,
+            Some(true),
+            "the closed profile lost its shredded row ({name} restore)"
+        );
+        let refused = BlobStore::for_settings(&s)?.put_bytes(BlobOwner::Profile(alex), &later);
+        assert!(
+            matches!(refused, Err(BlobError::Key(_))),
+            "the closed profile stores sealed files again ({name} restore): {refused:?}"
+        );
+        archive = ownhealth_ops::backup(&s, &dir.path().join(format!("{name}-backup"))).await?;
+        let m = manifest(&archive)?;
+        assert_eq!(strs(&m["keys"]["closed"]), [alex.to_string()], "{:#}", m["keys"]);
+    }
+
+    // a manifest from before keys.closed: the profile gets no row, as it did then
+    let mut old = manifest(&next)?;
+    old["keys"].as_object_mut().expect("keys is a map").remove("closed");
+    write_manifest(&next, &old)?;
+    let db = TestDb::empty().await?;
+    let s = stack(&db, "old-manifest")?;
+    let report = ownhealth_ops::restore(&s, &next).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(shredded_row(&db, alex).await?, None);
+    Ok(())
+}

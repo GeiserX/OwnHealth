@@ -16,7 +16,8 @@
 //! `profile_key` out, and every backup rewrites `keyring.json` in OWNHEALTH_KEYRING_DIR instead
 //! (`ownhealth_core::keyfile`), a folder outside the blob folder and every backup. The manifest lists
 //! the profiles whose key the backup needs (`keys.keyring`) and the data key identifiers
-//! (`keys.key_ids`). Restore and verify-restore take matching keys from the current keyring. A profile delete rewrites the keyring at once, so a backup taken
+//! (`keys.key_ids`), and the profiles of the dump whose key a delete shredded (`keys.closed`), so a
+//! restore of a backup of a restored deleted profile keeps it closed. Restore and verify-restore take matching keys from the current keyring. A profile delete rewrites the keyring at once, so a backup taken
 //! before the delete no longer opens that profile's files; its rows stay in the dump until retention
 //! drops it. The keys of pending items still travel in the dump: an item's key is shredded when it
 //! gets its profile, so the keyring of a later day would no longer open the item in an older backup.
@@ -670,9 +671,17 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
         let kept: i64 = sqlx::query_scalar("select count(*) from profile_key where wrapped_dek is not null")
             .fetch_one(&mut *tx)
             .await?;
+        // A profile of the dump with a shredded key row: one restored from a backup taken before its
+        // delete. The keyring names no key of it for this backup, so the manifest says it is closed.
+        let closed: Vec<Uuid> = sqlx::query_scalar(
+            "select k.profile_id from profile_key k join profile p on p.id = k.profile_id \
+             where k.wrapped_dek is null order by 1",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
         let as_of = Utc::now().date_naive();
         let states = state_hashes(&mut tx, as_of).await?;
-        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, as_of, states))
+        Ok::<_, Error>((referenced, wrapped, migrations, tables, kept, closed, as_of, states))
     }
     .await;
     // The dump must finish before the exporting transaction ends, whatever the facts did.
@@ -680,7 +689,7 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     // build_state may store snapshots; the backup leaves the database as it was.
     tx.rollback().await?;
     conn.close().await?;
-    let (referenced, wrapped, migrations, mut tables, kept, as_of, states) = facts?;
+    let (referenced, wrapped, migrations, mut tables, kept, closed, as_of, states) = facts?;
     if !done.status.success() {
         return Err(ops_error(format!(
             "pg_dump failed: {}",
@@ -803,7 +812,13 @@ pub async fn backup(settings: &Settings, dest: &Path) -> Result<PathBuf> {
     required.dedup();
     let keyring: Vec<_> = key_ids.keys().collect();
     let fingerprint = kek.as_ref().map(|k| hex::encode(k.fingerprint()));
-    let key_facts = json!({"kek_fingerprint": fingerprint, "profiles": kept, "keyring": keyring, "key_ids": key_ids});
+    let key_facts = json!({
+        "kek_fingerprint": fingerprint,
+        "profiles": kept,
+        "keyring": keyring,
+        "key_ids": key_ids,
+        "closed": closed,
+    });
     let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     let manifest = json!({
         "schema": MANIFEST_SCHEMA,
@@ -1063,10 +1078,11 @@ struct RingKeys {
     supplemental: Vec<(Uuid, Vec<u8>)>,
     /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
     shredded: Vec<Uuid>,
-    /// profiles whose archived key the keyring closes and that hold no newer key: each gets its
-    /// shredded row back, so no new key is ever made for it. A profile the archive names no key for
-    /// gets no row: its next file asks the keyring, which refuses a new key only under a tombstone
-    /// that names no key, so a tombstone that names a later key does not stop it.
+    /// profiles whose archived key the keyring closes and that hold no newer key, and profiles the
+    /// manifest lists as closed (`keys.closed`) that the keyring holds no key for: each gets its
+    /// shredded row back, so no new key is ever made for it. Any other profile the archive names no
+    /// key for gets no row: its next file asks the keyring, which refuses a new key only under a
+    /// tombstone that names no key, so a tombstone that names a later key does not stop it.
     tombstones: Vec<Uuid>,
     /// profiles for which the keyring has no matching key or tombstone
     missing: Vec<Uuid>,
@@ -1101,6 +1117,20 @@ fn ring_keys(
     let key_ids = manifest["keys"]["key_ids"]
         .as_object()
         .ok_or_else(|| ops_error("bad keys.key_ids map in the manifest"))?;
+    // A manifest from before `keys.closed` lists no closed profile.
+    let closed = match manifest["keys"].get("closed") {
+        None => Vec::new(),
+        Some(list) => list
+            .as_array()
+            .ok_or_else(|| ops_error("bad keys.closed list in the manifest"))?
+            .iter()
+            .map(|id| {
+                id.as_str()
+                    .and_then(|i| Uuid::parse_str(i).ok())
+                    .ok_or_else(|| ops_error(format!("bad profile id {id} in the manifest's keys.closed")))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
     if key_ids.len() != ids.len() {
         return Err(ops_error(
             "keys.key_ids does not match the manifest's keys.keyring list",
@@ -1171,6 +1201,12 @@ fn ring_keys(
             out.tombstones.push(id);
         } else {
             out.missing.push(id);
+        }
+    }
+    // Closed when the backup was taken: it stays closed unless the keyring holds a key for it now.
+    for id in closed {
+        if !ring.profiles.contains_key(&id) && !out.tombstones.contains(&id) {
+            out.tombstones.push(id);
         }
     }
     // Backup records a state hash for every profile in the database snapshot. Keys that
