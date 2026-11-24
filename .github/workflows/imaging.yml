@@ -1,0 +1,151 @@
+name: Imaging CD
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/imaging.yml'
+      - 'compose.yaml'
+      - 'data/**'
+      - 'migrations/**'
+      - 'scripts/fetch-pdfium.sh'
+      - 'server/**'
+      - 'ui/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: imaging-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  first-frame:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      RUST_TOOLCHAIN: "1.98.1"
+      OWNHEALTH_IMAGING_CD_URL: http://127.0.0.1:8244
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: imaging-${{ hashFiles('server/Cargo.toml') }}
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Build the UI and install pinned Chromium
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec tsc -p e2e
+          pnpm exec playwright install --with-deps --only-shell chromium
+      - name: Build OwnHealth and generate the CT CD
+        run: |
+          bash scripts/fetch-pdfium.sh linux-x64
+          cargo build --manifest-path server/Cargo.toml --locked \
+            -p ownhealth -p ownhealth-imaging --bin ownhealth --example imaging_cd
+          zip="$RUNNER_TEMP/labnorte-ct.zip"
+          server/target/debug/examples/imaging_cd "$zip"
+          printf 'OWNHEALTH_IMAGING_CD_ZIP=%s\n' "$zip" >> "$GITHUB_ENV"
+      - name: Start the imaging profile and this checkout's OwnHealth server
+        run: |
+          umask 077
+          OWNHEALTH_ORTHANC_PASSWORD="$(openssl rand -hex 32)"
+          export OWNHEALTH_ORTHANC_PASSWORD
+          cat > .env <<ENV
+          OWNHEALTH_DB_PASSWORD=$(openssl rand -hex 32)
+          OWNHEALTH_APP_DB_PASSWORD=$(openssl rand -hex 32)
+          OWNHEALTH_ORTHANC_PASSWORD=$OWNHEALTH_ORTHANC_PASSWORD
+          ENV
+          # Use the deployment profile's Orthanc config and Postgres. Publish only to the runner
+          # so the same debug binary as the regular e2e job can talk to both.
+          cat > "$RUNNER_TEMP/imaging-compose.yml" <<'YAML'
+          services:
+            db:
+              image: postgres:17.11@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+              ports: ["127.0.0.1:55444:5432"]
+            orthanc:
+              image: orthancteam/orthanc:26.11.1@sha256:25738bcd515926ac8d33cacf09729a410a32c0a65d6cb8e61bd86fce81a4cd30
+              ports: ["127.0.0.1:18244:8042"]
+          YAML
+          docker compose -f compose.yaml -f "$RUNNER_TEMP/imaging-compose.yml" \
+            --profile imaging up -d --wait --wait-timeout 90 db orthanc
+          orthanc_ready=false
+          for _ in {1..45}; do
+            if curl -fsS --user "ownhealth:$OWNHEALTH_ORTHANC_PASSWORD" \
+              http://127.0.0.1:18244/system >/dev/null 2>&1; then
+              orthanc_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$orthanc_ready" != true ]]; then
+            echo 'Orthanc did not become ready.' >&2
+            exit 1
+          fi
+
+          source .env
+          export OWNHEALTH_DATABASE_URL="postgresql://ownhealth:$OWNHEALTH_DB_PASSWORD@127.0.0.1:55444/ownhealth"
+          export OWNHEALTH_ORTHANC_URL=http://127.0.0.1:18244
+          export OWNHEALTH_BASE_URL="$OWNHEALTH_IMAGING_CD_URL"
+          export OWNHEALTH_HOST=127.0.0.1 OWNHEALTH_PORT=8244
+          export OWNHEALTH_STATIC_DIR="$PWD/server/static"
+          export OWNHEALTH_DATA_DIR="$RUNNER_TEMP/imaging-data"
+          export OWNHEALTH_PDFIUM_LIB="$PWD/server/vendor/pdfium/linux-x64/lib/libpdfium.so"
+          OWNHEALTH_SECRETS_KEY="$(openssl rand -base64 32)"
+          OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
+          export OWNHEALTH_SECRETS_KEY OWNHEALTH_SECRET_KEY
+          export OWNHEALTH_DEMO=1 OWNHEALTH_DEV_AUTH=1 OWNHEALTH_JOB_POLL_SECONDS=1
+          export RUST_LOG=warn
+          nohup server/target/debug/ownhealth serve > "$RUNNER_TEMP/imaging-app.log" 2>&1 </dev/null &
+          pid=$!
+          for _ in {1..90}; do
+            kill -0 "$pid"
+            if curl -fsS "$OWNHEALTH_IMAGING_CD_URL/readyz" >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          echo 'OwnHealth did not become ready.' >&2
+          exit 1
+      - name: Import the CD and get a drawn CT frame in under 5 s
+        id: viewer
+        working-directory: ui
+        run: pnpm exec playwright test -c e2e/imaging-cd.config.ts
+      - name: A throttled viewer must fail the same 5 s gate
+        if: ${{ !cancelled() && steps.viewer.outcome != 'skipped' }}
+        working-directory: ui
+        env:
+          OWNHEALTH_IMAGING_CD_THROTTLE: "1"
+        run: |
+          log="$RUNNER_TEMP/imaging-throttled.log"
+          if pnpm exec playwright test -c e2e/imaging-cd.config.ts --grep 'opens the CT study' 2>&1 | tee "$log"; then
+            echo 'The throttled viewer unexpectedly passed.' >&2
+            exit 1
+          fi
+          # A crash or a missing frame cannot satisfy the control.
+          grep -F 'Error: IMAGING_OPEN_BUDGET_EXCEEDED' "$log"
+          grep -E '^Throttled viewer open: [0-9]+ ms$' "$log"
+      - name: Remove the throwaway imaging stack
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/imaging-compose.yml" ]]; then
+            docker compose -f compose.yaml -f "$RUNNER_TEMP/imaging-compose.yml" \
+              --profile imaging down -v
+          fi
