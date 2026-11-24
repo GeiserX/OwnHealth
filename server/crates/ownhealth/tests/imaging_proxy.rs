@@ -1560,3 +1560,67 @@ async fn retracting_the_report_of_a_study_retracts_the_study() -> R {
     assert_eq!(carmen, "current");
     Ok(())
 }
+
+/// Slice 43: a study retracted with its report comes back with it. Uploading the report's bytes
+/// again reactivates the document (core create_document), and the study it retracted is current again:
+/// the viewer opens it. Without this, only SQL could undo one wrong Retract.
+#[tokio::test]
+async fn a_retracted_report_uploaded_again_brings_its_study_back() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let alex = w.fam.profile("alex");
+    let sha = "ce".repeat(32);
+    let upload =
+        || ownhealth_core::documents::NewDocument::upload(w.fam.household_id, Some(alex), &sha, "application/pdf", 10);
+    let report = {
+        let mut c = w.db.pool.acquire().await?;
+        ownhealth_core::documents::create_document(&mut c, &upload()).await?.id
+    };
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(ALEX_CT)
+        .execute(&w.db.pool)
+        .await?;
+    let req = Request::post(format!("/api/documents/{report}/retract"))
+        .header(header::HOST, "health.test")
+        .header(header::ORIGIN, BASE)
+        .header(header::COOKIE, format!("{}={cookie}", sessions::COOKIE))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"reason": "wrong click"}).to_string()))?;
+    let (s, _, body) = w.call(req).await?;
+    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("study_retracted")),
+        "{v}"
+    );
+    // a study retracted for another reason stays retracted when the document comes back
+    sqlx::query("update imaging_study set status = 'retracted', status_reason = 'entered in error' where study_instance_uid = $1")
+        .bind(CARMEN_MR)
+        .execute(&w.db.pool)
+        .await?;
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(CARMEN_MR)
+        .execute(&w.db.pool)
+        .await?;
+    let again = {
+        let mut c = w.db.pool.acquire().await?;
+        ownhealth_core::documents::create_document(&mut c, &upload()).await?
+    };
+    assert_eq!((again.id, again.reactivated), (report, true));
+    let (status, reason): (String, Option<String>) =
+        sqlx::query_as("select status, status_reason from imaging_study where study_instance_uid = $1")
+            .bind(ALEX_CT)
+            .fetch_one(&w.db.pool)
+            .await?;
+    assert_eq!((status.as_str(), reason), ("current", None));
+    w.open(&cookie, "alex", ALEX_CT).await?;
+    let carmen: String = sqlx::query_scalar("select status from imaging_study where study_instance_uid = $1")
+        .bind(CARMEN_MR)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(carmen, "retracted");
+    Ok(())
+}

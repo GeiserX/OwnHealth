@@ -379,6 +379,11 @@ pub async fn lock_blob(conn: &mut PgConnection, profile: Uuid, sha256: &str, sha
     Ok(())
 }
 
+/// The start of the status reason of a row retracted with its document (`POST
+/// /api/documents/{id}/retract`). An imaging study with that reason comes back when the document does
+/// ([`create_document`]).
+pub const RETRACTED_WITH_DOCUMENT: &str = "document retracted: ";
+
 /// Insert a document or return the existing one for the same profile and bytes.
 pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Result<DocumentRef> {
     let sha = sha256_hex_to_bytes(d.blob_sha256)?;
@@ -401,6 +406,16 @@ pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Re
             .bind(id)
             .execute(&mut *conn)
             .await?;
+        // An imaging study retracted with this document as its report comes back with it; its row
+        // and its pixels stayed. A study retracted for another reason stays retracted.
+        sqlx::query(
+            "update imaging_study set status = 'current', status_reason = null \
+             where report_document_id = $1 and status = 'retracted' and starts_with(status_reason, $2)",
+        )
+        .bind(id)
+        .bind(RETRACTED_WITH_DOCUMENT)
+        .execute(&mut *conn)
+        .await?;
     }
     let (id, created) = match row {
         Some((id, _)) => (id, false),

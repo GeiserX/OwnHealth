@@ -731,11 +731,11 @@ async fn retract(
     if doc.str("status") == Some("retracted") {
         return Err(ApiError::new(StatusCode::CONFLICT, "conflict", "The document is already retracted.").into());
     }
-    let why = format!("document retracted: {reason}");
+    let why = format!("{}{reason}", ownhealth_core::documents::RETRACTED_WITH_DOCUMENT);
     let mut out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
     // A study whose report this is goes with it (slice 43): the person retracts a scan that is not
     // theirs through its report. Its row and its pixels in Orthanc stay; the viewer and the timeline
-    // leave it out.
+    // leave it out. Uploading the report again brings the study back (core create_document).
     let studies: Vec<Uuid> = sqlx::query_scalar(
         "update imaging_study set status = 'retracted', status_reason = $2 \
          where report_document_id = $1 and status in ('current', 'provisional') returning id",
