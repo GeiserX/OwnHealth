@@ -966,8 +966,10 @@ async fn ds4p_security_labels_make_the_records_sensitive() -> R {
 async fn a_privacy_markings_section_labels_every_record_of_the_document() -> R {
     let body = format!(
         r#"<component><section><templateId root="2.16.840.1.113883.3.3445.4"/><title>Privacy Markings</title>
-             <text>This document contains HIV information</text><entry>{}</entry></section></component>{}"#,
+             <text>This document contains HIV and mental health information</text><entry>{}</entry><entry>{}</entry>
+           </section></component>{}"#,
         security_label("HIV"),
+        security_label("PSY"),
         problems_section(&problem_entry(
             "hiv",
             r#"code="86406008" displayName="Human immunodeficiency virus infection""#,
@@ -988,7 +990,8 @@ async fn a_privacy_markings_section_labels_every_record_of_the_document() -> R {
                 .collect()
         })
         .collect();
-    assert_eq!(labels, vec![vec!["HIV".to_string()]]);
+    // every entry of the section labels the document, not only the first
+    assert_eq!(labels, vec![vec!["HIV".to_string(), "PSY".to_string()]]);
 
     let env = Env::new().await?;
     let mut tx = env.tx().await?;
@@ -1001,7 +1004,13 @@ async fn a_privacy_markings_section_labels_every_record_of_the_document() -> R {
             .bind(p)
             .fetch_all(&mut *tx)
             .await?;
-    assert_eq!(rows, vec![("86406008".to_string(), vec!["sexual_health".to_string()])]);
+    assert_eq!(
+        rows,
+        vec![(
+            "86406008".to_string(),
+            vec!["mental_health".to_string(), "sexual_health".to_string()]
+        )]
+    );
     Ok(())
 }
 
@@ -1238,5 +1247,200 @@ fn entered_in_error_has_no_clinical_status_and_an_active_problem_with_an_end_is_
         allergies,
         [(&json!("entered-in-error"), false), (&json!("confirmed"), true)]
     );
+    Ok(())
+}
+
+/// XML text with `&`, `<`, `>` and `"` escaped.
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn collapse(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Every string inside a JSON value.
+fn strings(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+        Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+        _ => {}
+    }
+}
+
+/// The planted instructions of one injection fixture: each literal string of a PDF (its page and its
+/// metadata), each paragraph of a text file (HTML tags taken off) and each string of a JSON file that
+/// holds the marker, and the `.truth` file's `injection_text`.
+fn planted(dir: &std::path::Path, fixture: &Value, truth: &Value, marker: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in fixture["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let text = String::from_utf8_lossy(&std::fs::read(dir.join(f)).unwrap_or_default()).into_owned();
+        let mut pieces = Vec::new();
+        if f.ends_with(".pdf") {
+            pieces.extend(
+                text.split('(')
+                    .skip(1)
+                    .filter_map(|s| s.split_once(')').map(|(a, _)| a.to_string())),
+            );
+        } else if f.ends_with(".json") {
+            strings(&serde_json::from_str(&text).unwrap_or_default(), &mut pieces);
+        } else {
+            let mut para = String::new();
+            for line in text.lines().chain([""]) {
+                if line.trim().is_empty() {
+                    pieces.push(std::mem::take(&mut para));
+                } else {
+                    para.push_str(line);
+                    para.push('\n');
+                }
+            }
+        }
+        for p in pieces {
+            // tags off, so a hidden HTML div gives its words
+            let mut words = String::new();
+            let mut tag = false;
+            for ch in p.chars() {
+                match ch {
+                    '<' => tag = true,
+                    '>' if tag => {
+                        tag = false;
+                        words.push(' ');
+                    }
+                    _ if !tag => words.push(ch),
+                    _ => {}
+                }
+            }
+            let words = collapse(&words);
+            if words.contains(marker) {
+                out.push(words);
+            }
+        }
+    }
+    if let Some(t) = truth["expect"]["injection_text"].as_str() {
+        out.push(collapse(t));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A document that carries `text` as its title, in a narrative cell a result's name and value point
+/// at, as the result's value, and as a medicine's sig (Instruction).
+fn carrying(text: &str) -> Vec<u8> {
+    let e = escape(text);
+    let body = format!(
+        r##"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.1.1"/><title>MEDICATIONS</title>
+          <entry><substanceAdministration classCode="SBADM" moodCode="EVN">
+            <templateId root="2.16.840.1.113883.10.20.22.4.16"/><id root="1.2.3.4" extension="med-inj"/>
+            <statusCode code="active"/>
+            <consumable><manufacturedProduct><manufacturedMaterial>
+              <code code="860975" codeSystem="2.16.840.1.113883.6.88" displayName="Metformin 500 MG Oral Tablet"/>
+            </manufacturedMaterial></manufacturedProduct></consumable>
+            <entryRelationship typeCode="COMP"><substanceAdministration classCode="SBADM" moodCode="INT">
+              <templateId root="2.16.840.1.113883.10.20.22.4.147"/><code code="76662-6" codeSystem="2.16.840.1.113883.6.1"/>
+              <text>{e}</text>
+              <consumable><manufacturedProduct><manufacturedMaterial nullFlavor="NA"/></manufacturedProduct></consumable>
+            </substanceAdministration></entryRelationship>
+          </substanceAdministration></entry></section></component>
+        <component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>RESULTS</title>
+          <text><table><tbody><tr><td ID="res-inj">{e}</td></tr></tbody></table></text>
+          <entry><organizer classCode="BATTERY" moodCode="EVN"><templateId root="2.16.840.1.113883.10.20.22.4.1"/>
+            <id root="1.2.3.4" extension="org-inj"/>
+            <code code="24323-8" codeSystem="2.16.840.1.113883.6.1" displayName="Metabolic panel"/>
+            <statusCode code="completed"/><effectiveTime value="20261020"/>
+            <component><observation classCode="OBS" moodCode="EVN"><templateId root="2.16.840.1.113883.10.20.22.4.2"/>
+              <id root="1.2.3.4" extension="obs-inj"/>
+              <code code="2345-7" codeSystem="2.16.840.1.113883.6.1"><originalText><reference value="#res-inj"/></originalText></code>
+              <statusCode code="completed"/><effectiveTime value="20261020"/>
+              <value xsi:type="ST">{e}</value>
+            </observation></component>
+          </organizer></entry></section></component>"##
+    );
+    String::from_utf8(document(&body))
+        .unwrap_or_default()
+        .replacen("<title>Test document</title>", &format!("<title>{e}</title>"), 1)
+        .into_bytes()
+}
+
+/// What breaks the injection rule in converted output: the marker anywhere but a free-text field
+/// (`title`, `text`, `valueString`), or a number that the `.truth` says must never be a value.
+fn injection_breaches(v: &Value, key: &str, marker: &str, never: &[String], out: &mut Vec<String>) {
+    match v {
+        Value::String(s) if s.contains(marker) && !matches!(key, "title" | "text" | "valueString") => {
+            out.push(format!("{key}: {s}"));
+        }
+        Value::Number(n) if never.contains(&n.to_string()) => out.push(format!("{key}: {n}")),
+        Value::Array(a) => a.iter().for_each(|x| injection_breaches(x, key, marker, never, out)),
+        Value::Object(o) => o.iter().for_each(|(k, x)| injection_breaches(x, k, marker, never, out)),
+        _ => {}
+    }
+}
+
+/// CR9: the injection fixtures of `fixtures/labslips/injection/` on the C-CDA free-text paths. Each
+/// planted instruction rides in a document's title, narrative (a result's name and value) and sig.
+/// It is stored as written, as data: the output equals the same document with plain text in those
+/// places, the marker sits only in free-text fields, and no number the `.truth` names becomes a value.
+#[test]
+fn injection_fixtures_on_the_ccda_free_text_paths_stay_data() -> R {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/labslips/injection");
+    let registry: Value = serde_json::from_slice(&std::fs::read(dir.join("registry.json"))?)?;
+    let marker = registry["marker"].as_str().unwrap_or("CANARY");
+    // the checker sees a breach: a positive control
+    let mut seen = Vec::new();
+    injection_breaches(
+        &json!({"code": {"coding": [{"code": marker}]}, "valueQuantity": {"value": 45}}),
+        "",
+        marker,
+        &["45".to_string()],
+        &mut seen,
+    );
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    let plain = "Take one tablet by mouth daily";
+    let control = convert(&carrying(plain))?;
+    let fixtures = registry["fixtures"].as_array().cloned().unwrap_or_default();
+    assert!(fixtures.len() >= 7, "{registry}");
+    for f in &fixtures {
+        let name = f["name"].as_str().unwrap_or_default();
+        let truth: Value = serde_json::from_slice(&std::fs::read(dir.join(format!("{name}.truth")))?)?;
+        let never: Vec<String> = truth["expect"]["never_a_value"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        let payloads = planted(&dir, f, &truth, marker);
+        assert!(!payloads.is_empty(), "{name}: no planted text found");
+        for p in payloads {
+            let c = convert(&carrying(&p))?;
+            let composition = resources(&c, "Composition")[0];
+            let statement = resources(&c, "MedicationStatement")[0];
+            let result = resources(&c, "Observation")[0];
+            assert_eq!(composition["title"], json!(p), "{name}");
+            assert_eq!(statement["dosage"][0]["text"], json!(p), "{name}");
+            assert_eq!(result["code"]["text"], json!(p), "{name}");
+            assert_eq!(result["valueString"], json!(p), "{name}");
+            let mut breaches = Vec::new();
+            for e in &c.entries {
+                injection_breaches(&e.resource, "", marker, &never, &mut breaches);
+            }
+            assert!(breaches.is_empty(), "{name}: {breaches:?}");
+            // the text changes nothing but the fields that hold it
+            let quoted = |s: &str| serde_json::to_string(s).unwrap_or_default();
+            let same = serde_json::to_string(&c.entries.iter().map(|e| &e.resource).collect::<Vec<_>>())?
+                .replace(&quoted(&p), &quoted(plain));
+            let want = serde_json::to_string(&control.entries.iter().map(|e| &e.resource).collect::<Vec<_>>())?;
+            assert_eq!(same, want, "{name}");
+            assert_eq!(c.sections, control.sections, "{name}");
+        }
+    }
     Ok(())
 }
