@@ -88,6 +88,10 @@ pub enum NetError {
     Timeout(String),
     #[error("request to {host} failed: {message}")]
     Http { host: String, message: String },
+    /// No connection to the host opened (refused, unreachable, or the TLS handshake failed), so no
+    /// byte of the request was sent.
+    #[error("request to {0} failed: no connection")]
+    Connect(String),
     #[error("could not write the download: {0}")]
     Write(String),
 }
@@ -226,7 +230,14 @@ async fn send(
     if let Some((content_type, bytes)) = body {
         req = req.header(reqwest::header::CONTENT_TYPE, content_type).body(bytes);
     }
-    let resp = req.send().await.map_err(http)?;
+    // A fresh client per request: no pooled connection, so a connect error means nothing was sent.
+    let resp = req.send().await.map_err(|e| {
+        if e.is_connect() && !e.is_timeout() {
+            NetError::Connect(host.clone())
+        } else {
+            http(e)
+        }
+    })?;
     if resp.content_length().is_some_and(|n| n > egress.max_bytes as u64) {
         return Err(NetError::TooLarge(egress.max_bytes));
     }

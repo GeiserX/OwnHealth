@@ -3,6 +3,7 @@
 mod common;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Form, Path, Query, State};
@@ -12,14 +13,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use chrono::{Duration, Utc};
-use ownhealth_core::connector_oauth::{self as oauth, Launch, OAuthError};
-use ownhealth_core::jobs::JobContext;
+use ownhealth_core::connector_oauth::{self as oauth, ConnectorClient, Endpoints, Launch, OAuthError};
+use ownhealth_core::jobs::{JobContext, JobError};
 use ownhealth_core::net::Egress;
 use ownhealth_core::secrets::{self, SecretBox, SecretString};
 use ownhealth_core::sources::{self, get_source};
 use ownhealth_ingest_structured::bluebutton;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 const PATIENT: &str = "-20140000010000";
@@ -34,6 +36,45 @@ struct Calls {
     token_issued: bool,
     refreshes: usize,
     pages: Vec<(String, usize)>,
+    revoked: Vec<String>,
+}
+
+/// What the claim search serves.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Eob {
+    /// 50 claims with a next link, then one more.
+    #[default]
+    Full,
+    /// 30 claims with a next link, then one more at offset 30.
+    Short,
+    /// Full, with fullUrl on every claim and another server's fullUrl on claim-3.
+    ForeignUrl,
+    /// The second page is the first page again, with a next link.
+    Repeated,
+    /// 51 claims on a page of 50.
+    Oversized,
+    /// The first page answers this status.
+    Fails(u16),
+}
+
+/// How the fake CMS behaves. Tests change it between calls.
+#[derive(Clone, Default)]
+struct Mode {
+    /// The refresh retires the old token, then the reply is lost.
+    broken_refresh: bool,
+    /// The second claim page names the patient on another server.
+    wrong_reference: bool,
+    /// The refresh answers with the refresh token it was sent.
+    same_refresh: bool,
+    /// The refresh answers for another patient.
+    other_patient: bool,
+    /// The code exchange names no patient.
+    no_patient: bool,
+    /// The scope the token answers grant, when narrower than the request.
+    scope: Option<String>,
+    eob: Eob,
+    /// SQL run once, when the first claim page is asked for: a change during the run.
+    mid_run: Option<(PgPool, String)>,
 }
 
 #[derive(Clone)]
@@ -41,8 +82,17 @@ struct Fake {
     issuer: String,
     basic: String,
     calls: Arc<Mutex<Calls>>,
-    broken_refresh: bool,
-    wrong_reference: bool,
+    mode: Arc<Mutex<Mode>>,
+}
+
+impl Fake {
+    fn mode(&self) -> std::sync::MutexGuard<'_, Mode> {
+        self.mode.lock().expect("fake CMS mode")
+    }
+
+    fn calls(&self) -> std::sync::MutexGuard<'_, Calls> {
+        self.calls.lock().expect("fake CMS request log")
+    }
 }
 
 async fn authorize(State(fake): State<Fake>, Query(q): Query<HashMap<String, String>>) -> Response {
@@ -54,7 +104,7 @@ async fn authorize(State(fake): State<Fake>, Query(q): Query<HashMap<String, Str
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    fake.calls.lock().expect("fake CMS request log").challenge = q.get("code_challenge").cloned();
+    fake.calls().challenge = q.get("code_challenge").cloned();
     Json(json!({"code": "fake-code"})).into_response()
 }
 
@@ -64,8 +114,10 @@ async fn token(State(fake): State<Fake>, headers: HeaderMap, Form(q): Form<HashM
     {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let mut calls = fake.calls.lock().expect("fake CMS request log");
-    let n = match q.get("grant_type").map(String::as_str) {
+    let mode = fake.mode().clone();
+    let scope = mode.scope.as_deref().unwrap_or(SCOPE);
+    let mut calls = fake.calls();
+    let (n, refresh, patient) = match q.get("grant_type").map(String::as_str) {
         Some("authorization_code") => {
             let challenge = q
                 .get("code_verifier")
@@ -76,7 +128,14 @@ async fn token(State(fake): State<Fake>, headers: HeaderMap, Form(q): Form<HashM
                 return StatusCode::BAD_REQUEST.into_response();
             }
             calls.token_issued = true;
-            0
+            if mode.no_patient {
+                return Json(json!({
+                    "access_token": "fake-orphan-access", "refresh_token": "fake-orphan",
+                    "token_type": "Bearer", "expires_in": 3600, "scope": scope,
+                }))
+                .into_response();
+            }
+            (0, "fake-rotation-0".to_string(), PATIENT)
         }
         Some("refresh_token") => {
             let old = calls.refreshes;
@@ -84,19 +143,30 @@ async fn token(State(fake): State<Fake>, headers: HeaderMap, Form(q): Form<HashM
             if !calls.token_issued || q.get("refresh_token") != Some(&format!("fake-rotation-{old}")) {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response();
             }
-            if fake.broken_refresh {
+            if mode.broken_refresh {
                 // The vendor retired the old token but the caller received no replacement.
                 return (StatusCode::BAD_GATEWAY, "broken refresh response").into_response();
             }
-            calls.refreshes
+            let n = calls.refreshes;
+            let refresh = if mode.same_refresh { old } else { n };
+            let patient = if mode.other_patient { "-20140000099999" } else { PATIENT };
+            (n, format!("fake-rotation-{refresh}"), patient)
         }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
     Json(json!({
-        "access_token": format!("fake-access-{n}"), "refresh_token": format!("fake-rotation-{n}"),
-        "token_type": "Bearer", "expires_in": 3600, "patient": PATIENT, "scope": SCOPE,
+        "access_token": format!("fake-access-{n}"), "refresh_token": refresh,
+        "token_type": "Bearer", "expires_in": 3600, "patient": patient, "scope": scope,
     }))
     .into_response()
+}
+
+async fn revoke(State(fake): State<Fake>, headers: HeaderMap, Form(q): Form<HashMap<String, String>>) -> Response {
+    if headers.get("authorization").and_then(|h| h.to_str().ok()) != Some(&fake.basic) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    fake.calls().revoked.push(q.get("token").cloned().unwrap_or_default());
+    StatusCode::OK.into_response()
 }
 
 fn fixture(name: &str) -> Value {
@@ -105,13 +175,40 @@ fn fixture(name: &str) -> Value {
     serde_json::from_slice(&bytes).expect("FHIR JSON fixture")
 }
 
+/// Claims `claim-<i>` for each i, made from the CMS and CARIN examples.
+fn claims(ids: std::ops::Range<usize>) -> Vec<Value> {
+    let templates = [
+        fixture("cms-eob.json"),
+        fixture("BB-EOBInpatient1-nonfinancial.json"),
+        fixture("BB-EOBPharmacy1-nonfinancial.json"),
+    ];
+    ids.map(|i| {
+        let mut e = templates[i % templates.len()].clone();
+        e["id"] = json!(format!("claim-{i}"));
+        e["patient"]["reference"] = json!(format!("Patient/{PATIENT}"));
+        e
+    })
+    .collect()
+}
+
 async fn search(
     State(fake): State<Fake>,
     Path(kind): Path<String>,
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let mut calls = fake.calls.lock().expect("fake CMS request log");
+    let offset = q.get("_offset").and_then(|s| s.parse::<usize>().ok());
+    if kind == "ExplanationOfBenefit" && offset == Some(0) {
+        let change = fake.mode().mid_run.take();
+        if let Some((pool, sql)) = change {
+            sqlx::query(sqlx::AssertSqlSafe(sql))
+                .execute(&pool)
+                .await
+                .expect("a change during the run");
+        }
+    }
+    let mode = fake.mode().clone();
+    let mut calls = fake.calls();
     let bearer = format!("Bearer fake-access-{}", calls.refreshes);
     if !calls.token_issued || headers.get("authorization").and_then(|h| h.to_str().ok()) != Some(&bearer) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -122,58 +219,77 @@ async fn search(
         "ExplanationOfBenefit" => q.get("patient").map(String::as_str) == Some(PATIENT),
         _ => false,
     };
-    let Some(offset) = q.get("_offset").and_then(|s| s.parse::<usize>().ok()) else {
+    let Some(offset) = offset else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     if !binding || q.get("_count").map(String::as_str) != Some("50") {
         return StatusCode::BAD_REQUEST.into_response();
     }
     calls.pages.push((kind.clone(), offset));
-    let resources = match (kind.as_str(), offset) {
-        ("Patient", 0) => {
+    let last = || {
+        let mut e = fixture("cms-eob.json");
+        if mode.wrong_reference {
+            e["patient"]["reference"] = json!(format!("https://elsewhere.example/v3/fhir/Patient/{PATIENT}"));
+        }
+        vec![e]
+    };
+    let (resources, next) = match (kind.as_str(), mode.eob, offset) {
+        ("Patient", _, 0) => {
             let mut p = fixture("cms-patient.json");
             p["name"] = json!([{"given":["Sam"],"family":"Rivera"}]);
             p["birthDate"] = json!("1982-02-02");
-            vec![p]
+            (vec![p], false)
         }
-        ("Coverage", 0) => vec![fixture("cms-coverage.json")],
-        ("ExplanationOfBenefit", 0) => {
-            let templates = [
-                fixture("cms-eob.json"),
-                fixture("BB-EOBInpatient1-nonfinancial.json"),
-                fixture("BB-EOBPharmacy1-nonfinancial.json"),
-            ];
-            (0..50)
-                .map(|i| {
-                    let mut e = templates[i % templates.len()].clone();
-                    e["id"] = json!(format!("claim-{i}"));
-                    e["patient"]["reference"] = json!(format!("Patient/{PATIENT}"));
-                    e
-                })
-                .collect()
+        ("Coverage", _, 0) => (vec![fixture("cms-coverage.json")], false),
+        ("ExplanationOfBenefit", Eob::Fails(status), 0) => {
+            return StatusCode::from_u16(status).expect("an HTTP status").into_response();
         }
-        ("ExplanationOfBenefit", 50) => {
-            let mut e = fixture("cms-eob.json");
-            if fake.wrong_reference {
-                e["patient"]["reference"] = json!(format!("https://elsewhere.example/v3/fhir/Patient/{PATIENT}"));
-            }
-            vec![e]
-        }
-        _ => vec![],
+        ("ExplanationOfBenefit", Eob::Short, 0) => (claims(0..30), true),
+        ("ExplanationOfBenefit", Eob::Short, 30) => (last(), false),
+        ("ExplanationOfBenefit", Eob::Oversized, 0) => (claims(0..51), false),
+        ("ExplanationOfBenefit", Eob::Repeated, 0 | 50) => (claims(0..50), true),
+        ("ExplanationOfBenefit", Eob::Repeated, 100) => (last(), false),
+        ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl, 0) => (claims(0..50), true),
+        ("ExplanationOfBenefit", Eob::Full | Eob::ForeignUrl, 50) => (last(), false),
+        _ => (vec![], false),
     };
     let n = resources.len();
     let entries: Vec<Value> = resources
         .into_iter()
-        .map(|r| json!({"resource": r, "search": {"mode": "match"}}))
+        .map(|r| {
+            let mut entry = json!({"resource": r, "search": {"mode": "match"}});
+            if mode.eob == Eob::ForeignUrl && kind == "ExplanationOfBenefit" {
+                let id = r["id"].as_str().unwrap_or_default();
+                entry["fullUrl"] = if id == "claim-3" {
+                    json!(format!("https://elsewhere.example/v3/fhir/{kind}/{id}"))
+                } else {
+                    json!(format!("{}/{kind}/{id}", fake.issuer))
+                };
+            }
+            entry
+        })
         .collect();
     // CMS may report this page's count as total, and its published v3 examples omit fullUrl.
     // The client must never follow the origin supplied in a pagination link.
-    let links = if kind == "ExplanationOfBenefit" && offset == 0 {
-        json!([{"relation":"next","url":format!("https://elsewhere.example/v3/fhir/{kind}/?_count=50&_offset=50")}])
+    let links = if next {
+        json!([{"relation":"next","url":format!("https://elsewhere.example/v3/fhir/{kind}/?_count=50&_offset={}", offset + n)}])
     } else {
         json!([])
     };
     Json(json!({"resourceType":"Bundle","type":"searchset","total":n,"entry":entries,"link":links})).into_response()
+}
+
+fn router(fake: Fake) -> Router {
+    Router::new()
+        .route("/v3/o/authorize/", get(authorize))
+        .route("/v3/o/token/", post(token))
+        .route("/v3/o/revoke_token/", post(revoke))
+        .route("/v3/fhir/{kind}/", get(search))
+        .with_state(fake)
+}
+
+fn serve(listener: tokio::net::TcpListener, fake: Fake) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move { axum::serve(listener, router(fake)).await.expect("serve fake CMS") })
 }
 
 struct Setup {
@@ -182,6 +298,10 @@ struct Setup {
     ctx: JobContext,
     key: SecretBox,
     source_id: Uuid,
+    profile: Uuid,
+    client: ConnectorClient,
+    endpoints: Endpoints,
+    addr: SocketAddr,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -191,7 +311,45 @@ impl Drop for Setup {
     }
 }
 
-async fn setup(broken_refresh: bool, wrong_reference: bool) -> anyhow::Result<Setup> {
+/// A sign-in at the fake: the launch, the browser's visit to the authorize page, and the state that
+/// comes back. Returns the launch and the code to exchange.
+async fn sign_in(
+    env: &common::Env,
+    client: &ConnectorClient,
+    endpoints: &Endpoints,
+    profile: Uuid,
+    source_id: Option<Uuid>,
+) -> anyhow::Result<(oauth::Pending, String)> {
+    let mut tx = env.tx().await?;
+    let launch = oauth::begin(
+        &mut tx,
+        &Launch {
+            kind: "bluebutton",
+            client,
+            profile_id: profile,
+            user_id: None,
+            session_id: None,
+            label: "Medicare",
+            source_id,
+            binder: BINDER,
+            endpoints,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    let http = oauth::SourceHttp::new(endpoints.hosts(), egress());
+    let short = launch.url.replace(&launch.state, "short");
+    assert_eq!(http.get(&short, &[]).await?.status, 400);
+    let grant = http.get(&launch.url, &[]).await?;
+    assert_eq!(grant.status, 200);
+    let code: Value = serde_json::from_slice(&grant.body)?;
+    let mut tx = env.tx().await?;
+    let pending = oauth::take_state(&mut tx, &launch.state, BINDER).await?;
+    tx.commit().await?;
+    Ok((pending, code["code"].as_str().expect("the fake issued a code").into()))
+}
+
+async fn setup(mode: Mode) -> anyhow::Result<Setup> {
     let env = common::Env::new().await?;
     let mut tx = env.tx().await?;
     let family = common::family(&mut tx).await?;
@@ -204,24 +362,18 @@ async fn setup(broken_refresh: bool, wrong_reference: bool) -> anyhow::Result<Se
     let key = SecretBox::from_settings(&settings)?.with_keys(env.blobs.keyring());
     let ctx = JobContext::new(env.db.pool.clone(), Arc::new(settings), env.blobs.clone());
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
-    let root = format!("http://{}", listener.local_addr()?);
+    let addr = listener.local_addr()?;
     let secret = ownhealth_core::ids::token_hex(24);
     let fake = Fake {
-        issuer: format!("{root}/v3/fhir"),
+        issuer: format!("http://{addr}/v3/fhir"),
         basic: format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(format!("{CLIENT_ID}:{secret}"))
         ),
         calls: Arc::new(Mutex::new(Calls::default())),
-        broken_refresh,
-        wrong_reference,
+        mode: Arc::new(Mutex::new(mode)),
     };
-    let router = Router::new()
-        .route("/v3/o/authorize/", get(authorize))
-        .route("/v3/o/token/", post(token))
-        .route("/v3/fhir/{kind}/", get(search))
-        .with_state(fake.clone());
-    let server = tokio::spawn(async move { axum::serve(listener, router).await.expect("serve fake CMS") });
+    let server = serve(listener, fake.clone());
     let secret_id = secrets::store_secret(
         &mut tx,
         &key,
@@ -245,39 +397,12 @@ async fn setup(broken_refresh: bool, wrong_reference: bool) -> anyhow::Result<Se
     let client = oauth::load_client(&mut tx, Some(&key), family.household_id, client)
         .await?
         .expect("registered Medicare client");
+    tx.commit().await?;
     let spec = oauth::kind_spec("bluebutton").expect("Blue Button is available for launch");
     let endpoints = oauth::resolve(&spec, &fake.issuer, &egress()).await?;
-    let launch = oauth::begin(
-        &mut tx,
-        &Launch {
-            kind: "bluebutton",
-            client: &client,
-            profile_id: profile,
-            user_id: None,
-            session_id: None,
-            label: "Medicare",
-            source_id: None,
-            binder: BINDER,
-            endpoints: &endpoints,
-        },
-    )
-    .await?;
-    tx.commit().await?;
-    let http = oauth::SourceHttp::new(endpoints.hosts(), egress());
-    let short = launch.url.replace(&launch.state, "short");
-    assert_eq!(http.get(&short, &[]).await?.status, 400);
-    let grant = http.get(&launch.url, &[]).await?;
-    assert_eq!(grant.status, 200);
-    let code: Value = serde_json::from_slice(&grant.body)?;
+    let (pending, code) = sign_in(&env, &client, &endpoints, profile, None).await?;
+    let tokens = oauth::exchange(&pending, &client, &code, &egress()).await?;
     let mut tx = env.tx().await?;
-    let pending = oauth::take_state(&mut tx, &launch.state, BINDER).await?;
-    let tokens = oauth::exchange(
-        &pending,
-        &client,
-        code["code"].as_str().expect("the fake issued a code"),
-        &egress(),
-    )
-    .await?;
     let source_id = oauth::save_connection(&mut tx, &key, &pending, &client, &tokens, Utc::now()).await?;
     tx.commit().await?;
     Ok(Setup {
@@ -286,6 +411,10 @@ async fn setup(broken_refresh: bool, wrong_reference: bool) -> anyhow::Result<Se
         ctx,
         key,
         source_id,
+        profile,
+        client,
+        endpoints,
+        addr,
         server,
     })
 }
@@ -298,9 +427,22 @@ fn egress() -> Egress {
     }
 }
 
+async fn needs_consent(setup: &Setup) -> anyhow::Result<bool> {
+    Ok(
+        sqlx::query_scalar("select reconsent_needed_at is not null from source where id = $1")
+            .bind(setup.source_id)
+            .fetch_one(&setup.env.db.pool)
+            .await?,
+    )
+}
+
 #[tokio::test]
 async fn v3_refreshes_once_and_never_retries_a_spent_token() -> common::R {
-    let setup = setup(true, false).await?;
+    let setup = setup(Mode {
+        broken_refresh: true,
+        ..Mode::default()
+    })
+    .await?;
     let now = Utc::now() + Duration::hours(2);
     for _ in 0..2 {
         assert!(matches!(
@@ -308,12 +450,46 @@ async fn v3_refreshes_once_and_never_retries_a_spent_token() -> common::R {
             Err(OAuthError::ReconsentNeeded)
         ));
     }
-    assert_eq!(setup.fake.calls.lock().expect("fake CMS request log").refreshes, 1);
-    let needs_consent: bool = sqlx::query_scalar("select reconsent_needed_at is not null from source where id = $1")
-        .bind(setup.source_id)
-        .fetch_one(&setup.env.db.pool)
-        .await?;
-    assert!(needs_consent);
+    assert_eq!(setup.fake.calls().refreshes, 1);
+    assert!(needs_consent(&setup).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refresh_that_never_reached_cms_keeps_the_connection() -> common::R {
+    let mut setup = setup(Mode::default()).await?;
+    let now = Utc::now() + Duration::hours(2);
+    // CMS is down: nothing listens on its port, so the single-use token never leaves
+    let stopped = std::mem::replace(&mut setup.server, tokio::spawn(async {}));
+    stopped.abort();
+    let _ = stopped.await;
+    let refused = oauth::access_token(&setup.ctx.pool, &setup.key, setup.source_id, &egress(), now).await;
+    assert!(matches!(refused, Err(OAuthError::Net(_))), "{refused:?}");
+    assert!(!needs_consent(&setup).await?);
+    // the poller retries later instead of asking for a new Medicare sign-in
+    let source = get_source(&mut *setup.ctx.pool.acquire().await?, setup.source_id)
+        .await?
+        .expect("connected source");
+    let stop = bluebutton::pull(&setup.ctx, &source, &egress(), now, 200)
+        .await
+        .err()
+        .expect("CMS is down");
+    assert!(
+        !stop.permanent && stop.message.starts_with("token_unreachable"),
+        "{}",
+        stop.message
+    );
+    assert!(!needs_consent(&setup).await?);
+    // CMS is back: the same refresh token is spent once and the connection goes on
+    let listener = tokio::net::TcpListener::bind(setup.addr).await?;
+    setup.server = serve(listener, setup.fake.clone());
+    assert!(
+        oauth::access_token(&setup.ctx.pool, &setup.key, setup.source_id, &egress(), now)
+            .await
+            .is_ok()
+    );
+    assert_eq!(setup.fake.calls().refreshes, 1);
+    assert!(!needs_consent(&setup).await?);
     Ok(())
 }
 
@@ -338,7 +514,7 @@ async fn groups(setup: &Setup) -> anyhow::Result<Vec<(String, i64)>> {
 
 #[tokio::test]
 async fn v3_is_registered_to_pull_medicare_claims() -> common::R {
-    let setup = setup(false, false).await?;
+    let setup = setup(Mode::default()).await?;
     assert!(sources::poller_for("bluebutton").is_some());
     let first = pull(&setup, 200).await?;
     assert!(first.problems.is_empty(), "{:?}", first.problems);
@@ -346,7 +522,7 @@ async fn v3_is_registered_to_pull_medicare_claims() -> common::R {
     assert_eq!(first.skipped, [("context".into(), 1)].into());
     assert_eq!(first.cursor, Some(json!({"claim_count": 51})));
     assert_eq!(
-        setup.fake.calls.lock().expect("fake CMS request log").pages,
+        setup.fake.calls().pages,
         [
             ("Patient".into(), 0),
             ("Coverage".into(), 0),
@@ -378,7 +554,11 @@ async fn v3_is_registered_to_pull_medicare_claims() -> common::R {
 
 #[tokio::test]
 async fn v3_page_cap_and_foreign_patient_reference_are_visible() -> common::R {
-    let setup = setup(false, true).await?;
+    let setup = setup(Mode {
+        wrong_reference: true,
+        ..Mode::default()
+    })
+    .await?;
     let capped = pull(&setup, 1).await?;
     assert_eq!(capped.cursor, Some(json!({"claim_count": 50})));
     assert_eq!((capped.seen, capped.new), (51, 51));
@@ -395,14 +575,15 @@ async fn v3_page_cap_and_foreign_patient_reference_are_visible() -> common::R {
 
 #[tokio::test]
 async fn concurrent_refreshes_reuse_the_sealed_replacement() -> common::R {
-    let setup = setup(false, false).await?;
+    let setup = setup(Mode::default()).await?;
     let now = Utc::now() + Duration::hours(2);
     let egress = egress();
     let refresh = || oauth::access_token(&setup.ctx.pool, &setup.key, setup.source_id, &egress, now);
     let (a, b) = tokio::join!(refresh(), refresh());
     assert!(a?.expose() == b?.expose());
-    assert_eq!(setup.fake.calls.lock().expect("fake CMS request log").refreshes, 1);
+    assert_eq!(setup.fake.calls().refreshes, 1);
     assert!(refresh().await.is_ok());
-    assert_eq!(setup.fake.calls.lock().expect("fake CMS request log").refreshes, 1);
+    assert_eq!(setup.fake.calls().refreshes, 1);
     Ok(())
 }
+

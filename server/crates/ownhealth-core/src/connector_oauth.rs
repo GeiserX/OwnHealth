@@ -15,10 +15,12 @@
 //!   lock and reuses the first one's result. A reply with no refresh token keeps the old one.
 //!   `invalid_grant` sets `reconsent_needed_at`; so does a rotated token that could not be stored.
 //!   Blue Button persists that marker before sending its single-use token and clears it atomically
-//!   with the replacement, so a lost reply or interrupted refresh can never spend it twice.
+//!   with the replacement, so a lost reply or interrupted refresh can never spend it twice. A request
+//!   that provably never left (no connection, a name that does not resolve) clears it again and
+//!   waits for a retry.
 //! - **Disconnect.** [`disconnect`] calls the revocation endpoint when the server offers one, then
 //!   deletes both tokens and the cursor. [`revoke_profile`] does the vendor half before a
-//!   profile delete.
+//!   profile delete. [`revoke_page`] says when the vendor's own page is shown as well.
 //! - **Declared hosts** (connectors.md 6.3 rule 7). [`SourceHttp`] is the client a connector's poller
 //!   uses: it refuses any host the source did not declare at connect time before `net` resolves it.
 //!   `net` then does the address half (public, https, no redirects, capped).
@@ -1049,6 +1051,23 @@ async fn needs_reconsent(conn: &mut PgConnection, grant: Grant, now: DateTime<Ut
     Ok(result.rows_affected() > 0)
 }
 
+/// The request provably never left this server: refused before it was sent (an undeclared host,
+/// an address the egress refuses, a name that does not resolve) or no connection opened. A timeout,
+/// a dropped reply or any answer may come after the vendor read the request.
+fn never_sent(e: &OAuthError) -> bool {
+    matches!(
+        e,
+        OAuthError::UndeclaredHost(_)
+            | OAuthError::Net(
+                NetError::BadUrl
+                    | NetError::NotHttps
+                    | NetError::PrivateAddress(_)
+                    | NetError::Resolve(_)
+                    | NetError::Connect(_)
+            )
+    )
+}
+
 #[derive(sqlx::FromRow)]
 struct Locked {
     household_id: Uuid,
@@ -1255,7 +1274,24 @@ async fn access_token_inner(
         {
             t
         }
-        _ if single_use => return Err(OAuthError::ReconsentNeeded),
+        Err(e) if single_use && never_sent(&e) => {
+            // The token never left, so CMS cannot have spent it: take the marker back under the
+            // row lock this transaction holds, and let the poller try again later.
+            sqlx::query(
+                "update source set reconsent_needed_at = null where id = $1 and oauth_grant_id is not distinct from $2",
+            )
+            .bind(source_id)
+            .bind(oauth_grant_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            tracing::warn!(%source_id, error = %e, "the Blue Button refresh never reached CMS, so it waits for a retry");
+            return Err(e);
+        }
+        _ if single_use => {
+            tracing::warn!(%source_id, "the Blue Button refresh may have spent its token: the connection needs consent again");
+            return Err(OAuthError::ReconsentNeeded);
+        }
         Ok(t) => t,
         Err(OAuthError::Vendor { code, .. }) if code == "invalid_grant" => {
             needs_reconsent(&mut tx, grant, now).await?;
