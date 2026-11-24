@@ -666,15 +666,21 @@ async fn gedcom_import(
     let perm = caller
         .require(&mut tx, &p, Some("read:records"), Some("import"))
         .await?;
-    // a sensitive relative the caller cannot see in the family list must not count as already there
-    let sensitive = perm.may_read_sensitive("read:records");
+    // a relative counts as already there only as the family list shows it to the caller: a sensitive row
+    // it leaves out, or a linked row whose birth year it masks, would otherwise answer for a hidden value
+    let recorded: Vec<_> = shown(&mut tx, &caller.0, &perm)
+        .await?
+        .into_iter()
+        .filter(|s| !s.masked())
+        .map(|s| s.member)
+        .collect();
     let out = gedcom::propose(
         &mut tx,
         perm.profile.household_id,
         perm.profile.id,
         &tree,
         me,
-        sensitive,
+        &recorded,
     )
     .await?;
     let mut ev = event(&caller.0, &perm, "import", &[]);

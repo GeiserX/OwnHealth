@@ -435,6 +435,62 @@ async fn the_import_counts_no_sensitive_relative_the_caller_cannot_see() -> R {
 }
 
 #[tokio::test]
+async fn the_import_reveals_no_birth_year_the_family_list_hides() -> R {
+    let a = app().await?;
+    // Alex records a mother born in 1955 and links her to Carmen's profile; Sam reads Alex's records
+    // but not Carmen's, so the family list masks the row's birth year for Sam
+    let alex = a.family.profile("alex");
+    let mut m = MemberIn::new(alex, "MTH");
+    m.sex_at_birth = Some("female".into());
+    m.born_year = Some(1955);
+    let src = SrcRef::New(SrcIn {
+        profile_id: Some(alex),
+        ..SrcIn::manual(Some(a.family.user("alex")))
+    });
+    {
+        let mut c = a.rt.pool.acquire().await?;
+        family::add(&mut c, &m, &src, "person", None, Some(a.family.profile("carmen"))).await?;
+    }
+    grant_sam(&a, &["read:summary", "read:records"]).await?;
+    let mother = |fam: &Value| {
+        let row = fam["items"]
+            .as_array()
+            .and_then(|l| l.iter().find(|m| m["relationship"] == "MTH").cloned())
+            .unwrap_or_default();
+        (row["masked"].as_bool(), row["born_year"].as_i64())
+    };
+    let (s, fam) = get(&a, "sam", "/profiles/alex/family").await?;
+    assert_eq!(s, StatusCode::OK, "{fam}");
+    assert_eq!(mother(&fam), (Some(true), None), "{fam}");
+    let (s, fam) = get(&a, "alex", "/profiles/alex/family").await?;
+    assert_eq!(s, StatusCode::OK, "{fam}");
+    assert_eq!(mother(&fam), (Some(false), Some(1955)), "{fam}");
+
+    // a tree of one mother, born in the year given
+    let tree = |y: i32| {
+        format!(
+            "0 HEAD\n1 GEDC\n2 VERS 5.5.1\n0 @ME@ INDI\n1 SEX M\n1 FAMC @F1@\n0 @M@ INDI\n1 SEX F\n1 BIRT\n2 DATE {y}\n\
+0 @F1@ FAM\n1 WIFE @M@\n1 CHIL @ME@\n0 TRLR\n"
+        )
+    };
+    let answer = |v: &Value| (v["proposed"].as_array().map(Vec::len), v["already"].as_u64());
+    // Sam gets the same answer whatever the year, so a run of imports cannot find the hidden one
+    for y in [1954, 1955, 1956] {
+        let (s, v) = upload(&a, "sam", "/profiles/alex/family/gedcom", tree(y).as_bytes(), Some("0")).await?;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        assert_eq!(answer(&v), (Some(1), Some(0)), "born {y}: {v}");
+        sqlx::query("delete from review_item where kind = 'family_proposal'")
+            .execute(&a.rt.pool)
+            .await?;
+    }
+    // Alex sees the mother and her year: she is already there
+    let (s, v) = upload(&a, "alex", "/profiles/alex/family/gedcom", tree(1955).as_bytes(), Some("0")).await?;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(answer(&v), (Some(0), Some(1)), "{v}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn relatives_who_look_alike_are_each_proposed() -> R {
     let a = app().await?;
     // a father and three brothers, none with a birth year; one brother is recorded already

@@ -832,16 +832,16 @@ fn payload(m: &MemberIn, version: Option<&str>) -> Result<Value> {
 }
 
 /// Queue the relatives of `me` as `family_proposal` items on the profile. The caller has checked access.
-/// `include_sensitive` is whether the caller may read sensitive relatives
-/// (`Permission::may_read_sensitive("read:records")`): a recorded relative the family list hides from
-/// them must not change what the import answers.
+/// `recorded` is the profile's relatives as the caller's family list shows them, with a birth year: a
+/// sensitive row the list leaves out, or a linked row whose birth year it masks, is not in it. A value
+/// the list hides from the caller must not change what the import answers.
 pub async fn propose(
     conn: &mut PgConnection,
     household_id: Uuid,
     profile_id: Uuid,
     tree: &Tree,
     me: usize,
-    include_sensitive: bool,
+    recorded: &[family::Member],
 ) -> Result<Outcome> {
     if me >= tree.people.len() {
         return Err(Error::Invalid("self: no person at that position in the file".into()));
@@ -866,10 +866,10 @@ pub async fn propose(
         }
     }
     // a recorded relative with the same relationship, sex and birth year is the same person
-    let mut recorded: BTreeMap<(String, Option<String>, Option<i32>), usize> = BTreeMap::new();
-    for m in family::list(&mut *conn, profile_id, include_sensitive).await? {
-        *recorded
-            .entry((m.relationship, m.sex_at_birth, m.born_year))
+    let mut seen: BTreeMap<(String, Option<String>, Option<i32>), usize> = BTreeMap::new();
+    for m in recorded {
+        *seen
+            .entry((m.relationship.clone(), m.sex_at_birth.clone(), m.born_year))
             .or_default() += 1;
     }
     let relatives = tree.relatives(me);
@@ -884,7 +884,7 @@ pub async fn propose(
             continue;
         };
         let k = key_of(&m);
-        if take(&mut known, &k) || take(&mut recorded, &(k.0.clone(), k.1.clone(), k.2)) {
+        if take(&mut known, &k) || take(&mut seen, &(k.0.clone(), k.1.clone(), k.2)) {
             out.already += 1;
             continue;
         }
