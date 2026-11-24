@@ -681,7 +681,7 @@ impl FakeOrthanc {
                                "Status": if new { "Success" } else { "AlreadyStored" }});
         match self.store_status.lock().expect("store status").as_ref() {
             Some(Value::Null) => {
-                reply.as_object_mut().expect("store reply").remove("Status");
+                reply.as_object_mut().expect("store reply").shift_remove("Status");
             }
             Some(status) => reply["Status"] = status.clone(),
             None => {}
