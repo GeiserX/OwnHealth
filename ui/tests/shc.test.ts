@@ -8,12 +8,16 @@ import {
 	SHC_REASONS,
 	SHL_NOT_IMPORTED,
 	SHL_REASONS,
+	declinedKey,
 	detailKey,
 	identityWarning,
 	isLink,
 	linkRefusalKey,
 	linkRefusalVars,
+	linkWarning,
 	notImportedKey,
+	passcodeRetry,
+	receivedBefore,
 	refusalKey,
 	refusalVars,
 	shcCards
@@ -130,4 +134,50 @@ test('a link is told from a card, alone or after a viewer URL', () => {
 	assert.ok(isLink('shlink:/eyJ1cmwiOiJodHRwczovL3NobC5leGFtcGxlIn0'));
 	assert.ok(isLink('https://viewer.example.org/#shlink:/eyJ1cmwiOiJ4In0'));
 	assert.ok(!isLink('shc:/5676290952432060346029243740446031'));
+});
+
+test('the attempts left read right for one and for none, and none closes the question', () => {
+	const sentence = (lang: string, left: string) => fill(tables[lang][linkRefusalKey('passcode', left)], linkRefusalVars('passcode', left, words(lang)));
+	assert.equal(sentence('en', '1'), 'Not imported. The passcode is not right. The link allows 1 more attempt.');
+	assert.equal(sentence('es', '1'), 'No importado. El código no es correcto. El enlace admite 1 intento más.');
+	assert.equal(sentence('en', '0'), 'Not imported. The passcode is not right, and the link allows no more attempts, so it is closed now. Ask the sender for a new link.');
+	assert.equal(sentence('es', '0'), 'No importado. El código no es correcto y el enlace ya no admite más intentos, así que ahora está cerrado. Pide un enlace nuevo a quien lo envió.');
+	assert.equal(sentence('en', '2'), 'Not imported. The passcode is not right. The link allows 2 more attempts.');
+	// the question and its passcode field stay for another try while the link is open
+	assert.ok(passcodeRetry('passcode', '2'));
+	assert.ok(passcodeRetry('passcode', null));
+	assert.ok(!passcodeRetry('passcode', '0'));
+	assert.ok(!passcodeRetry('inactive', null));
+});
+
+test('a link warns only about files it imported, and a file for someone else says so', () => {
+	const fhir = [{ content_type: 'application/fhir+json' }];
+	assert.equal(linkWarning('missing', [], [], 'Alex Rivera'), null, 'nothing was imported');
+	assert.equal(linkWarning('matched', [], fhir, 'Alex Rivera'), null);
+	const other = linkWarning('mismatch', [], fhir, 'Alex Rivera');
+	assert.equal(other && fill(tables.en[other.key], other.vars), 'A file of this link names someone other than Alex Rivera. Its rows wait in review. If the link is for another person, open it from their profile.');
+	assert.equal(other && fill(tables.es[other.key], other.vars), 'Un archivo de este enlace es de otra persona, no de Alex Rivera. Sus filas esperan en revisión. Si el enlace es para otra persona, ábrelo desde su perfil.');
+	const unsure = linkWarning('hinted', [], fhir, 'Alex Rivera');
+	assert.equal(unsure?.key, 'shlr_w_unsure');
+	// a link of cards alone names the card, as a pasted card does
+	const carmen = { name: 'Carmen Ortega', birth_date: '1955-01-30' };
+	assert.equal(linkWarning('mismatch', [carmen], [{ content_type: 'application/smart-health-card' }], 'Alex Rivera')?.key, 'shc_w_other');
+	// cards beside a FHIR file: one result for all the files, so no card is named
+	assert.equal(linkWarning('mismatch', [carmen], [...fhir, { content_type: 'application/smart-health-card' }], 'Alex Rivera')?.key, 'shlr_w_other');
+});
+
+test('declining an issuer after the link was received says the link files stay stored', () => {
+	assert.equal(declinedKey(0), 'shc_declined');
+	const key = declinedKey(1);
+	assert.equal(fill(tables.en[key], { host: 'issuer.labnorte.example' }), "Not imported. You declined issuer.labnorte.example, so nothing was fetched from it and nothing was imported. The link's files were already received: they stay stored with this profile, encrypted.");
+	assert.equal(fill(tables.es[key], { host: 'issuer.labnorte.example' }), 'No se ha importado. Rechazaste issuer.labnorte.example, así que no se descargó nada de allí y no se importó nada. Los archivos del enlace ya se habían recibido: quedan guardados con este perfil, cifrados.');
+});
+
+test('a link whose files were all received before says nothing new was added', () => {
+	assert.ok(receivedBefore([{ created: false }, { created: false }]));
+	assert.ok(!receivedBefore([{ created: false }, { created: true }]));
+	assert.ok(!receivedBefore([]));
+	assert.ok(!receivedBefore(undefined));
+	assert.equal(tables.en.shlr_again, 'These files were received before, so nothing new was added. The numbers are from the first import.');
+	assert.equal(tables.es.shlr_again, 'Estos archivos ya se habían recibido, así que no se añadió nada nuevo. Las cifras son de la primera importación.');
 });

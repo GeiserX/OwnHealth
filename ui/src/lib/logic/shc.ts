@@ -128,10 +128,46 @@ export function isLink(text: string): boolean {
 	return text.includes('shlink:/');
 }
 
+/** True when a wrong-passcode detail says the link has no attempts left. */
+const noAttemptsLeft = (detail: string | null) => detail !== null && detail !== '' && Number(detail) <= 0;
+
 /** The dict key for a link refusal; a reason this UI does not know gets the general sentence. */
 export function linkRefusalKey(reason: string, detail: string | null): string {
 	if (reason === 'passcode' && !detail) return 'shlr_r_passcode_nocount';
+	if (reason === 'passcode' && noAttemptsLeft(detail)) return 'shlr_r_passcode_none';
+	if (reason === 'passcode' && detail === '1') return 'shlr_r_passcode_one';
 	return (SHL_REASONS as readonly string[]).includes(reason) ? `shlr_r_${reason}` : 'shlr_r_other';
+}
+
+/** True when a wrong passcode leaves the link open, so its question and passcode field stay for another try. */
+export function passcodeRetry(reason: string, detail: string | null): boolean {
+	return reason === 'passcode' && !noAttemptsLeft(detail);
+}
+
+/**
+ * The warning for an imported link, or null. A link that imported nothing warns about nothing. A link
+ * of cards alone names the card, as a pasted card does; otherwise the server's one result covers every
+ * file, so no person is named.
+ */
+export function linkWarning(
+	identity: string,
+	cards: ShcSubject[],
+	documents: { content_type: string }[],
+	profile: string
+): { key: string; vars: Record<string, string> } | null {
+	if (documents.length === 0 || identity === 'matched') return null;
+	if (cards.length > 0 && documents.every((d) => d.content_type === 'application/smart-health-card')) return identityWarning(identity, cards, profile);
+	return { key: identity === 'mismatch' ? 'shlr_w_other' : 'shlr_w_unsure', vars: { profile } };
+}
+
+/** The sentence for a declined host: after a link's files were received (`held` of them), they stay stored. */
+export function declinedKey(held: number): string {
+	return held > 0 ? 'shlr_declined' : 'shc_declined';
+}
+
+/** True when every file of a link was received before, so the import added nothing new. */
+export function receivedBefore(documents: { created: boolean }[] | undefined): boolean {
+	return !!documents?.length && documents.every((d) => !d.created);
 }
 
 /**
