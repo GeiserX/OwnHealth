@@ -193,7 +193,8 @@ mod mapped {
     use axum::response::IntoResponse;
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use http::StatusCode;
+    use http::{StatusCode, Uri};
+    use ownhealth_auth::testing::{EcKey, b64u, jwk, signing_key};
     use ownhealth_core::Runtime;
     use ownhealth_core::blobs::BlobOwner;
     use ownhealth_core::demo::create_rivera_family;
@@ -209,18 +210,22 @@ mod mapped {
     /// The fake link server's origin; the dev issuer map points it at a loopback port.
     const FAKE: &str = "https://shl.labnorte.example";
     const FAKE_HOST: &str = "shl.labnorte.example";
+    /// A card issuer the dev issuer map points at the same fake.
+    const ISS: &str = "https://issuer.labnorte.example";
+    const ISS_HOST: &str = "issuer.labnorte.example";
     const KEY: [u8; 32] = [7; 32];
     /// An obviously fake test passcode.
     const PIN: &str = "test-pin-1234";
 
     /// A migrated database with the Rivera family, dev auth on (the dev issuer map needs it) and
-    /// `FAKE` mapped to `port`. Requests still carry a session cookie, so each acts as the person named.
+    /// `FAKE` and `ISS` mapped to `port`. Requests still carry a session cookie, so each acts as the
+    /// person named.
     async fn app_mapped(port: u16) -> anyhow::Result<App> {
         let db = TestDb::new().await?;
         let dir = tempfile::tempdir()?;
         let mut settings = db.settings(dir.path())?;
         settings.dev_auth = true;
-        settings.dev_shc_issuers = Some(format!("{FAKE}=http://127.0.0.1:{port}"));
+        settings.dev_shc_issuers = Some(format!("{FAKE}=http://127.0.0.1:{port},{ISS}=http://127.0.0.1:{port}"));
         let rt = Runtime::with_pool(settings, db.pool.clone())?;
         let mut c = db.pool.acquire().await?;
         let family = create_rivera_family(&mut c, &format!("Rivera {}", ownhealth_core::ids::token_hex(3))).await?;
@@ -259,16 +264,23 @@ mod mapped {
 
     /// What the fake does on each request: count it, lower a grant to viewer when one is given (the
     /// person's access changes while the link is fetched) and count the grants it lowered, then
-    /// answer the manifest with `files`.
+    /// answer the manifest with `files`. It serves `jwks` as `ISS`'s keys, not counted.
     #[derive(Clone, Default)]
     struct Manifest {
         files: Value,
         lower: Option<(sqlx::PgPool, Uuid, Uuid)>,
         hits: Arc<AtomicUsize>,
         lowered: Arc<AtomicU64>,
+        jwks: Option<Value>,
     }
 
-    async fn manifest(State(m): State<Manifest>) -> axum::response::Response {
+    async fn manifest(State(m): State<Manifest>, uri: Uri) -> axum::response::Response {
+        if uri.path() == "/.well-known/jwks.json" {
+            return match &m.jwks {
+                Some(j) => axum::Json(j.clone()).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            };
+        }
         m.hits.fetch_add(1, Ordering::SeqCst);
         if let Some((pool, user, profile)) = &m.lower {
             let done = sqlx::query("update profile_grant set role = 'viewer' where user_id = $1 and profile_id = $2")
@@ -448,6 +460,117 @@ mod mapped {
             (json!("shl_refused"), json!("held")),
             "{v}"
         );
+        Ok(())
+    }
+
+    /// A SMART Health Card from `ISS` for Alex: DEFLATE, then ES256 over the compact parts, with the
+    /// key's RFC 7638 thumbprint as its kid. Returns the card and the issuer's JWKS.
+    fn signed_card() -> (String, Value) {
+        use p256::ecdsa::Signature;
+        use p256::ecdsa::signature::Signer as _;
+        use std::io::Write as _;
+        let key: EcKey = signing_key(Some(&[9; 32]));
+        let mut k = jwk(&key, "");
+        let thumb = format!(
+            r#"{{"crv":"P-256","kty":"EC","x":"{}","y":"{}"}}"#,
+            k["x"].as_str().unwrap_or_default(),
+            k["y"].as_str().unwrap_or_default()
+        );
+        let kid = b64u(&Sha256::digest(thumb.as_bytes()));
+        k["kid"] = json!(kid);
+        let bundle = json!({"resourceType": "Bundle", "type": "collection", "entry": [
+            {"fullUrl": "resource:0", "resource": {"resourceType": "Patient",
+                "name": [{"family": "Rivera", "given": ["Alex"]}], "birthDate": "1979-05-14"}},
+            {"fullUrl": "resource:1", "resource": {"resourceType": "Immunization", "status": "completed",
+                "vaccineCode": {"coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "207"}]},
+                "patient": {"reference": "resource:0"}, "occurrenceDateTime": "2026-03-02"}}
+        ]});
+        let payload = json!({"iss": ISS, "nbf": chrono::Utc::now().timestamp() - 86_400, "vc": {
+            "type": ["https://smarthealth.cards#health-card"],
+            "credentialSubject": {"fhirVersion": "4.0.1", "fhirBundle": bundle}}});
+        let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(payload.to_string().as_bytes()).expect("deflate");
+        let header = json!({"alg": "ES256", "zip": "DEF", "kid": kid});
+        let input = format!(
+            "{}.{}",
+            b64u(header.to_string().as_bytes()),
+            b64u(&enc.finish().expect("deflate"))
+        );
+        let sig: Signature = key.sign(input.as_bytes());
+        (format!("{input}.{}", b64u(&sig.to_bytes())), json!({"keys": [k]}))
+    }
+
+    /// A manifest file with an empty contentType whose JWE cty says it is a card file: the first
+    /// answer reads it as one and asks about the card's issuer. The held files it returns carry the
+    /// type the server read, so the client's retry after the yes imports, without a second fetch.
+    #[tokio::test]
+    async fn a_card_file_typed_only_by_its_jwe_imports_after_the_issuers_yes() -> R {
+        let (port, l) = fake_port().await?;
+        let a = app_mapped(port).await?;
+        let (card, jwks) = signed_card();
+        let card_file = jose::encrypt(
+            &KEY,
+            json!({"verifiableCredential": [card]}).to_string().as_bytes(),
+            Some("application/smart-health-card"),
+            true,
+        )?;
+        let m = Manifest {
+            files: json!([
+                {"contentType": "", "embedded": card_file},
+                {"contentType": "application/fhir+json", "embedded": fhir_file("Rivera", "Alex", "1979-05-14")}
+            ]),
+            jwks: Some(jwks),
+            ..Manifest::default()
+        };
+        serve(l, m.clone());
+        let link = fake_link(None);
+        let (s, v) = send(
+            &a,
+            "alex",
+            &[("profile", "alex"), ("text", &link), ("approve", FAKE_HOST)],
+        )
+        .await?;
+        assert_eq!(
+            (s, v["status"].clone()),
+            (StatusCode::OK, json!("needs_approval")),
+            "{v}"
+        );
+        assert_eq!(v["hosts"][0]["host"], ISS_HOST, "{v}");
+        assert_eq!(
+            v["held"],
+            json!([
+                {"sha": sha_of(&card_file), "content_type": "application/smart-health-card"},
+                {"sha": sha_of(m.files[1]["embedded"].as_str().unwrap_or_default()),
+                    "content_type": "application/fhir+json"}
+            ]),
+            "{v}"
+        );
+        // the client sends each held file back as the answer gave it, with the yes for the issuer
+        let held: Vec<String> = v["held"]
+            .as_array()
+            .map(|h| {
+                h.iter()
+                    .map(|f| {
+                        format!(
+                            "{} {}",
+                            f["sha"].as_str().unwrap_or_default(),
+                            f["content_type"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut fields = vec![
+            ("profile", "alex"),
+            ("text", link.as_str()),
+            ("approve", FAKE_HOST),
+            ("approve", ISS_HOST),
+        ];
+        fields.extend(held.iter().map(|h| ("held", h.as_str())));
+        let (s, v) = send(&a, "alex", &fields).await?;
+        assert_eq!((s, v["status"].clone()), (StatusCode::OK, json!("imported")), "{v}");
+        assert_eq!(v["documents"].as_array().map(Vec::len), Some(2), "{v}");
+        assert_eq!(m.hits.load(Ordering::SeqCst), 1, "the link was fetched again");
         Ok(())
     }
 

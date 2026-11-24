@@ -815,11 +815,12 @@ async fn the_manifest_content_type_wins_over_the_files_own_cty() -> R {
     let link = link(&format!("{SHL}/m"), None)?;
     // the manifest says api access; the JWE says FHIR: the manifest's type decides
     let held = stored(&env, profile, &fhir_jwe(), shl::API_ACCESS)?;
-    let opened = shl::open(&link, &[held], &env.blobs, profile).map_err(|s| anyhow::anyhow!("{s:?}"))?;
+    let opened =
+        shl::open(&link, std::slice::from_ref(&held), &env.blobs, profile).map_err(|s| anyhow::anyhow!("{s:?}"))?;
     assert_eq!(
         opened,
         vec![Opened::Skipped {
-            content_type: shl::API_ACCESS.into(),
+            held,
             reason: "api_access"
         }]
     );

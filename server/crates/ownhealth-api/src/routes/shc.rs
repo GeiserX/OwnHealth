@@ -29,8 +29,10 @@
 //! - 200 `{"status": "needs_approval", "hosts": [{"host", "issuers": []}], "link": {"host", "label",
 //!   "expires", "passcode", "direct"}}`: the link's host, before anything is fetched.
 //! - 200 the same with the issuer hosts of the cards the link holds, and `"held": [{"sha",
-//!   "content_type"}]`: the files were fetched and stored, no issuer was contacted. Held files sent
-//!   back keep the type each file has: one sent back under another is refused as `held`.
+//!   "content_type"}]`: the files were fetched and stored, no issuer was contacted. Each content type
+//!   is the one the server read the file as (the manifest's, else the JWE `cty`, else the content).
+//!   Held files sent back keep the type each file has: one sent back under another, or with none, is
+//!   refused as `held`.
 //! - 200 `{"status": "imported", "link", "document_id", "created", "identity", "cards", "summary",
 //!   "documents": [{"document_id", "created", "content_type"}], "not_imported": [{"content_type",
 //!   "reason"}]}`. `document_id` is the first document, or null when no file was imported.
@@ -289,7 +291,7 @@ async fn receive_link(rt: &Runtime, caller: &Caller, profile: &str, form: LinkFo
         form.held
     };
     let opened = {
-        let (link, held, blobs) = (link.clone(), held.clone(), rt.blobs.clone());
+        let (link, blobs) = (link.clone(), rt.blobs.clone());
         // files sent back keep the type the file itself has, whatever the form says
         let open = if resumed {
             shl_receive::reopen
@@ -305,9 +307,11 @@ async fn receive_link(rt: &Runtime, caller: &Caller, profile: &str, form: LinkFo
         CardsChecked::NeedsApproval(asks) => {
             let mut v = asks_json(&asks);
             v["link"] = link_json(&link);
+            // the type each file was read as, so a file the manifest left untyped comes back typed
             v["held"] = json!(
-                held.iter()
-                    .map(|h| json!({"sha": h.sha, "content_type": h.content_type}))
+                opened
+                    .iter()
+                    .map(|o| json!({"sha": o.held().sha, "content_type": o.held().content_type}))
                     .collect::<Vec<_>>()
             );
             return Ok(Json(v));

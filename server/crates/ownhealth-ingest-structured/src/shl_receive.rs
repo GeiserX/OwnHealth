@@ -622,7 +622,18 @@ pub enum Opened {
         input: shc::Input,
     },
     /// Not imported: `reason` is one of [`NOT_IMPORTED`].
-    Skipped { content_type: String, reason: &'static str },
+    Skipped { held: Held, reason: &'static str },
+}
+
+impl Opened {
+    /// The stored file, with the type the server read it as: the manifest's contentType, else the
+    /// JWE `cty`, else what the content says. An answer that asks about issuers sends these back, so
+    /// a file the manifest left untyped comes back with the type it was read as.
+    pub fn held(&self) -> &Held {
+        match self {
+            Opened::Fhir { held, .. } | Opened::Cards { held, .. } | Opened::Skipped { held, .. } => held,
+        }
+    }
 }
 
 /// What a plaintext says it is when nothing else does.
@@ -726,11 +737,11 @@ fn open_files(
                 });
             }
             API_ACCESS => out.push(Opened::Skipped {
-                content_type,
+                held,
                 reason: "api_access",
             }),
             _ => out.push(Opened::Skipped {
-                content_type,
+                held,
                 reason: "unknown_type",
             }),
         }
@@ -888,8 +899,8 @@ pub async fn store(
     let mut identity: Option<String> = None;
     for o in opened {
         let (held, document_id, created, one, who) = match o {
-            Opened::Skipped { content_type, reason } => {
-                out.not_imported.push((content_type.clone(), reason));
+            Opened::Skipped { held, reason } => {
+                out.not_imported.push((held.content_type.clone(), reason));
                 continue;
             }
             Opened::Fhir { held, plaintext } => {
