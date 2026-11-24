@@ -910,10 +910,11 @@ async fn a_keyring_of_another_secrets_key_is_refused_before_anything_loads() -> 
     Ok(())
 }
 
-/// A profile deleted before the backup is not in the dump, but the keyring still lists it as
-/// shredded. The restore puts its shredded row back, so no new key can ever be made for it.
+/// A profile deleted before the backup is not in the dump, and the archive names no key for it,
+/// so the restore installs no row for it. Its tombstone names no key, so the keyring still refuses
+/// to make a new key for it.
 #[tokio::test]
-async fn a_restore_keeps_the_shredded_row_of_a_profile_deleted_before_the_backup() -> R {
+async fn a_profile_deleted_before_the_backup_gets_no_new_key_after_a_restore() -> R {
     let l = live().await?;
     let gone = Uuid::new_v4();
     let file = ownhealth_core::keyfile::path(&l.settings);
@@ -927,12 +928,9 @@ async fn a_restore_keeps_the_shredded_row_of_a_profile_deleted_before_the_backup
         .bind(gone)
         .fetch_optional(&db.pool)
         .await?;
-    assert_eq!(
-        row,
-        Some(true),
-        "no shredded row for the profile deleted before the backup"
-    );
-    let keys = ownhealth_core::keys::Keyring::new(ownhealth_core::keys::Kek::from_settings(&fresh)?, db.url.clone());
+    assert_eq!(row, None, "a shredded row for a profile the archive names no key for");
+    let keys = ownhealth_core::keys::Keyring::new(ownhealth_core::keys::Kek::from_settings(&fresh)?, db.url.clone())
+        .with_keyring_file(ownhealth_core::keyfile::path(&fresh));
     assert!(
         keys.dek(gone, true).is_err(),
         "a new key was made for a deleted profile"
@@ -2080,5 +2078,109 @@ async fn round5_verify_restore_reports_a_missing_imaging_upload() -> R {
     let report = ownhealth_ops::verify_restore(&l.settings, &archive).await?;
     assert_eq!(report["ok"], false, "{report}");
     assert_eq!(strs(&report["blobs"]["missing"]), [hex::encode(missing)]);
+    Ok(())
+}
+
+/// A new-format backup taken before a profile's first sealed file names no key for it. The profile
+/// then made a key, the keyring published it, and the profile was deleted, so the tombstone names
+/// that key. Restoring the older backup brings the profile back with no key row: the tombstone
+/// closes only the deleted key, so the profile makes a new one. A backup that names the deleted key
+/// installs the shredded row instead, and the profile cannot store sealed files.
+#[tokio::test]
+async fn round_ten_a_profile_the_backup_holds_no_key_for_makes_a_new_key_after_a_delete() -> R {
+    use ownhealth_core::blobs::BlobError;
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::shred;
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let first = TestDb::empty().await?;
+    let s1 = first.settings(&dir.path().join("first"))?;
+    ownhealth_ops::restore(&s1, &fixture).await?;
+    migrate::migrate_embedded(&first.pool).await?;
+    let (alex, household): (Uuid, Uuid) = sqlx::query_as("select id, household_id from profile where slug = 'alex'")
+        .fetch_one(&first.pool)
+        .await?;
+    let before = ownhealth_ops::backup(&s1, &dir.path().join("before")).await?;
+    assert!(!strs(&manifest(&before)?["keys"]["keyring"]).contains(&alex.to_string()));
+    let bytes = b"%PDF-1.4 LabNorte report of Alex Rivera, sealed under his first key".to_vec();
+    let sha = BlobStore::for_settings(&s1)?.put_bytes(BlobOwner::Profile(alex), &bytes)?;
+    let mut c = first.pool.acquire().await?;
+    create_document(
+        &mut c,
+        &NewDocument::upload(household, Some(alex), &sha, "application/pdf", bytes.len() as i64),
+    )
+    .await?;
+    drop(c);
+    let keyed = ownhealth_ops::backup(&s1, &dir.path().join("keyed")).await?;
+    assert!(strs(&manifest(&keyed)?["keys"]["keyring"]).contains(&alex.to_string()));
+    let mut tx = first.pool.begin().await?;
+    shred(&mut tx, alex).await?;
+    tx.commit().await?;
+    let mut c = first.pool.acquire().await?;
+    let ring = keyfile::rewrite(&mut c, &s1).await?;
+    drop(c);
+    assert!(
+        ring.shredded_keys.get(&alex).is_some_and(|ids| !ids.is_empty()),
+        "the tombstone names no key"
+    );
+    let later = b"%PDF-1.4 LabNorte report of Alex Rivera, after the restore".to_vec();
+    async fn shredded_row(db: &TestDb, profile: Uuid) -> anyhow::Result<Option<bool>> {
+        Ok(
+            sqlx::query_scalar("select wrapped_dek is null from profile_key where profile_id = $1")
+                .bind(profile)
+                .fetch_optional(&db.pool)
+                .await?,
+        )
+    }
+
+    let db = TestDb::empty().await?;
+    let mut s2 = db.settings(&dir.path().join("second"))?;
+    s2.secrets_key = s1.secrets_key.clone();
+    s2.keyring_dir = Some(s1.keyring_path());
+    let report = ownhealth_ops::restore(&s2, &before).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert_eq!(
+        shredded_row(&db, alex).await?,
+        None,
+        "a profile with no key in the backup got a shredded row"
+    );
+    BlobStore::for_settings(&s2)?.put_bytes(BlobOwner::Profile(alex), &later)?;
+    assert_eq!(shredded_row(&db, alex).await?, Some(false));
+
+    let db = TestDb::empty().await?;
+    let mut s3 = db.settings(&dir.path().join("third"))?;
+    s3.secrets_key = s1.secrets_key.clone();
+    s3.keyring_dir = Some(s1.keyring_path());
+    let report = ownhealth_ops::restore(&s3, &keyed).await?;
+    assert_eq!(report["keys"]["shredded"], serde_json::json!([alex]), "{report:#}");
+    assert_eq!(shredded_row(&db, alex).await?, Some(true), "the deleted key's row is not shredded");
+    let refused = BlobStore::for_settings(&s3)?.put_bytes(BlobOwner::Profile(alex), &later);
+    assert!(matches!(refused, Err(BlobError::Key(_))), "{refused:?}");
+    Ok(())
+}
+
+/// Archive key ids are lowercase hex, as the backup writes them. An uppercase id is a damaged
+/// manifest: it is refused as such before anything loads, and never read as a missing key.
+#[tokio::test]
+async fn round_ten_an_uppercase_key_id_is_refused_as_a_bad_manifest() -> R {
+    let l = live().await?;
+    let mut m = manifest(&l.archive)?;
+    let id = l.alex.to_string();
+    let lower = m["keys"]["key_ids"][&id].as_str().expect("Alex has a key id").to_string();
+    let upper = lower.to_uppercase();
+    assert_ne!(upper, lower);
+    m["keys"]["key_ids"][&id] = Value::String(upper);
+    write_manifest(&l.archive, &m)?;
+    let (db, fresh) = fresh(&l).await?;
+    for result in [
+        verify_restore(&fresh, &l.archive).await,
+        ownhealth_ops::restore_with(&fresh, &l.archive, true).await,
+    ] {
+        let error = err_text(result);
+        assert!(error.contains(&format!("bad key id for profile {id}")), "{error}");
+    }
+    assert_eq!(public_tables(&db).await?, 0);
     Ok(())
 }

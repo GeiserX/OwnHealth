@@ -1063,8 +1063,10 @@ struct RingKeys {
     supplemental: Vec<(Uuid, Vec<u8>)>,
     /// profiles of the backup whose key the keyring lists as shredded: deleted since the backup
     shredded: Vec<Uuid>,
-    /// every profile the keyring lists as shredded and holds no newer key for, also one deleted before
-    /// the backup: each gets its shredded row back, so no new key is ever made for it
+    /// profiles whose archived key the keyring closes and that hold no newer key: each gets its
+    /// shredded row back, so no new key is ever made for it. A profile the archive names no key for
+    /// gets no row: its next file asks the keyring, which refuses a new key only under a tombstone
+    /// that names no key, so a tombstone that names a later key does not stop it.
     tombstones: Vec<Uuid>,
     /// profiles for which the keyring has no matching key or tombstone
     missing: Vec<Uuid>,
@@ -1134,12 +1136,7 @@ fn ring_keys(
         keys: Vec::new(),
         supplemental: Vec::new(),
         shredded: Vec::new(),
-        tombstones: ring
-            .shredded
-            .iter()
-            .filter(|p| !ring.profiles.contains_key(p))
-            .copied()
-            .collect(),
+        tombstones: Vec::new(),
         missing: Vec::new(),
         allow_missing,
     };
@@ -1151,7 +1148,7 @@ fn ring_keys(
         let wanted = key_ids
             .get(&id.to_string())
             .and_then(Value::as_str)
-            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
             .ok_or_else(|| ops_error(format!("bad key id for profile {id} in the manifest's keys.key_ids")))?;
         if let Some(w) = ring.profiles.get(&id) {
             let dek = authenticate_ring_key(&file, kek, id, &ring, w)?;
@@ -1171,6 +1168,7 @@ fn ring_keys(
             }
         } else if ring.closes(id, Some(wanted)) {
             out.shredded.push(id);
+            out.tombstones.push(id);
         } else {
             out.missing.push(id);
         }
@@ -1216,8 +1214,9 @@ fn authenticate_ring_key(
     Ok(dek)
 }
 
-/// Load the selected keys and the current tombstones. A profile in the dump that stored its first
-/// sealed file after the backup gets its current key, so its next file uses the same key.
+/// Load the selected keys and the shredded rows of the archive's closed keys. A profile in the dump
+/// that stored its first sealed file after the backup gets its current key, so its next file uses
+/// the same key.
 async fn load_keys(url: &str, ring: &RingKeys, resume_id: Option<&str>) -> Result<()> {
     let mut conn = PgConnection::connect(url).await?;
     let mut tx = conn.begin().await?;
