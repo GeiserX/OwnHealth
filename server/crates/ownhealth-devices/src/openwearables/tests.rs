@@ -57,6 +57,8 @@ struct Fake {
     fail_from: Option<DateTime<Utc>>,
     /// The time series sends one cursor again and again.
     repeat_cursor: bool,
+    /// Time-series requests for this provider answer 200 with a body that is not a page.
+    broken_for: Option<String>,
     /// SQL run once, keyed by route ("put" at the first disable PUT, "scores" at the first score read).
     hooks: HashMap<&'static str, (PgPool, String)>,
     /// Whether each hook's SQL succeeded.
@@ -209,6 +211,9 @@ async fn series(State(s): State<Shared>, Query(q): Query<Vec<(String, String)>>)
     {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    if s.broken_for.as_deref().is_some_and(|p| one(&q, "provider") == Some(p)) {
+        return "not a page".into_response();
+    }
     // Cursors carry characters a query must escape.
     let offset = one(&q, "cursor").map_or(0, |c| {
         c.trim_start_matches("c+")
@@ -293,6 +298,7 @@ impl Env {
             ignore_filter_for: None,
             fail_from: None,
             repeat_cursor: false,
+            broken_for: None,
             hooks: HashMap::new(),
             hooked: vec![],
             asked: vec![],
@@ -758,6 +764,71 @@ async fn an_ended_connection_keeps_its_own_cursor_while_the_others_move() -> any
         Some(oura - Duration::days(OVERLAP_DAYS))
     );
     assert_eq!(env.count(reconsent).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_vendor_with_an_unreadable_row_or_answer_holds_no_other_vendor_back() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    let t = env.fake().t;
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["oura", "active"], ["polar", "active"]]);
+        let mut unreadable = sample("raw", "oura", "steps", 0., "count", t + Duration::minutes(1));
+        unreadable["value"] = json!("n/a");
+        fake.rows = vec![
+            sample("raw", "oura", "steps", 27., "count", t),
+            unreadable,
+            sample("raw", "polar", "heart_rate", 61., "bpm", t),
+        ];
+        fake.scores.clear();
+    }
+    // One row Oura sent that does not read is skipped and counted, not the whole page.
+    let out = poll(&env.ctx, &env.base, id).await?;
+    assert!(out.problems.is_empty(), "{:?}", out.problems);
+    assert_eq!(out.skipped.get("unreadable_row"), Some(&1), "{:?}", out.skipped);
+    let steps = "select count(*) from wearable_sample where profile_id = $1 and metric = 'steps'";
+    let hr = "select count(*) from wearable_sample where profile_id = $1 and metric = 'hr'";
+    assert_eq!(env.count(steps).await?, 1);
+    assert_eq!(env.count(hr).await?, 1);
+    let oura = env.mark(id, "oura").await?.expect("Oura's cursor moved");
+    let polar = env.mark(id, "polar").await?.expect("Polar's cursor moved");
+
+    // An Oura answer that does not read stops Oura only; Polar, read after it, still moves.
+    {
+        let mut fake = env.fake();
+        fake.broken_for = Some("oura".into());
+        fake.connections = json!([["oura", "active"], ["polar", "active"], ["whoop", "expired"]]);
+        fake.rows.push(sample(
+            "raw",
+            "polar",
+            "heart_rate",
+            62.,
+            "bpm",
+            Utc::now() - Duration::minutes(1),
+        ));
+    }
+    let asked = env.fake().asked.len();
+    let out = poll(&env.ctx, &env.base, id).await?;
+    assert_eq!(
+        out.problems,
+        [
+            RunProblem {
+                code: CONNECTION_ENDED.into(),
+                message: "whoop".into()
+            },
+            RunProblem {
+                code: VENDOR_FAILED.into(),
+                message: "oura: ow_response: Invalid Open Wearables response. / Respuesta no válida de Open Wearables."
+                    .into()
+            }
+        ]
+    );
+    assert_eq!(env.mark(id, "oura").await?, Some(oura));
+    assert!(env.mark(id, "polar").await?.expect("Polar") > polar);
+    assert!(env.first_start(asked, "polar").is_some());
+    assert_eq!(env.count(hr).await?, 2);
     Ok(())
 }
 

@@ -4,9 +4,10 @@
 //! A poll reads each allowlisted vendor with an active connection on its own (`provider=`), only for
 //! the series OwnHealth maps (`types=`), one day at a time. Each day is stored and committed before
 //! the next one is read, and it moves that vendor's own cursor. So a long window or a later failure
-//! keeps what already arrived, and a vendor whose connection ended never holds the others back. A poll
-//! reads the 7 days before a vendor's cursor again, for late uploads, but its bundle keeps only the
-//! rows this source never brought: `source_item` knows each row by its content.
+//! keeps what already arrived, and a vendor whose connection ended or whose answers do not read never
+//! holds the others back; a row that does not read is counted and left out. A poll reads the 7 days
+//! before a vendor's cursor again, for late uploads, but its bundle keeps only the rows this source
+//! never brought: `source_item` knows each row by its content.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -48,6 +49,9 @@ const API_KEY: &str = "x-open-wearables-api-key";
 /// The problem a poll records when an allowlisted vendor's connection ended or was revoked in Open
 /// Wearables. Its message names the vendors, and the Connections screen reads it.
 pub const CONNECTION_ENDED: &str = "ow_connection_ended";
+/// The problem a poll records for a vendor whose reads failed: `<vendor>: <error>`. The other vendors
+/// go on; the failed vendor keeps its cursor and is read from there on the next poll.
+pub const VENDOR_FAILED: &str = "ow_vendor_failed";
 
 /// The vendors OwnHealth takes through Open Wearables. Each one also needs `ingest: allow` in
 /// data/connectors/providers.yaml; setup switches every other provider off in the sidecar.
@@ -464,6 +468,21 @@ struct Pagination {
     next_cursor: Option<String>,
 }
 
+/// Each row of a page that reads as `T`. A row that does not (a value that is not a number, a missing
+/// field) is counted as `unreadable_row` and left out, so it never stops the page, the day or the vendor.
+fn readable<T: DeserializeOwned>(rows: Vec<Value>, out: &mut RunOutcome) -> Vec<T> {
+    out.seen += i32::try_from(rows.len()).unwrap_or(i32::MAX);
+    rows.into_iter()
+        .filter_map(|row| {
+            let parsed = serde_json::from_value(row).ok();
+            if parsed.is_none() {
+                *out.skipped.entry("unreadable_row".into()).or_default() += 1;
+            }
+            parsed
+        })
+        .collect()
+}
+
 /// One vendor's reads for one day.
 struct Pull<'a> {
     base: &'a Url,
@@ -506,6 +525,15 @@ impl Pull<'_> {
         false
     }
 
+    /// The vendor's day: its daily and raw series and its scores.
+    async fn bundle(&mut self, out: &mut RunOutcome) -> Result<Bundle> {
+        Ok(Bundle {
+            daily: self.series("1day", out).await?,
+            raw: self.series("raw", out).await?,
+            scores: self.scores(out).await?,
+        })
+    }
+
     async fn series(&mut self, resolution: &str, out: &mut RunOutcome) -> Result<Vec<Sample>> {
         let mut rows = Vec::new();
         let mut query = vec![
@@ -519,9 +547,8 @@ impl Pull<'_> {
         let fixed = query.len();
         let mut cursors = HashSet::new();
         for _ in 0..MAX_PAGES {
-            let page: Page<Sample> = self.read("timeseries", &query).await?;
-            rows.extend(page.data.into_iter().filter(|row| {
-                out.seen += 1;
+            let page: Page<Value> = self.read("timeseries", &query).await?;
+            rows.extend(readable::<Sample>(page.data, out).into_iter().filter(|row| {
                 let provider = row.source.as_ref().map_or("", |s| s.provider.as_str());
                 if !self.accepts(provider, out) {
                     return false;
@@ -559,7 +586,7 @@ impl Pull<'_> {
         let mut rows = Vec::new();
         let mut offset = 0;
         for _ in 0..MAX_PAGES {
-            let page: Page<Score> = self
+            let page: Page<Value> = self
                 .read(
                     "health-scores",
                     &[
@@ -572,8 +599,7 @@ impl Pull<'_> {
                 )
                 .await?;
             let count = page.data.len();
-            rows.extend(page.data.into_iter().filter(|row| {
-                out.seen += 1;
+            rows.extend(readable::<Score>(page.data, out).into_iter().filter(|row| {
                 let provider = row.provider.as_deref().unwrap_or("");
                 if !self.accepts(provider, out) {
                     return false;
@@ -651,7 +677,9 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     }
     let mut out = RunOutcome::default();
     let mut cursor = binding.cursor.clone();
-    for provider in &active {
+    // A vendor whose reads fail stops at its last stored day; the vendors after it are still read.
+    let mut failed = Vec::new();
+    'vendors: for provider in &active {
         let mut from = mark(cursor.as_ref(), provider).map_or(now - Duration::days(BACKFILL_DAYS), |t| {
             t.min(now) - Duration::days(OVERLAP_DAYS)
         });
@@ -669,10 +697,12 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
                 to,
                 remaining: MAX_BYTES_PER_DAY,
             };
-            let bundle = Bundle {
-                daily: pull.series("1day", &mut out).await?,
-                raw: pull.series("raw", &mut out).await?,
-                scores: pull.scores(&mut out).await?,
+            let bundle = match pull.bundle(&mut out).await {
+                Ok(bundle) => bundle,
+                Err(err) => {
+                    failed.push((provider.as_str(), err));
+                    continue 'vendors;
+                }
             };
             let Some(next) = store_day(ctx, source, &binding, cursor.as_ref(), provider, to, bundle, &mut out).await?
             else {
@@ -692,12 +722,23 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     .bind(!ended.is_empty())
     .execute(&ctx.pool)
     .await?;
+    // When every vendor failed, the run failed: nothing of this poll is new, and the job says why.
+    if !failed.is_empty() && failed.len() == active.len() {
+        let (_, err) = failed.swap_remove(0);
+        return Err(err);
+    }
+    // The ended vendors come first: the Connections screen reads the first problem.
     if !ended.is_empty() {
         out.problems.push(RunProblem {
             code: CONNECTION_ENDED.into(),
             message: ended.into_iter().collect::<Vec<_>>().join(", "),
         });
     }
+    out.problems
+        .extend(failed.into_iter().map(|(provider, err)| RunProblem {
+            code: VENDOR_FAILED.into(),
+            message: format!("{provider}: {}", err.text()),
+        }));
     Ok(out)
 }
 
