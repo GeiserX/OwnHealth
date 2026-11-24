@@ -47,7 +47,9 @@ jobs:
         ports:
           - 18217:80
     env:
+      # The same Rust and Cargo env as ci.yml: rust-cache hashes it into the key of the e2e cache reused below.
       RUST_TOOLCHAIN: "1.98.1"
+      CARGO_TERM_COLOR: always
       OWNHEALTH_E2E_PORT: "8216"
       OWNHEALTH_E2E_DB: oh_e2e_smartlauncher
       OWNHEALTH_E2E_SMART_LAUNCHER: http://127.0.0.1:18217
@@ -60,11 +62,14 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
+      # Restore the debug build cache that ci.yml's e2e job saves on main, for the same
+      # `cargo build -p ownhealth --locked`: its key ends in that job's id, e2e.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: server
           save-if: false
-          key: ${{ hashFiles('server/Cargo.toml') }}
+          key: ${{ hashFiles('server/Cargo.toml') }}-e2e
+          add-job-id-key: false
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           package_json_file: ui/package.json
