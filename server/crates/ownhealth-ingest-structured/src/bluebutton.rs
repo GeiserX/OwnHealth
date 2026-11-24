@@ -318,6 +318,7 @@ impl Reader<'_> {
             }
             let bundle: Value = serde_json::from_slice(&answer.body).unwrap_or_default();
             let mut entries = &[][..];
+            let mut page_hash = None;
             if bundle["resourceType"] != "Bundle" || bundle["type"] != "searchset" {
                 got.problem(Issue::NotBundle);
                 return Ok(got);
@@ -332,12 +333,15 @@ impl Reader<'_> {
                     return Ok(got);
                 }
                 entries = array.as_slice();
+                // the compact JSON of the entry array; Display of a Value cannot fail
+                page_hash = Some(<[u8; 32]>::from(Sha256::digest(value.to_string())));
             }
             let next = bundle["link"]
                 .as_array()
                 .is_some_and(|links| links.iter().any(|l| l["relation"] == "next"));
-            if !entries.is_empty()
-                && !seen.insert(Sha256::digest(serde_json::to_vec(entries).expect("JSON values serialize")).into())
+            if let Some(hash) = page_hash
+                && !entries.is_empty()
+                && !seen.insert(hash)
             {
                 got.problem(Issue::RepeatedPage);
                 return Ok(got);
@@ -383,7 +387,10 @@ async fn gather(r: &mut Reader<'_>, scope: &str, who: &Identity) -> Result<Vec<(
         }
         return Err(JobError::permanent(IDENTITY).into());
     }
-    let p = &patients.entries.values().next().expect("one entry")["resource"];
+    let Some(entry) = patients.entries.values().next() else {
+        return Err(JobError::permanent(IDENTITY).into());
+    };
+    let p = &entry["resource"];
     use mapping::PatientIdentity;
     match mapping::smart_patient_identity(p, &who.0, who.1) {
         PatientIdentity::Verified => {}
