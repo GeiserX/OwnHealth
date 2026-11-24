@@ -18,7 +18,7 @@
 //! - **The patient.** The Patient the grant names must confirm the profile's name and full birth
 //!   date before any clinical search. The pull stops if the identity differs or cannot be verified.
 //!   The run is partial if a result does not identify the verified patient, or if the search
-//!   returns a resource type outside the requested match and authorized includes.
+//!   returns a resource outside the authorized FHIR base, match types, or includes.
 //! - **One bundle per run.** The resources gathered by a pull form a `collection` Bundle, each
 //!   resource once and in a fixed order. The grant or a failed search can leave the snapshot
 //!   incomplete. The same snapshot gives the same bytes and document. A changed snapshot creates
@@ -196,6 +196,9 @@ mod words {
     pub fn patient_reference(rtype: &str) -> String {
         format!("{rtype}: a resource did not identify the verified patient and was skipped")
     }
+    pub fn resource_url(rtype: &str) -> String {
+        format!("{rtype}: a result had no resource URL on the authorized FHIR base and was skipped")
+    }
     pub fn unexpected_resource(rtype: &str) -> String {
         format!("{rtype}: the server returned a resource outside the search and it was skipped")
     }
@@ -272,6 +275,7 @@ pub fn phrases() -> Value {
             words::MEDICATION_VERSION_MISMATCH,
             words::MEDICATION_REFERENCE,
             words::patient_reference("Observation"),
+            words::resource_url("Observation"),
             words::unexpected_resource("Condition"),
             words::page_too_large("Observation", PAGE_BYTES),
             words::too_many_pages("Observation", MAX_PAGES),
@@ -537,13 +541,15 @@ async fn fetch(r: &mut Reader<'_>, g: &mut Gathered, rtype: &str, url: &str) -> 
     }
 }
 
-/// The root of a RESTful fullUrl whose final segments identify this entry's resource.
-fn entry_fhir_base(entry: &Value) -> Option<&str> {
-    let full = entry["fullUrl"].as_str()?;
-    let (before_id, id) = full.rsplit_once('/')?;
-    let (base, kind) = before_id.rsplit_once('/')?;
-    let resource = &entry["resource"];
-    (resource["resourceType"] == kind && resource["id"] == id && fhir_id(id)).then_some(base)
+/// The canonical base of the FHIR grant, used as an exact prefix for resource identities.
+pub(crate) fn fhir_base(raw: &str) -> Option<String> {
+    let url = url::Url::parse(raw.trim()).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then(|| url.as_str().trim_end_matches('/').to_owned())
 }
 
 /// Clinical results must name the verified patient. An included Medication describes the drug
@@ -558,12 +564,7 @@ fn belongs_to_patient(entry: &Value, base: &str, patient: &str) -> bool {
     (!needs_reference || references.peek().is_some())
         && references.all(|reference| {
             let Some((root, id)) = (if let Some(id) = reference.strip_prefix("Patient/") {
-                // A present fullUrl must supply the root. Without it, use the search server.
-                if entry.get("fullUrl").is_none() {
-                    Some((base, id))
-                } else {
-                    entry_fhir_base(entry).map(|root| (root, id))
-                }
+                Some((base, id))
             } else {
                 reference.rsplit_once("/Patient/")
             }) else {
@@ -573,9 +574,7 @@ fn belongs_to_patient(entry: &Value, base: &str, patient: &str) -> bool {
                 || id
                     .split_once("/_history/")
                     .is_some_and(|(id, version)| id == patient && fhir_id(version));
-            same_patient
-                && (root == base
-                    || url::Url::parse(root).is_ok_and(|root| url::Url::parse(base).is_ok_and(|base| root == base)))
+            same_patient && root == base
         })
 }
 
@@ -692,24 +691,30 @@ fn gather_entries(
         } else if e["search"]["mode"] == "outcome" || !(t == rtype || (t == "Medication" && include_medication)) {
             g.skip("not_granted", i64::from(t == "Medication" && !include_medication));
             g.problem("unexpected_resource", words::unexpected_resource(rtype));
-        } else if !belongs_to_patient(e, base, patient) {
-            g.problem("patient_reference", words::patient_reference(rtype));
+        } else if let Some(full) = e["fullUrl"].as_str()
+            && smart_medication::entry_id(full, base, t).is_some_and(|id| res["id"] == id)
+        {
+            if belongs_to_patient(e, base, patient) {
+                g.entries.push((Some(full.into()), res.clone()));
+            } else {
+                g.problem("patient_reference", words::patient_reference(rtype));
+            }
         } else {
-            let full = e["fullUrl"].as_str().filter(|u| !u.is_empty()).map(String::from);
-            g.entries.push((full, res.clone()));
+            g.skip("resource_url", 1);
+            g.problem("resource_url", words::resource_url(t));
         }
     }
 }
 
 /// Identify each unresolved order's exact target before deciding which reads the grant allows.
 fn missing_medications(
-    base: &url::Url,
+    base: &str,
     entries: &[(Option<String>, Value)],
     can_read: bool,
 ) -> (Vec<smart_medication::Reference>, usize) {
     let mut included = smart_medication::Index::default();
     for (full, resource) in entries.iter().filter(|(_, r)| r["resourceType"] == "Medication") {
-        included.insert(full.as_deref(), resource);
+        included.insert(base, full.as_deref(), resource);
     }
     let mut seen = HashSet::new();
     let mut missing = Vec::new();
@@ -723,14 +728,14 @@ fn missing_medications(
             unresolved += usize::from(smart_medication::contained(order, raw).is_none());
             continue;
         }
-        let Some(reference) = smart_medication::Reference::in_order(raw, full.as_deref(), order) else {
+        let Some(reference) = smart_medication::Reference::in_order(raw, base, full.as_deref(), order) else {
             unresolved += 1;
             continue;
         };
         match included.lookup(&reference) {
             smart_medication::Match::Found(_) => {}
-            smart_medication::Match::Missing if reference.read_url(base).is_some() => {
-                if can_read && seen.insert(reference.clone()) {
+            smart_medication::Match::Missing if can_read => {
+                if seen.insert(reference.clone()) {
                     missing.push(reference);
                 }
             }
@@ -748,9 +753,8 @@ fn bundle(base: &str, entries: Vec<(Option<String>, Value)>) -> (Vec<u8>, i64) {
     let mut by_key = BTreeMap::<_, (Option<String>, Value)>::new();
     let mut repeated = 0;
     for (full, r) in entries {
-        // Medications are context. Two FHIR bases can issue the same ID and version, and two
-        // different copies of one version must stay ambiguous during projection.
-        let context = (r["resourceType"] == "Medication").then(|| (full.clone(), fhir::content_sha(&r)));
+        // Keep conflicting copies of a Medication version so references stay ambiguous.
+        let context = (r["resourceType"] == "Medication").then(|| fhir::content_sha(&r));
         let key = (fhir::pull_key(&r), context);
         match by_key.get_mut(&key) {
             Some(held) => {
@@ -852,8 +856,7 @@ pub async fn pull_with(
     let profile_id = source.profile_id.ok_or_else(|| JobError::permanent(STOP_PROFILE))?;
     let base = source.config["endpoints"]["issuer"]
         .as_str()
-        .map(|b| b.trim().trim_end_matches('/').to_string())
-        .filter(|b| !b.is_empty())
+        .and_then(fhir_base)
         .ok_or_else(|| JobError::permanent(STOP_SERVER))?;
     let patient = source.config["patient"]
         .as_str()
@@ -978,15 +981,12 @@ pub async fn pull_with(
         return Err(JobError::retry(STOP_NO_ANSWER));
     }
     if !r.budget_hit {
-        let authorized_base = url::Url::parse(&base).map_err(|_| JobError::permanent(STOP_SERVER))?;
-        let (missing, mut unresolved) = missing_medications(&authorized_base, &g.entries, read_medication);
+        let (missing, mut unresolved) = missing_medications(&base, &g.entries, read_medication);
         let entries_before_reads = g.entries.len();
         let mut left = missing.len();
         for reference in missing.into_iter().take(caps.medication_reads) {
             left -= 1;
-            let (id, url) = reference
-                .read_url(&authorized_base)
-                .expect("a read is on the authorized base");
+            let (id, url) = reference.read_url(&base);
             match r.get(&url).await {
                 Ok(f) if f.status == 200 => {
                     let m: Value = serde_json::from_slice(&f.body).unwrap_or(Value::Null);
@@ -997,7 +997,7 @@ pub async fn pull_with(
                     } else if !reference.matches_version(&m) {
                         g.problem("medication_version_mismatch", words::MEDICATION_VERSION_MISMATCH.into());
                     } else {
-                        g.entries.push((Some(reference.into_full_url()), m));
+                        g.entries.push((Some(reference.full_url(&base)), m));
                     }
                 }
                 Ok(f) => g.problem("search_failed", words::answered("Medication", f.status)),
@@ -1016,7 +1016,7 @@ pub async fn pull_with(
         }
         if g.entries.len() != entries_before_reads {
             // A version-specific read can make an unversioned reference ambiguous.
-            (_, unresolved) = missing_medications(&authorized_base, &g.entries, false);
+            (_, unresolved) = missing_medications(&base, &g.entries, read_medication);
         }
         if unresolved > 0 {
             let message = if unresolved == 1 {
@@ -1283,12 +1283,8 @@ mod tests {
                 json!({"resourceType": "Medication", "id": "held"}),
             ),
         ];
-        let base = url::Url::parse(base).expect("the FHIR base");
-        let (targets, unresolved) = missing_medications(&base, &entries, true);
-        let urls: Vec<_> = targets
-            .iter()
-            .filter_map(|target| target.read_url(&base).map(|(_, url)| url))
-            .collect();
+        let (targets, unresolved) = missing_medications(base, &entries, true);
+        let urls: Vec<_> = targets.iter().map(|target| target.read_url(base).1).collect();
         assert_eq!(
             urls,
             [
@@ -1298,6 +1294,68 @@ mod tests {
             ]
         );
         assert_eq!(unresolved, 4);
+    }
+
+    #[test]
+    fn dot_segments_cannot_change_the_medication_named_by_an_order() {
+        let base = "https://fhir.labnorte.example/r4";
+        let make_order = |full: String, reference: &str| {
+            (
+                Some(full),
+                json!({"resourceType": "MedicationRequest", "id": "o", "medicationReference": {"reference": reference}}),
+            )
+        };
+        let foreign = make_order(
+            "https://fhir.labnorte.example/other/MedicationRequest/o".into(),
+            "Medication/m1/_history/../../../../r4/Medication/m2",
+        );
+        let local = format!("{base}/MedicationRequest/o");
+        let entries = [
+            foreign,
+            make_order(local.clone(), "Medication/m1/_history/../../m3"),
+            make_order(local.clone(), "Medication/m1/_history/%2e%2e/%2e%2e/m3"),
+            make_order(local.clone(), "Medication/m1/_history/.."),
+            make_order(local.clone(), &format!("{base}/Medication/m1/../m3")),
+            make_order(local.clone(), &format!("{base}/Medication/m1/%2e%2e/m3")),
+            make_order(local, &format!("{base}/Medication/m1/_history/v1")),
+        ];
+        let (targets, unresolved) = missing_medications(base, &entries, true);
+        let reads: Vec<_> = targets.iter().map(|r| r.read_url(base).1).collect();
+        assert_eq!(reads, [format!("{base}/Medication/m1/_history/v1")]);
+        assert_eq!(unresolved, entries.len() - 1);
+    }
+
+    #[test]
+    fn the_snapshot_keeps_each_full_url_with_its_own_resource_and_invents_no_medication_identity() {
+        let base = "https://fhir.labnorte.example/r4";
+        let url = format!("{base}/MedicationRequest/o");
+        let order = |reference| {
+            json!({
+                "resourceType": "MedicationRequest", "id": "o", "meta": {"versionId": "1"},
+                "medicationReference": {"reference": reference}
+            })
+        };
+        let inputs = vec![
+            (None, order("Medication/unverified")),
+            (Some(url.clone()), order("Medication/verified")),
+            (None, json!({"resourceType": "Medication", "id": "verified"})),
+            (
+                None,
+                json!({
+                    "resourceType": "MedicationRequest", "id": "other", "medicationReference": {"reference": "Medication/verified"}
+                }),
+            ),
+        ];
+        let (bytes, repeats) = bundle(base, inputs);
+        assert_eq!(repeats, 1);
+        let snapshot: Value = serde_json::from_slice(&bytes).expect("snapshot");
+        let entries = snapshot["entry"].as_array().expect("entries");
+        let kept = entries.iter().find(|e| e["resource"]["id"] == "o").expect("order");
+        assert_eq!(kept["fullUrl"], url);
+        assert_eq!(kept["resource"], order("Medication/verified"));
+        for unverified in entries.iter().filter(|e| e["resource"]["id"] != "o") {
+            assert!(unverified.get("fullUrl").is_none(), "{unverified}");
+        }
     }
 
     #[test]

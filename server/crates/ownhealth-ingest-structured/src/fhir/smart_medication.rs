@@ -1,94 +1,72 @@
 use std::collections::HashMap;
 
+use super::{content_sha, fhir_id};
 use serde_json::Value;
-use url::Url;
 
-use super::content_sha;
-
-fn fhir_url(text: &str) -> Option<Url> {
-    if text
-        .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || b == b'\\')
-    {
-        return None;
-    }
-    let url = Url::parse(text).ok()?;
-    (url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none())
-        .then_some(url)
+fn rest_id(id: &str) -> bool {
+    fhir_id(id) && !matches!(id, "." | "..")
 }
 
-/// The FHIR base and ID in an absolute RESTful resource URL.
-fn restful<'a>(url: &'a str, kind: &str) -> Option<(&'a str, &'a str)> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return None;
-    }
-    let (prefix, id) = url.rsplit_once('/')?;
-    let (base, resource_type) = prefix.rsplit_once('/')?;
-    (resource_type == kind && super::fhir_id(id)).then_some((base, id))
+fn under_base<'a>(url: &'a str, base: &str) -> Option<&'a str> {
+    url.strip_prefix(base)?.strip_prefix('/')
+}
+
+/// A versionless REST identity on the authorized base.
+pub(crate) fn entry_id<'a>(url: &'a str, base: &str, kind: &str) -> Option<&'a str> {
+    let (resource_type, id) = under_base(url, base)?.split_once('/')?;
+    (resource_type == kind && rest_id(id)).then_some(id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Reference {
-    full_url: String,
+    id: String,
     version: Option<String>,
 }
 
 impl Reference {
-    /// FHIR R4 Bundle references (section 2.36.4.1). A relative reference takes the base of
-    /// its own order. An absolute reference can also identify an included entry by URN.
-    pub(crate) fn in_order(raw: &str, order_url: Option<&str>, order: &Value) -> Option<Self> {
-        let absolute = if raw.starts_with("Medication/") {
-            let order_url = fhir_url(order_url?)?;
-            let (base, id) = restful(order_url.as_str(), "MedicationRequest")?;
+    /// Accept only a raw Medication path on the authorized base. A relative path needs an order
+    /// fullUrl that identifies that same order. The parser never normalizes a reference.
+    pub(crate) fn in_order(raw: &str, base: &str, order_url: Option<&str>, order: &Value) -> Option<Self> {
+        let path = if raw.starts_with("Medication/") {
+            let kind = order["resourceType"].as_str()?;
+            let id = entry_id(order_url?, base, kind)?;
             if order["id"] != id {
                 return None;
             }
-            let path = raw.strip_prefix("Medication/")?;
-            let id = path.split_once("/_history/").map_or(path, |(id, _)| id);
-            if !super::fhir_id(id) {
-                return None;
-            }
-            fhir_url(&format!("{base}/{raw}"))?
+            raw
         } else {
-            fhir_url(raw)?
+            under_base(raw, base)?
         };
-        let (full_url, version) = absolute
-            .as_str()
-            .rsplit_once("/_history/")
-            .filter(|(full, _)| restful(full, "Medication").is_some())
-            .map_or((absolute.as_str(), None), |(full, version)| (full, Some(version)));
-        if matches!(absolute.scheme(), "http" | "https") {
-            restful(full_url, "Medication")?;
-            if version.is_some_and(|v| !super::fhir_id(v)) {
-                return None;
-            }
+        let path = path.strip_prefix("Medication/")?;
+        let (id, version) = path
+            .split_once("/_history/")
+            .map_or((path, None), |(id, version)| (id, Some(version)));
+        if !rest_id(id) || version.is_some_and(|version| !rest_id(version)) {
+            return None;
         }
         Some(Self {
-            full_url: full_url.into(),
+            id: id.into(),
             version: version.map(String::from),
         })
     }
 
-    /// Only the authorized base can be read. Foreign targets must be in the bundle.
-    pub(crate) fn read_url(&self, authorized_base: &Url) -> Option<(&str, String)> {
-        let (root, id) = restful(&self.full_url, "Medication")?;
-        (root == authorized_base.as_str().trim_end_matches('/')).then(|| {
-            let url = match &self.version {
-                Some(version) => format!("{}/_history/{version}", self.full_url),
-                None => self.full_url.clone(),
-            };
-            (id, url)
-        })
+    pub(crate) fn read_url(&self, base: &str) -> (&str, String) {
+        let full = self.full_url(base);
+        let url = match &self.version {
+            Some(version) => format!("{full}/_history/{version}"),
+            None => full,
+        };
+        (&self.id, url)
+    }
+
+    pub(crate) fn full_url(&self, base: &str) -> String {
+        format!("{base}/Medication/{}", self.id)
     }
 
     pub(crate) fn matches_version(&self, resource: &Value) -> bool {
         self.version
             .as_deref()
             .is_none_or(|version| resource["meta"]["versionId"] == version)
-    }
-
-    pub(crate) fn into_full_url(self) -> String {
-        self.full_url
     }
 }
 
@@ -115,20 +93,18 @@ pub(crate) enum Match<'a> {
 pub(crate) struct Index<'a>(HashMap<Reference, Option<(&'a Value, String)>>);
 
 impl<'a> Index<'a> {
-    pub(crate) fn insert(&mut self, full_url: Option<&str>, resource: &'a Value) {
-        let Some(url) = full_url.and_then(fhir_url) else {
+    pub(crate) fn insert(&mut self, base: &str, full_url: Option<&str>, resource: &'a Value) {
+        let Some(id) = full_url.and_then(|url| entry_id(url, base, "Medication")) else {
             return;
         };
-        if matches!(url.scheme(), "http" | "https")
-            && restful(url.as_str(), "Medication").is_none_or(|(_, id)| resource["id"] != id)
-        {
+        if resource["id"] != id {
             return;
         }
         let hash = content_sha(resource);
         let version = resource["meta"]["versionId"].as_str();
         let mut store = |version: Option<&str>| {
             let key = Reference {
-                full_url: url.as_str().into(),
+                id: id.into(),
                 version: version.map(String::from),
             };
             self.0

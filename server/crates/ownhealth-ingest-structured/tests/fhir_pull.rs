@@ -94,6 +94,7 @@ async fn smart_source(conn: &mut PgConnection, fam: &Family, slug: &str) -> anyh
         conn,
         &NewSource {
             profile_id: Some(fam.profile(slug)),
+            config: json!({"endpoints": {"issuer": BASE}}),
             ..NewSource::new(fam.household_id, "smart", "Hospital LabNorte")
         },
     )

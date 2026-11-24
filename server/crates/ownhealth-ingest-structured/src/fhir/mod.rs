@@ -272,6 +272,7 @@ struct Pull<'a> {
     kind: &'a str,
     label: &'a str,
     sha: &'a str,
+    fhir_base: Option<&'a str>,
     /// resource type -> the resources of that type with no table, in this run
     unmapped: BTreeMap<String, Unmapped>,
 }
@@ -360,8 +361,8 @@ pub(crate) async fn import_pull_with_identity(
         .await?;
     let profile_id =
         profile_id.ok_or_else(|| Error::Invalid("a pull is stored on the profile of its connection".into()))?;
-    let (kind, label, source_profile): (String, String, Option<Uuid>) =
-        sqlx::query_as("select kind, label, profile_id from source where id = $1")
+    let (kind, label, source_profile, issuer): (String, String, Option<Uuid>, Option<String>) =
+        sqlx::query_as("select kind, label, profile_id, config#>>'{endpoints,issuer}' from source where id = $1")
             .bind(source_id)
             .fetch_optional(&mut *conn)
             .await?
@@ -383,11 +384,13 @@ pub(crate) async fn import_pull_with_identity(
         // the same bytes brought the document back: what the ledger says it brought is gone.
         ownhealth_core::dedup::forget_pulled_by(&mut *conn, source_id, document_id).await?;
     }
+    let fhir_base = issuer.as_deref().and_then(crate::smart::fhir_base);
     let pull = Pull {
         source_id,
         kind: &kind,
         label: &label,
         sha: &sha,
+        fhir_base: fhir_base.as_deref(),
         unmapped: BTreeMap::new(),
     };
     let (summary, identity, tally) = import_with(
@@ -477,10 +480,12 @@ async fn import_with(
         }
     }
     let run_index = Index(index);
-    let smart_medications = pull.as_ref().filter(|p| p.kind == crate::smart::KIND).map(|_| {
+    let smart_medications = pull.as_ref().filter(|p| p.kind == crate::smart::KIND).map(|p| {
         let mut index = smart_medication::Index::default();
-        for e in entries.iter().filter(|e| e.rtype() == "Medication") {
-            index.insert(e.full_url.as_deref(), &e.resource);
+        if let Some(base) = p.fhir_base {
+            for e in entries.iter().filter(|e| e.rtype() == "Medication") {
+                index.insert(base, e.full_url.as_deref(), &e.resource);
+            }
         }
         index
     });
@@ -939,7 +944,8 @@ impl Run<'_> {
         if raw.starts_with('#') {
             return smart_medication::contained(&e.resource, raw);
         }
-        let target = smart_medication::Reference::in_order(raw, e.full_url.as_deref(), &e.resource)?;
+        let base = self.pull.as_ref()?.fhir_base?;
+        let target = smart_medication::Reference::in_order(raw, base, e.full_url.as_deref(), &e.resource)?;
         match index.lookup(&target) {
             smart_medication::Match::Found(resource) => Some(resource),
             _ => None,

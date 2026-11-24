@@ -1710,7 +1710,9 @@ async fn medication_requests_are_imported_without_medication_access() -> R {
         .day(source, t0() + Duration::minutes(1))
         .await?
         .map_err(anyhow::Error::msg)?;
-    assert!(got.problems.is_empty(), "{got:?}");
+    assert_eq!(got.problems.len(), 1, "{got:?}");
+    assert_eq!(got.problems[0].code, "medication_reference");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
     assert_eq!(
         w.count("medication").await?,
         2,
@@ -2229,7 +2231,7 @@ async fn a_refused_access_tokens_body_counts_against_the_run_budget() -> R {
 }
 
 #[tokio::test]
-async fn a_relative_patient_reference_uses_the_entry_fhir_base() -> R {
+async fn a_search_entry_needs_a_resource_url_on_the_authorized_base() -> R {
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/Procedure.s".into(),
         ..Behaviour::default()
@@ -2269,14 +2271,19 @@ async fn a_relative_patient_reference_uses_the_entry_fhir_base() -> R {
         .iter()
         .filter_map(|entry| entry["resource"]["id"].as_str())
         .collect();
-    for kept in ["own-base", "no-full-url", "absolute-own"] {
-        assert!(ids.contains(kept), "{ids:?}");
-    }
-    for rejected in ["other-base", "other-host", "unresolvable-base"] {
+    assert!(ids.contains("own-base"), "{ids:?}");
+    for rejected in [
+        "other-base",
+        "other-host",
+        "unresolvable-base",
+        "no-full-url",
+        "absolute-own",
+    ] {
         assert!(!ids.contains(rejected), "{ids:?}");
     }
     assert_eq!(w.status_of_last_run(source).await?, "partial");
-    assert_eq!(got.problems[0].code, "patient_reference");
+    assert_eq!(got.skipped.get("resource_url"), Some(&5), "{got:?}");
+    assert_eq!(got.problems[0].code, "resource_url");
     Ok(())
 }
 
@@ -2671,7 +2678,74 @@ async fn the_bytes_past_the_page_cap_can_exhaust_the_run_budget() -> R {
 }
 
 #[tokio::test]
-async fn medication_references_use_their_orders_base_for_reads_and_import() -> R {
+async fn colliding_orders_only_import_from_the_authorized_base() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/MedicationRequest.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let local = w.fake.issuer();
+    let foreign = format!("{}/elsewhere", w.fake.base);
+    let order = |base: &str, name: &str| {
+        json!({
+            "fullUrl": format!("{base}/MedicationRequest/shared"),
+            "resource": {
+                "resourceType": "MedicationRequest", "id": "shared", "meta": {"versionId": "1"},
+                "status": "active", "intent": "order", "authoredOn": "2026-09-01",
+                "subject": {"reference": format!("{local}/Patient/{PATIENT}")},
+                "medicationCodeableConcept": {"text": name}
+            }
+        })
+    };
+    w.fake.book().extra_search_entries.extend([
+        ("MedicationRequest", order(&foreign, "Foreign order")),
+        ("MedicationRequest", order(&local, "Authorized order")),
+    ]);
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    let snapshot = w.stored_bundle(source).await?;
+    let entries = snapshot["entry"].as_array().expect("entries");
+    let orders: Vec<_> = entries.iter().filter(|e| e["resource"]["id"] == "shared").collect();
+    assert_eq!(orders.len(), 1, "{orders:?}");
+    assert_eq!(
+        orders[0]["resource"]["medicationCodeableConcept"]["text"],
+        "Authorized order"
+    );
+    assert_eq!(got.skipped.get("resource_url"), Some(&1), "{got:?}");
+    assert_eq!(got.problems[0].code, "resource_url");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_missing_medication_is_reported_without_attempting_a_read() -> R {
+    let w = world(Behaviour {
+        scope: "patient/Patient.r patient/MedicationRequest.s".into(),
+        ..Behaviour::default()
+    })
+    .await?;
+    let base = w.fake.issuer();
+    w.fake.book().extra_search_entries.push((
+        "MedicationRequest",
+        json!({
+            "fullUrl": format!("{base}/MedicationRequest/missing"),
+            "resource": {
+                "resourceType": "MedicationRequest", "id": "missing", "status": "active", "intent": "order",
+                "subject": {"reference": format!("Patient/{PATIENT}")},
+                "medicationReference": {"reference": "Medication/absent"}
+            }
+        }),
+    ));
+    let source = w.connect(t0()).await?;
+    let got = w.day(source, t0()).await?.map_err(anyhow::Error::msg)?;
+    assert!(got.problems.iter().any(|p| p.code == "medication_reference"), "{got:?}");
+    assert_eq!(w.status_of_last_run(source).await?, "partial");
+    assert!(!w.fake.book().attempts.iter().any(|url| url.contains("/Medication/")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn medication_references_use_only_the_authorized_base_for_reads_and_import() -> R {
     let w = world(Behaviour {
         scope: "patient/Patient.r patient/MedicationRequest.s patient/Medication.r".into(),
         ..Behaviour::default()
@@ -2733,8 +2807,12 @@ async fn medication_references_use_their_orders_base_for_reads_and_import() -> R
         .collect();
     assert_eq!(reads, ["/fhir/Medication/missing-local"]);
     assert_eq!(w.status_of_last_run(source).await?, "partial", "{got:?}");
-    assert_eq!(got.problems.len(), 1, "{got:?}");
-    assert_eq!(got.problems[0].code, "medication_reference");
+    assert_eq!(got.skipped.get("resource_url"), Some(&4), "{got:?}");
+    assert_eq!(got.problems.len(), 2, "{got:?}");
+    assert!(
+        got.problems.iter().all(|problem| problem.code == "resource_url"),
+        "{got:?}"
+    );
 
     let mut c = w.db.pool.acquire().await?;
     let meds = list_records(&mut c, "medication", w.sam(), None, true).await?;
@@ -2745,7 +2823,6 @@ async fn medication_references_use_their_orders_base_for_reads_and_import() -> R
     assert_eq!(
         projected,
         BTreeSet::from([
-            ("foreign-order", "Foreign included drug"),
             ("local-order", "Local included drug"),
             ("read-local", "Authorized fallback drug"),
         ]),
