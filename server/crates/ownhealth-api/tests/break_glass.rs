@@ -2411,3 +2411,46 @@ async fn an_emergency_grant_cannot_change_a_sensitive_relative() -> R {
     assert_eq!(b.text(status, id).await?, "retracted");
     Ok(())
 }
+
+/// A job row of `kind` for Alex, finished, naming the file it imported.
+async fn alex_job(b: &Bg, kind: &str) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar(
+        "insert into job (kind, payload, state, result) values ($1, $2, 'done', '{\"studies\": 1}'::jsonb) returning id",
+    )
+    .bind(kind)
+    .bind(json!({"profile_id": b.alex_id().to_string(), "filename": "RIVERA-CD.zip"}))
+    .fetch_one(b.env.pool())
+    .await?)
+}
+
+/// A job row's `field` needs `scope`; when an open request supplies it, the read records one
+/// break-glass use and one owner notice, whatever the job kind.
+async fn job_read_through_break_glass(kind: &str, scope: &str, field: &str) -> R {
+    let mut b = setup().await?;
+    b.grant_sam("guardian", &["read:summary"]).await?;
+    let job = alex_job(&b, kind).await?;
+    let mut sam = b.sam().await?;
+    let r = sam.get(&format!("/api/jobs?ids={job}")).await?;
+    assert_eq!(r.json["jobs"][0][field], Value::Null, "{:?}", r.json);
+    let id = b.open_for(b.env.user("sam"), &mut sam, json!([scope])).await?;
+    let before = record_uses(&b, id).await?;
+    let r = sam.get(&format!("/api/jobs?ids={job}")).await?;
+    let after = record_uses(&b, id).await?;
+    assert_ne!(r.json["jobs"][0][field], Value::Null, "{:?}", r.json);
+    assert_eq!(
+        after,
+        (before.0 + 1, before.1 + 1),
+        "{kind}: the read through the request records no use"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_wearable_job_read_through_break_glass_records_a_use() -> R {
+    job_read_through_break_glass("import.fit", "read:wearables", "result").await
+}
+
+#[tokio::test]
+async fn a_dicom_job_read_through_break_glass_records_a_use() -> R {
+    job_read_through_break_glass("import.dicom", "read:records", "filename").await
+}

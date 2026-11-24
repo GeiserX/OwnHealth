@@ -278,6 +278,14 @@ async fn jobs(State(rt): State<Runtime>, caller: Caller, Query(q): Query<Params>
         // a CD's name and what its import found are the study's: read:records only, like the study
         let dicom = j["kind"].as_str() == Some(ownhealth_imaging::import::JOB);
         let may_read = j["profile_id"].as_str().is_some_and(|p| records.iter().any(|r| r == p));
+        if dicom
+            && may_read
+            && let Some(i) = j["profile_id"]
+                .as_str()
+                .and_then(|id| pids.iter().position(|pid| pid == id))
+        {
+            perms[i].record_read(&["read:records"]);
+        }
         if dicom && !may_read {
             j["result"] = Value::Null;
             j["filename"] = Value::Null;
