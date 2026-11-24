@@ -174,7 +174,9 @@ pub async fn insert(
     };
     // `inserted`: the row was not there before this statement (its snapshot does not see the rows the
     // statement itself writes). Not `xmax = 0`: a partitioned wearable_sample (ownhealth-ops
-    // partition.rs) cannot return a system column.
+    // partition.rs) cannot return a system column. One race differs from `xmax = 0`: a row another
+    // transaction committed after this statement's snapshot, which ON CONFLICT DO UPDATE then updates,
+    // counts as new instead of refreshed. Only the Written counts move; the rows are the same.
     let sql = format!(
         "insert into wearable_sample (profile_id, metric, t, t_end, v, tz_offset_min, source_id, document_id) \
          select $1, x.m, x.t, x.te, x.v, x.tz, x.s, $2 from unnest(cast($3 as text[]), cast($4 as timestamptz[]), \
