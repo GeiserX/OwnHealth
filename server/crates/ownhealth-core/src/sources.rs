@@ -294,6 +294,11 @@ pub struct RunOutcome {
     pub cursor: Option<Value>,
     /// Items left out on purpose, counted by name (a metric OwnHealth does not chart yet).
     pub skipped: std::collections::BTreeMap<String, i64>,
+    /// The error that stopped a run after it found `problems`: the run is an `error` with this as its
+    /// error, and its record keeps the problems (an Open Wearables poll whose active vendors all
+    /// failed still names the vendors whose connection ended).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, sqlx::FromRow)]
@@ -347,6 +352,11 @@ pub async fn finish_run(
     };
     let all_failed = |o: &RunOutcome| o.seen > 0 && o.new + o.duplicate + o.quarantined == 0;
     let (status, outcome, error) = match result {
+        Ok(o) if o.error.is_some() => (
+            "error",
+            Some(o),
+            o.error.as_deref().map(|e| e.chars().take(500).collect::<String>()),
+        ),
         Ok(o) if o.problems.is_empty() => ("ok", Some(o), None),
         Ok(o) if all_failed(o) => ("error", Some(o), first_problem(o)),
         Ok(o) => ("partial", Some(o), None),
@@ -556,8 +566,10 @@ async fn poll_job(ctx: JobContext, job: Job) -> jobs::HandlerResult {
         Err(e) => finish_run(&mut conn, run_id, Err(&e.text())).await?,
     }
     Ok(Some(match result {
-        Ok(o) => json!({"run_id": run_id, "status": "ok", "new": o.new, "duplicate": o.duplicate,
-                        "quarantined": o.quarantined, "problems": o.problems.len()}),
+        Ok(o) => {
+            json!({"run_id": run_id, "status": if o.error.is_some() { "error" } else { "ok" }, "new": o.new, "duplicate": o.duplicate,
+                        "quarantined": o.quarantined, "problems": o.problems.len()})
+        }
         Err(_) => json!({"run_id": run_id, "status": "error"}),
     }))
 }

@@ -36,3 +36,4 @@ ownhealth-auth.workspace = true
 ownhealth-core = { workspace = true, features = ["testing"] }
 ownhealth-normalize.workspace = true
 axum.workspace = true
+jsonschema.workspace = true

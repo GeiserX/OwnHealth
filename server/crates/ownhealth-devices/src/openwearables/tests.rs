@@ -55,6 +55,10 @@ struct Fake {
     ignore_filter_for: Option<String>,
     /// Time-series requests that start at or after this instant answer 503.
     fail_from: Option<DateTime<Utc>>,
+    /// Time-series requests that start before this instant answer 503.
+    fail_before: Option<DateTime<Utc>>,
+    /// A route ("login" or "user") that answers 200 with an empty object.
+    malformed: Option<&'static str>,
     /// The time series sends one cursor again and again.
     repeat_cursor: bool,
     /// Time-series requests for this provider answer 200 with a body that is not a page.
@@ -94,6 +98,9 @@ async fn auth(State(s): State<Shared>, req: Request, next: Next) -> Response {
 
 async fn login(State(s): State<Shared>, Form(form): Form<HashMap<String, String>>) -> Response {
     let s = s.lock().expect("fake state");
+    if s.malformed == Some("login") {
+        return Json(json!({})).into_response();
+    }
     if form
         .get("username")
         .is_some_and(|name| name == "operator@example.invalid")
@@ -130,7 +137,10 @@ async fn disable(State(s): State<Shared>, Path(p): Path<String>, h: HeaderMap, J
     Json(provider(&p, still_on)).into_response()
 }
 
-async fn user(Path(id): Path<Uuid>) -> Json<Value> {
+async fn user(State(s): State<Shared>, Path(id): Path<Uuid>) -> Json<Value> {
+    if s.lock().expect("fake state").malformed == Some("user") {
+        return Json(json!({}));
+    }
     Json(json!({"id": id, "created_at": Utc::now()}))
 }
 
@@ -142,7 +152,7 @@ async fn remove(State(s): State<Shared>, Path(id): Path<Uuid>) -> Response {
             return code.into_response();
         }
     }
-    user(Path(id)).await.into_response()
+    user(State(s), Path(id)).await.into_response()
 }
 
 async fn connections(State(s): State<Shared>, Path(user): Path<Uuid>) -> Json<Vec<Value>> {
@@ -206,9 +216,8 @@ fn serve(all: &[Value], q: &[(String, String)], ignore: Option<&str>, at: &str, 
 async fn series(State(s): State<Shared>, Query(q): Query<Vec<(String, String)>>) -> Response {
     let mut s = s.lock().expect("fake state");
     s.asked.push(("timeseries".into(), q.clone()));
-    if s.fail_from
-        .is_some_and(|from| instant(one(&q, "start_time").expect("start")) >= from)
-    {
+    let start = instant(one(&q, "start_time").expect("start"));
+    if s.fail_from.is_some_and(|from| start >= from) || s.fail_before.is_some_and(|before| start < before) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     if s.broken_for.as_deref().is_some_and(|p| one(&q, "provider") == Some(p)) {
@@ -240,6 +249,40 @@ fn sample(resolution: &str, provider: &str, series: &str, value: f64, unit: &str
     json!({"resolution": resolution, "timestamp": t.with_timezone(&FixedOffset::west_opt(210 * 60).expect("offset")),
         "zone_offset": "-03:30", "type": series, "value": value, "unit": unit, "source": {"provider": provider},
         "computed_by": if resolution == "1day" { Some("provider") } else { None }})
+}
+
+/// A health score as Open Wearables 0.11 sends it: its own UUID, and no data source.
+fn score(mut fields: Value) -> Value {
+    fields["id"] = json!(Uuid::new_v4());
+    fields["data_source_id"] = Value::Null;
+    fields
+}
+
+/// The health scores the fake holds: Oura's recovery, which lands, and three that are dropped.
+fn fake_scores(t: DateTime<Utc>) -> Vec<Value> {
+    vec![
+        score(json!({"category": "recovery", "recorded_at": t, "provider": "oura",
+             "value": 81, "qualifier": "Good", "components": {"rest": {"value": 20, "unit": "score"}}})),
+        score(json!({"category": "body_battery", "recorded_at": t, "provider": "garmin", "value": 64})),
+        // the provider Open Wearables gives its own scores
+        score(json!({"category": "sleep", "recorded_at": t, "provider": "internal", "value": 72})),
+        score(json!({"category": "sleep", "recorded_at": t, "provider": "oura",
+             "source": {"provider": "polar", "device_name": null}, "value": 70})),
+    ]
+}
+
+/// A validator for one schema of the recorded OpenAPI document.
+fn schema(name: &str) -> anyhow::Result<jsonschema::Validator> {
+    let mut doc: Value = serde_json::from_str(SPEC)?;
+    doc["$ref"] = json!(format!("#/components/schemas/{name}"));
+    Ok(jsonschema::draft202012::options()
+        .should_validate_formats(true)
+        .build(&doc)?)
+}
+
+/// The users whose deletion the scheduler retries.
+async fn pending(pool: &PgPool) -> anyhow::Result<Vec<Uuid>> {
+    Ok(tombstones(pool).await?.into_iter().map(|(user, _)| user).collect())
 }
 
 struct Env {
@@ -287,16 +330,11 @@ impl Env {
                 hrv,
                 ow_steps,
             ],
-            scores: vec![
-                json!({"id": "recovery", "category": "recovery", "recorded_at": t, "provider": "oura",
-                     "value": 81, "qualifier": "Good", "components": {"rest": {"value": 20, "unit": "score"}}}),
-                json!({"id": "garmin", "category": "body_battery", "recorded_at": t, "provider": "garmin", "value": 64}),
-                json!({"id": "internal", "category": "sleep", "recorded_at": t, "provider": "internal", "value": 72}),
-                json!({"id": "relabelled", "category": "sleep", "recorded_at": t, "provider": "oura",
-                     "source": {"provider": "polar"}, "value": 70}),
-            ],
+            scores: fake_scores(t),
             ignore_filter_for: None,
             fail_from: None,
+            fail_before: None,
+            malformed: None,
             repeat_cursor: false,
             broken_for: None,
             hooks: HashMap::new(),
@@ -862,7 +900,11 @@ async fn a_key_rotation_while_a_day_is_read_writes_nothing() -> anyhow::Result<(
             ),
         ),
     );
-    poll(&env.ctx, &env.base, id).await?;
+    // The poll of the old key does not count as a sync: no last success, no cursor.
+    let err = poll(&env.ctx, &env.base, id)
+        .await
+        .expect_err("the binding changed while the day was read");
+    assert!(err.text().starts_with("ow_binding_changed: "), "{}", err.text());
     assert_eq!(env.fake().hooked, [("scores", true)]);
     for table in ["wearable_sample", "vendor_score", "source_item"] {
         assert_eq!(
@@ -887,7 +929,7 @@ async fn a_deleted_profiles_user_is_removed_by_the_reconcile_job_even_when_an_an
     let mut tx = env.ctx.pool.begin().await?;
     ownhealth_auth::household::delete_profile(&mut tx, env.profile).await?;
     tx.commit().await?;
-    assert_eq!(tombstones(&env.ctx.pool).await?, [env.user]);
+    assert_eq!(pending(&env.ctx.pool).await?, [env.user]);
     schedule_reconcile(&env.ctx).await?;
     assert_eq!(env.count(queued).await?, 1);
     let job = jobs::claim(&env.ctx.pool, "core", "test", Some(&[RECONCILE.to_string()][..]))
@@ -896,14 +938,14 @@ async fn a_deleted_profiles_user_is_removed_by_the_reconcile_job_even_when_an_an
 
     env.fake().delete_status = Some(StatusCode::SERVICE_UNAVAILABLE);
     assert!(reconcile_job(&env.ctx, &env.base, &job).await.is_err());
-    assert_eq!(tombstones(&env.ctx.pool).await?, [env.user]);
+    assert_eq!(pending(&env.ctx.pool).await?, [env.user]);
     // The sidecar deleted the user, but the answer was lost: the retry reads 404.
     env.fake().delete_status = Some(StatusCode::NOT_FOUND);
     assert_eq!(
         reconcile_job(&env.ctx, &env.base, &job).await?,
         Some(json!({"deleted": true}))
     );
-    assert!(tombstones(&env.ctx.pool).await?.is_empty());
+    assert!(pending(&env.ctx.pool).await?.is_empty());
     assert_eq!(
         reconcile_job(&env.ctx, &env.base, &job).await?,
         Some(json!({"deleted": false}))
@@ -914,4 +956,253 @@ async fn a_deleted_profiles_user_is_removed_by_the_reconcile_job_even_when_an_an
         .await?;
     assert_eq!(left, 0);
     Ok(())
+}
+
+#[test]
+fn the_fake_health_scores_match_the_recorded_schema() -> anyhow::Result<()> {
+    let validator = schema("HealthScoreResponse")?;
+    for row in fake_scores(Utc::now()) {
+        let errors: Vec<String> = validator.iter_errors(&row).map(|e| e.to_string()).collect();
+        assert!(errors.is_empty(), "{row}: {errors:?}");
+    }
+    // The check can fail: an id that is not a UUID, or no data_source_id, breaks the schema.
+    let mut named = fake_scores(Utc::now()).swap_remove(0);
+    named["id"] = json!("recovery");
+    assert!(!validator.is_valid(&named));
+    let sourceless: serde_json::Map<String, Value> = fake_scores(Utc::now())
+        .swap_remove(0)
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(field, _)| *field != "data_source_id")
+        .map(|(field, v)| (field.clone(), v.clone()))
+        .collect();
+    assert!(!validator.is_valid(&Value::Object(sourceless)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn setup_names_the_step_whose_answer_does_not_read() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    env.fake().malformed = Some("user");
+    let err = env.setup().await.expect_err("the user answer has no id");
+    assert!(err.to_string().contains("User check with the API key"), "{err}");
+    env.fake().malformed = Some("login");
+    let err = env.setup().await.expect_err("the sign-in answer has no token");
+    assert!(err.to_string().contains("Developer sign-in"), "{err}");
+    assert!(err.to_string().starts_with("ow_response: "), "{err}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_corrected_zone_offset_replaces_the_stored_one() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    let t = env.fake().t;
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["polar", "active"]]);
+        fake.rows = vec![sample("raw", "polar", "heart_rate", 61., "bpm", t)];
+        fake.scores.clear();
+    }
+    poll(&env.ctx, &env.base, id).await?;
+    let tz = "select tz_offset_min::int8 from wearable_sample where profile_id = $1 and metric = 'hr'";
+    assert_eq!(env.count(tz).await?, -210);
+    // Polar corrects the zone only: the same instant and the same value.
+    env.fake().rows[0]["zone_offset"] = json!("+01:00");
+    poll(&env.ctx, &env.base, id).await?;
+    assert_eq!(env.count(tz).await?, 60);
+    let rows = "select count(*) from wearable_sample where profile_id = $1";
+    assert_eq!(env.count(rows).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_overlap_that_keeps_failing_holds_no_newer_day_back() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    let t = env.fake().t;
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["polar", "active"]]);
+        fake.rows = vec![sample("raw", "polar", "heart_rate", 61., "bpm", t)];
+        fake.scores.clear();
+    }
+    poll(&env.ctx, &env.base, id).await?;
+    let mark = env.mark(id, "polar").await?.expect("Polar's cursor");
+    // From now on every re-read of the days before the mark fails, while a newer day reads.
+    {
+        let mut fake = env.fake();
+        fake.fail_before = Some(mark);
+        fake.rows
+            .push(sample("raw", "polar", "heart_rate", 62., "bpm", Utc::now()));
+    }
+    let out = poll(&env.ctx, &env.base, id).await?;
+    assert_eq!(
+        out.problems,
+        [RunProblem {
+            code: VENDOR_FAILED.into(),
+            message: "polar: ow_http: Open Wearables HTTP 503".into()
+        }]
+    );
+    let hr = "select count(*) from wearable_sample where profile_id = $1 and metric = 'hr'";
+    assert_eq!(env.count(hr).await?, 2, "the newer day is stored");
+    let moved = env.mark(id, "polar").await?.expect("Polar's cursor");
+    assert!(moved > mark, "{moved} after {mark}");
+    // The next poll tries the failed days again: its window still starts seven days before the mark.
+    let asked = env.fake().asked.len();
+    poll(&env.ctx, &env.base, id).await?;
+    assert_eq!(
+        env.first_start(asked, "polar"),
+        Some(moved - Duration::days(OVERLAP_DAYS))
+    );
+    Ok(())
+}
+
+/// Run `poll` between `begin_run` and `finish_run`, as the source.poll job does, and read the run
+/// back: its status, its problems and its error.
+async fn recorded(env: &Env, id: Uuid) -> anyhow::Result<(String, Value, Option<String>)> {
+    let run = sources::begin_run(&mut *env.ctx.pool.acquire().await?, id, "poll", None).await?;
+    let result = poll(&env.ctx, &env.base, id).await;
+    let mut conn = env.ctx.pool.acquire().await?;
+    match &result {
+        Ok(o) => sources::finish_run(&mut conn, run, Ok(o)).await?,
+        Err(e) => sources::finish_run(&mut conn, run, Err(&e.text())).await?,
+    }
+    Ok(
+        sqlx::query_as("select status, errors, error from source_run where id = $1")
+            .bind(run)
+            .fetch_one(&mut *conn)
+            .await?,
+    )
+}
+
+#[tokio::test]
+async fn an_ended_vendor_stays_on_the_run_record_when_every_active_vendor_fails() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["oura", "revoked"], ["polar", "active"]]);
+        fake.fail_from = Some(Utc::now() - Duration::days(BACKFILL_DAYS + 1));
+    }
+    let (status, errors, error) = recorded(&env, id).await?;
+    assert_eq!(status, "error");
+    assert_eq!(
+        errors[0],
+        json!({"code": CONNECTION_ENDED, "message": "oura"}),
+        "{errors}"
+    );
+    assert_eq!(error.as_deref(), Some("ow_http: Open Wearables HTTP 503"));
+    let household: Uuid = sqlx::query_scalar("select household_id from source where id = $1")
+        .bind(id)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    let health = sources::source_health(&mut *env.ctx.pool.acquire().await?, household).await?;
+    let row = health.iter().find(|h| h.id == id).expect("the source's health row");
+    assert_eq!(row.last_run_problem.as_deref(), Some("ow_connection_ended: oura"));
+    assert_eq!(row.last_run_status.as_deref(), Some("error"));
+    assert_eq!((row.last_success_at, row.consecutive_failures), (None, 1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cleanup_the_sidecar_refuses_stops_retrying_until_the_operator_ends_it() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    env.seed_source().await?;
+    let mut tx = env.ctx.pool.begin().await?;
+    ownhealth_auth::household::delete_profile(&mut tx, env.profile).await?;
+    tx.commit().await?;
+    schedule_reconcile(&env.ctx).await?;
+    let job = jobs::claim(&env.ctx.pool, "core", "test", Some(&[RECONCILE.to_string()][..]))
+        .await?
+        .expect("the queued reconcile job");
+
+    // The stored key was revoked in Open Wearables: the sidecar answers 401 to it, every time.
+    let working = token_hex(20);
+    env.fake().key = working.clone();
+    let err = reconcile_job(&env.ctx, &env.base, &job)
+        .await
+        .expect_err("the sidecar refused the key");
+    assert!(err.permanent, "a retry with the same key cannot help: {}", err.text());
+    let text = err.text();
+    assert!(
+        text.contains(&env.user.to_string()) && text.contains("openwearables-delete"),
+        "{text}"
+    );
+    // The scheduler queues no cleanup for it again, and the dead job's problem reaches the household.
+    assert!(pending(&env.ctx.pool).await?.is_empty());
+    schedule_reconcile(&env.ctx).await?;
+    let queued =
+        "select count(*) from job where kind = 'openwearables.reconcile' and state = 'queued' and $1::uuid is not null";
+    assert_eq!(env.count(queued).await?, 0);
+    let household: Uuid = sqlx::query_scalar("select household_id from secret where purpose = $1")
+        .bind(PURPOSE)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert_eq!(job.payload["household_id"], json!(household));
+    // Linking the user again names the command too.
+    let password = env.fake().password.clone();
+    let err = env
+        .setup_as(env.other_profile, &password, &working)
+        .await
+        .expect_err("the user waits for the operator");
+    assert!(err.text().contains("openwearables-delete"), "{}", err.text());
+
+    // The operator runs the command with a key the sidecar takes: the user is deleted, nothing is left.
+    delete_with_key(&env.ctx, &env.base, env.user, &SecretString::new(&working)).await?;
+    // The refused request never reached the handler; this one did.
+    assert_eq!(env.fake().deleted, [env.user]);
+    let left: i64 = sqlx::query_scalar(
+        "select (select count(*) from openwearables_user) + (select count(*) from secret where purpose = $1)",
+    )
+    .bind(PURPOSE)
+    .fetch_one(&env.ctx.pool)
+    .await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_operator_retires_a_link_the_new_sidecar_does_not_know() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    poll(&env.ctx, &env.base, id).await?;
+    let stored = "select count(*) from wearable_sample where profile_id = $1";
+    let samples = env.count(stored).await?;
+    // Open Wearables was set up again (a restore onto new volumes): a new key, and no old user.
+    let working = token_hex(20);
+    {
+        let mut fake = env.fake();
+        fake.key = working.clone();
+        fake.delete_status = Some(StatusCode::NOT_FOUND);
+    }
+    delete_with_key(&env.ctx, &env.base, env.user, &SecretString::new(&working)).await?;
+    let sources = "select count(*) from source where profile_id = $1 and kind = 'openwearables'";
+    assert_eq!(env.count(sources).await?, 0);
+    assert!(pending(&env.ctx.pool).await?.is_empty());
+    let links: i64 = sqlx::query_scalar("select count(*) from openwearables_user")
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert_eq!(links, 0);
+    // The readings it brought stay with the profile.
+    assert_eq!(env.count(stored).await?, samples);
+    let err = delete_with_key(&env.ctx, &env.base, env.user, &SecretString::new(&working))
+        .await
+        .expect_err("nothing left to delete");
+    assert!(err.text().contains("knows no Open Wearables user"), "{}", err.text());
+    Ok(())
+}
+
+#[test]
+fn a_base_address_that_is_not_an_http_origin_is_an_error() {
+    let base = Url::parse("mailto:operator@example.invalid").expect("a URL");
+    let err = endpoint(&base, &["users"], &[]).expect_err("no path to extend");
+    assert!(err.text().contains("not an HTTP origin"), "{}", err.text());
+    assert_eq!(
+        endpoint(&Url::parse("http://ow-app:8000").expect("a URL"), &["users", "u"], &[])
+            .expect("an endpoint")
+            .as_str(),
+        "http://ow-app:8000/api/v1/users/u"
+    );
 }

@@ -7,7 +7,8 @@
 //! keeps what already arrived, and a vendor whose connection ended or whose answers do not read never
 //! holds the others back; a row that does not read is counted and left out. A poll reads the 7 days
 //! before a vendor's cursor again, for late uploads, but its bundle keeps only the rows this source
-//! never brought: `source_item` knows each row by its content.
+//! never brought: `source_item` knows each row by its content. A re-read of those days that fails is
+//! named and skipped, so it never holds the vendor's newer days back; the next poll tries it again.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -50,7 +51,8 @@ const API_KEY: &str = "x-open-wearables-api-key";
 /// Wearables. Its message names the vendors, and the Connections screen reads it.
 pub const CONNECTION_ENDED: &str = "ow_connection_ended";
 /// The problem a poll records for a vendor whose reads failed: `<vendor>: <error>`. The other vendors
-/// go on; the failed vendor keeps its cursor and is read from there on the next poll.
+/// go on; the failed vendor keeps its cursor and is read from there on the next poll. A failed re-read
+/// of the days before the cursor is recorded the same way, and the vendor goes on after its cursor.
 pub const VENDOR_FAILED: &str = "ow_vendor_failed";
 
 /// The vendors OwnHealth takes through Open Wearables. Each one also needs `ingest: allow` in
@@ -80,8 +82,18 @@ const SCORE_SERIES: [&str; 1] = ["workout_effort_score"];
 
 type Result<T> = std::result::Result<T, JobError>;
 
-fn internal() -> Url {
-    Url::parse(INTERNAL).expect("fixed Compose URL")
+fn not_http(base: &Url) -> JobError {
+    JobError::permanent(format!(
+        "Open Wearables address {base} is not an HTTP origin. / La dirección de Open Wearables {base} no es un origen HTTP."
+    ))
+}
+
+fn internal() -> Result<Url> {
+    Url::parse(INTERNAL).map_err(|_| {
+        JobError::permanent(format!(
+            "Invalid Open Wearables address {INTERNAL}. / Dirección de Open Wearables no válida: {INTERNAL}."
+        ))
+    })
 }
 
 fn allowed(provider: &str) -> bool {
@@ -97,17 +109,17 @@ fn series_types() -> Vec<&'static str> {
     types
 }
 
-fn endpoint(base: &Url, path: &[&str], query: &[(&str, String)]) -> Url {
+fn endpoint(base: &Url, path: &[&str], query: &[(&str, String)]) -> Result<Url> {
     let mut url = base.clone();
     url.path_segments_mut()
-        .expect("HTTP origin")
+        .map_err(|()| not_http(base))?
         .clear()
         .extend(["api", "v1"])
         .extend(path.iter().copied());
     if !query.is_empty() {
         url.query_pairs_mut().extend_pairs(query);
     }
-    url
+    Ok(url)
 }
 
 fn egress() -> Egress {
@@ -177,7 +189,8 @@ struct User {
 }
 
 async fn enforce_provider_settings(base: &Url, email: &str, password: &SecretString) -> Result<()> {
-    let login = endpoint(base, &["auth", "login"], &[]);
+    let login = endpoint(base, &["auth", "login"], &[])?;
+    let sign_in = "Developer sign-in with the email and password / Inicio de sesión de desarrollador con el correo y la contraseña";
     let response = net::post_form(
         login.as_str(),
         &egress(),
@@ -187,17 +200,14 @@ async fn enforce_provider_settings(base: &Url, email: &str, password: &SecretStr
     .await
     .map_err(network)
     .and_then(status)
-    .map_err(during(
-        "Developer sign-in with the email and password / Inicio de sesión de desarrollador con el correo y la contraseña",
-    ))?;
-    let login: Login = parse(&response.body)?;
+    .map_err(during(sign_in))?;
+    let login: Login = parse(&response.body).map_err(during(sign_in))?;
     let auth = SecretString::new(format!("Bearer {}", login.access_token));
 
-    let listed = endpoint(base, &["oauth", "providers"], &[]);
-    let listed = get(&listed, None)
-        .await
-        .map_err(during("Provider list / Lista de proveedores"))?;
-    for provider in parse::<Vec<Provider>>(&listed.body)? {
+    let provider_list = "Provider list / Lista de proveedores";
+    let listed = endpoint(base, &["oauth", "providers"], &[])?;
+    let listed = get(&listed, None).await.map_err(during(provider_list))?;
+    for provider in parse::<Vec<Provider>>(&listed.body).map_err(during(provider_list))? {
         if allowed(&provider.provider) {
             continue;
         }
@@ -212,7 +222,7 @@ async fn enforce_provider_settings(base: &Url, email: &str, password: &SecretStr
                 "Open Wearables returned an invalid provider id. / Open Wearables devolvió un id de proveedor no válido.",
             ));
         }
-        let url = endpoint(base, &["oauth", "providers", &provider.provider], &[]);
+        let url = endpoint(base, &["oauth", "providers", &provider.provider], &[])?;
         let step = format!("Switching off {0} / Desactivación de {0}", provider.provider);
         let response = net::put_json(
             url.as_str(),
@@ -224,7 +234,7 @@ async fn enforce_provider_settings(base: &Url, email: &str, password: &SecretStr
         .map_err(network)
         .and_then(status)
         .map_err(during(&step))?;
-        let confirmed: Provider = parse(&response.body)?;
+        let confirmed: Provider = parse(&response.body).map_err(during(&step))?;
         if confirmed.provider != provider.provider || confirmed.is_enabled {
             return Err(JobError::permanent(format!(
                 "Open Wearables did not switch off {0}. / Open Wearables no desactivó {0}.",
@@ -265,7 +275,7 @@ pub async fn connect(
     password: &SecretString,
     key: &SecretString,
 ) -> Result<Uuid> {
-    setup(ctx, &internal(), profile, user, email, password, key).await
+    setup(ctx, &internal()?, profile, user, email, password, key).await
 }
 
 /// The profile's household, and the source and secret of the user's current binding, if any. Refuses a
@@ -285,18 +295,22 @@ async fn check_binding(
     .fetch_optional(&mut *conn)
     .await?
     .ok_or_else(|| JobError::permanent("Unknown OwnHealth profile. / Perfil de OwnHealth desconocido."))?;
-    let binding: Option<(Uuid, Option<Uuid>)> =
-        sqlx::query_as("select secret_id, source_id from openwearables_user where user_id = $1")
-            .bind(user)
-            .fetch_optional(&mut *conn)
-            .await?;
-    let Some((secret, source)) = binding else {
+    let binding: Option<(Uuid, Option<Uuid>, bool)> = sqlx::query_as(
+        "select secret_id, source_id, delete_refused_at is not null from openwearables_user where user_id = $1",
+    )
+    .bind(user)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((secret, source, refused)) = binding else {
         return Ok((household, None));
     };
     let source = source.ok_or_else(|| {
-        JobError::permanent(
-            "This Open Wearables user waits for deletion. / Este usuario de Open Wearables está pendiente de borrado.",
-        )
+        JobError::permanent(if refused {
+            refused_text(user)
+        } else {
+            "This Open Wearables user waits for deletion. / Este usuario de Open Wearables está pendiente de borrado."
+                .into()
+        })
     })?;
     let found: Option<Uuid> = sqlx::query_scalar(if lock {
         "select profile_id from source where id = $1 and kind = 'openwearables' for update"
@@ -327,9 +341,10 @@ async fn setup(
     // Refuse what no request can change before talking to the sidecar, then make the requests with
     // no lock held: a profile delete never waits behind them. The checks run again under the locks.
     check_binding(&mut *ctx.pool.acquire().await?, profile, user, false).await?;
-    let url = endpoint(base, &["users", &user.to_string()], &[]);
+    let url = endpoint(base, &["users", &user.to_string()], &[])?;
     let user_check = "User check with the API key / Comprobación del usuario con la clave de API";
-    let confirmed: User = parse(&get(&url, Some(key)).await.map_err(during(user_check))?.body)?;
+    let answer = get(&url, Some(key)).await.map_err(during(user_check))?;
+    let confirmed: User = parse(&answer.body).map_err(during(user_check))?;
     if confirmed.id != user {
         return Err(JobError::permanent(
             "Open Wearables returned a different user. / Open Wearables devolvió otro usuario.",
@@ -496,7 +511,7 @@ struct Pull<'a> {
 
 impl Pull<'_> {
     async fn read<T: DeserializeOwned>(&mut self, part: &str, query: &[(&str, String)]) -> Result<T> {
-        let url = endpoint(self.base, &["users", &self.user, part], query);
+        let url = endpoint(self.base, &["users", &self.user, part], query)?;
         let response = get(&url, Some(self.key)).await?;
         self.remaining = self.remaining.checked_sub(response.body.len()).ok_or_else(|| {
             JobError::permanent("too_large: Open Wearables answers for one day passed the size limit")
@@ -679,9 +694,12 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     let mut cursor = binding.cursor.clone();
     // A vendor whose reads fail stops at its last stored day; the vendors after it are still read.
     let mut failed = Vec::new();
+    // A failed re-read of days a vendor already stored: named, and the vendor goes on after its cursor.
+    let mut skipped = Vec::new();
     'vendors: for provider in &active {
-        let mut from = mark(cursor.as_ref(), provider).map_or(now - Duration::days(BACKFILL_DAYS), |t| {
-            t.min(now) - Duration::days(OVERLAP_DAYS)
+        let stored_until = mark(cursor.as_ref(), provider).map(|t| t.min(now));
+        let mut from = stored_until.map_or(now - Duration::days(BACKFILL_DAYS), |t| {
+            t - Duration::days(OVERLAP_DAYS)
         });
         for _ in 0..MAX_DAYS_PER_POLL {
             if from >= now {
@@ -700,14 +718,25 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
             let bundle = match pull.bundle(&mut out).await {
                 Ok(bundle) => bundle,
                 Err(err) => {
+                    // Days the vendor already stored: go on after them. The next poll's window starts
+                    // at the same place, so it tries these days again.
+                    if let Some(until) = stored_until.filter(|until| to <= *until) {
+                        skipped.push((provider.as_str(), err));
+                        from = until;
+                        continue;
+                    }
                     failed.push((provider.as_str(), err));
                     continue 'vendors;
                 }
             };
             let Some(next) = store_day(ctx, source, &binding, cursor.as_ref(), provider, to, bundle, &mut out).await?
             else {
-                // The binding changed while the day was read (rotated, deleted, switched off).
-                return Ok(out);
+                // The binding changed while the day was read (rotated, deleted, switched off). This run
+                // read with the old one, so it must not count as a sync of the new one.
+                return Err(JobError::typed(
+                    "ow_binding_changed",
+                    "The Open Wearables link changed while this poll ran; the next poll uses the new one. / El vínculo con Open Wearables cambió durante esta sincronización; la siguiente usa el nuevo.",
+                ));
             };
             cursor = Some(next);
             from = to;
@@ -722,24 +751,32 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     .bind(!ended.is_empty())
     .execute(&ctx.pool)
     .await?;
-    // When every vendor failed, the run failed: nothing of this poll is new, and the job says why.
-    if !failed.is_empty() && failed.len() == active.len() {
-        let (_, err) = failed.swap_remove(0);
-        return Err(err);
-    }
+    let any_ended = !ended.is_empty();
     // The ended vendors come first: the Connections screen reads the first problem.
-    if !ended.is_empty() {
+    if any_ended {
         out.problems.push(RunProblem {
             code: CONNECTION_ENDED.into(),
             message: ended.into_iter().collect::<Vec<_>>().join(", "),
         });
     }
+    // When every vendor failed, the run failed: nothing of this poll is new, and the job says why.
+    let first_error = (!failed.is_empty() && failed.len() == active.len()).then(|| failed[0].1.clone());
+    // A vendor that then failed after its cursor too is named once, for the error that stopped it.
+    skipped.retain(|(provider, _)| !failed.iter().any(|(stopped, _)| stopped == provider));
     out.problems
-        .extend(failed.into_iter().map(|(provider, err)| RunProblem {
+        .extend(skipped.into_iter().chain(failed).map(|(provider, err)| RunProblem {
             code: VENDOR_FAILED.into(),
             message: format!("{provider}: {}", err.text()),
         }));
-    Ok(out)
+    match first_error {
+        // The run record keeps the ended vendors ahead of the error, so the screen still names them.
+        Some(err) if any_ended => {
+            out.error = Some(err.text());
+            Ok(out)
+        }
+        Some(err) => Err(err),
+        None => Ok(out),
+    }
 }
 
 /// Store one vendor's day and move its cursor to `to`, in one transaction. None when the binding
@@ -1048,12 +1085,22 @@ async fn write(
     Ok(())
 }
 
-async fn tombstones(pool: &PgPool) -> Result<Vec<Uuid>> {
-    Ok(
-        sqlx::query_scalar("select user_id from openwearables_user where source_id is null order by user_id")
-            .fetch_all(pool)
-            .await?,
+/// The text of a cleanup the sidecar refused: which user, and what the operator runs.
+fn refused_text(user: Uuid) -> String {
+    format!(
+        "Open Wearables refused to delete user {user} with the stored API key. Run `ownhealth openwearables-delete --user {user}` with a key that works (deploy/README.md, Wearables). / Open Wearables rechazó borrar el usuario {user} con la clave de API guardada. Ejecuta `ownhealth openwearables-delete --user {user}` con una clave que funcione (deploy/README.md, Wearables)."
     )
+}
+
+/// The sidecar users whose profile or source is gone and whose deletion the scheduler retries, with
+/// the household their key belongs to. A user whose deletion the sidecar refused waits for the operator.
+async fn tombstones(pool: &PgPool) -> ownhealth_core::Result<Vec<(Uuid, Uuid)>> {
+    Ok(sqlx::query_as(
+        "select w.user_id, k.household_id from openwearables_user w join secret k on k.id = w.secret_id
+         where w.source_id is null and w.delete_refused_at is null order by w.user_id",
+    )
+    .fetch_all(pool)
+    .await?)
 }
 
 async fn delete_user(ctx: &JobContext, base: &Url, user: Uuid) -> Result<bool> {
@@ -1071,10 +1118,20 @@ async fn delete_user(ctx: &JobContext, base: &Url, user: Uuid) -> Result<bool> {
     };
     let sb = SecretBox::from_settings(&ctx.settings)?;
     let key = read_secret(&mut tx, &sb, household, secret).await?;
-    let url = endpoint(base, &["users", &user.to_string()], &[]);
+    let url = endpoint(base, &["users", &user.to_string()], &[])?;
     let resp = net::delete(url.as_str(), &egress(), &[(API_KEY, key.expose())])
         .await
         .map_err(network)?;
+    // The sidecar no longer takes this key (revoked, or a new sidecar after a restore): a retry with
+    // it cannot help. The scheduler stops queueing the cleanup, and the dead job names the command.
+    if matches!(resp.status, 401 | 403) {
+        sqlx::query("update openwearables_user set delete_refused_at = now() where user_id = $1")
+            .bind(user)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Err(JobError::permanent(refused_text(user)));
+    }
     // The response could have been lost after the remote delete committed.
     if resp.status != 404 {
         status(resp)?;
@@ -1085,17 +1142,55 @@ async fn delete_user(ctx: &JobContext, base: &Url, user: Uuid) -> Result<bool> {
     Ok(true)
 }
 
+/// Delete an Open Wearables user from the operator CLI, with an API key the sidecar takes now. A user
+/// still linked to a profile loses its OwnHealth source first (the readings it brought stay). The key
+/// replaces the stored one, and a 404 counts as deleted. This ends a cleanup the sidecar refused, and
+/// retires a link that went stale when Open Wearables was set up again (after a restore).
+pub async fn delete(ctx: &JobContext, user: Uuid, key: &SecretString) -> Result<()> {
+    delete_with_key(ctx, &internal()?, user, key).await
+}
+
+async fn delete_with_key(ctx: &JobContext, base: &Url, user: Uuid, key: &SecretString) -> Result<()> {
+    let mut tx = ctx.pool.begin().await?;
+    lock_user(&mut tx, user).await?;
+    let found: Option<(Uuid, Option<Uuid>, Uuid)> = sqlx::query_as(
+        "select w.secret_id, w.source_id, k.household_id from openwearables_user w join secret k on k.id = w.secret_id
+         where w.user_id = $1",
+    )
+    .bind(user)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((old, source, household)) = found else {
+        return Err(JobError::permanent(format!(
+            "OwnHealth knows no Open Wearables user {user}. / OwnHealth no conoce ningún usuario {user} de Open Wearables."
+        )));
+    };
+    if let Some(source) = source {
+        sources::delete_source(&mut tx, source).await?;
+    }
+    let sb = SecretBox::from_settings(&ctx.settings)?;
+    let secret = store_secret(&mut tx, &sb, household, PURPOSE, None, key).await?;
+    sqlx::query("update openwearables_user set secret_id = $2, delete_refused_at = null where user_id = $1")
+        .bind(user)
+        .bind(secret)
+        .execute(&mut *tx)
+        .await?;
+    ownhealth_core::secrets::delete_secret(&mut tx, household, old).await?;
+    tx.commit().await?;
+    delete_user(ctx, base, user).await?;
+    Ok(())
+}
+
 async fn schedule_reconcile(ctx: &JobContext) -> ownhealth_core::Result<u64> {
-    let pending = tombstones(&ctx.pool)
-        .await
-        .map_err(|e| ownhealth_core::Error::Other(anyhow::anyhow!(e.text())))?;
+    let pending = tombstones(&ctx.pool).await?;
     let mut conn = ctx.pool.acquire().await?;
-    for user in pending {
+    for (user, household) in pending {
         let key = format!("{RECONCILE}:{user}");
+        // The household, so a cleanup that ends dead files its problem where the household sees it.
         jobs::enqueue(
             &mut conn,
             RECONCILE,
-            &json!({"user_id": user}),
+            &json!({"user_id": user, "household_id": household}),
             EnqueueOptions::dedupe(&key),
         )
         .await?;
@@ -1112,11 +1207,11 @@ async fn reconcile_job(ctx: &JobContext, base: &Url, job: &Job) -> Result<Option
 
 pub fn register() {
     sources::register_poller(KIND, |ctx, source| {
-        Box::pin(async move { poll(&ctx, &internal(), source.id).await })
+        Box::pin(async move { poll(&ctx, &internal()?, source.id).await })
     });
     sources::register_default_sources(KIND, |ctx| Box::pin(async move { schedule_reconcile(&ctx).await }));
     jobs::register_handler(RECONCILE, |ctx, job| {
-        Box::pin(async move { reconcile_job(&ctx, &internal(), &job).await })
+        Box::pin(async move { reconcile_job(&ctx, &internal()?, &job).await })
     });
 }
 

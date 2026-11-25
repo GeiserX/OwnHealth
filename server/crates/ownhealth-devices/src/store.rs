@@ -5,7 +5,8 @@
 //! sample that is already there:
 //! - `Keep`: the first file to bring a sample owns it (Gadgetbridge exports, Nightscout readings);
 //! - `Refresh`: a push may carry a newer value for the same bucket (Health Auto Export sums a minute or
-//!   an hour that was still open at the previous push), so the value is replaced when it differs;
+//!   an hour that was still open at the previous push), so the value, the end and the UTC offset are
+//!   replaced when one of them differs;
 //! - `Adopt`: the newest file owns the samples it holds (Gadgetbridge exports are cumulative, so each
 //!   holds the previous ones): a stored sample moves to the new document and takes its value, and
 //!   retracting an older export leaves what a newer one still holds.
@@ -164,7 +165,8 @@ pub async fn insert(
         Conflict::Refresh => {
             "on conflict (profile_id, metric, source_id, t) do update set v = excluded.v, t_end = excluded.t_end, \
              tz_offset_min = excluded.tz_offset_min where wearable_sample.v is distinct from excluded.v \
-             or wearable_sample.t_end is distinct from excluded.t_end"
+             or wearable_sample.t_end is distinct from excluded.t_end \
+             or wearable_sample.tz_offset_min is distinct from excluded.tz_offset_min"
         }
         Conflict::Adopt => {
             "on conflict (profile_id, metric, source_id, t) do update set document_id = excluded.document_id, \
