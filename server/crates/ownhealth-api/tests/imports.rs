@@ -271,6 +271,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
         "import.cgm_csv",
         "import.garmin_zip",
         "import.strava_zip",
+        "import.fitbit_takeout",
         "import.pdf",
     ] {
         let id: i64 = sqlx::query_scalar(
@@ -336,6 +337,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
         results(&v),
         [
             ("import.pdf".to_string(), result.clone()),
+            ("import.fitbit_takeout".to_string(), serde_json::Value::Null),
             ("import.strava_zip".to_string(), serde_json::Value::Null),
             ("import.garmin_zip".to_string(), serde_json::Value::Null),
             ("import.cgm_csv".to_string(), serde_json::Value::Null),
@@ -1589,6 +1591,10 @@ async fn a_moved_export_takes_its_readings_to_the_new_profile() -> R {
             "import.strava_zip",
             include_bytes!("../../../../fixtures/strava/lucia-history.zip").as_slice(),
         ),
+        (
+            "import.fitbit_takeout",
+            include_bytes!("../../../../fixtures/fitbit/legacy.zip").as_slice(),
+        ),
     ] {
         assert_export_moves(kind, bytes).await?;
     }
@@ -1659,6 +1665,11 @@ async fn export_retract_replay_and_move_wait_for_the_profile_export_lock() -> R 
             "import.strava_zip",
             "strava",
             include_bytes!("../../../../fixtures/strava/lucia-history.zip").as_slice(),
+        ),
+        (
+            "import.fitbit_takeout",
+            "fitbit_takeout",
+            include_bytes!("../../../../fixtures/fitbit/legacy.zip").as_slice(),
         ),
     ] {
         assert_export_operations_wait_for_the_lock(kind, flag, bytes).await?;
