@@ -149,7 +149,7 @@ You can stop the job at any time and run it again. It prints a JSON report and e
      docker compose run --rm -T admin ownhealth partition --drop-pushed-from YYYY-MM-DD
      ```
 
-     It deletes the samples that inboxes pushed without a file, dated on or after the start of that day in UTC, also those set aside. Then it rebuilds the rollups of those inboxes from the samples that stay. Files and devices with no inbox keep their samples. It prints what it removed. It refuses a date that is not ahead of now, because a correct clock has samples from today on.
+     It deletes the samples that inboxes pushed without a file, dated on or after the start of that day in UTC, also those set aside. Then it rebuilds the rollups of those inboxes from the samples that stay. Files and devices with no inbox keep their samples. It prints what it removed. It refuses a date that is not ahead of now, because a correct clock has samples from today on. Run it before you delete that inbox. Once the inbox is deleted, the command can no longer tell its samples from a device's, and leaves them.
   3. Run `ownhealth partition` again.
 
   While the report has a `cutoff`, imports of samples dated on or after it wait. They go on after step 3.
