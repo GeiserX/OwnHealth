@@ -674,15 +674,21 @@ impl<'a, 'i> Conv<'a, 'i> {
             for sec in std::iter::successors(Some(target), Node::parent_element)
                 .filter(|n| n.has_tag_name((xml::NS, "section")))
             {
-                let labels = self.source_labels.entry(sec.id()).or_insert_with(|| section_labels(sec));
+                let labels = self
+                    .source_labels
+                    .entry(sec.id())
+                    .or_insert_with(|| section_labels(sec));
                 if !labels.is_empty() {
                     add_labels(&mut self.narrative_labels, labels.iter().cloned());
                 }
             }
-            if let Some(entry) = std::iter::successors(Some(target), Node::parent_element)
-                .find(|n| n.has_tag_name((xml::NS, "entry")))
+            if let Some(entry) =
+                std::iter::successors(Some(target), Node::parent_element).find(|n| n.has_tag_name((xml::NS, "entry")))
             {
-                let labels = self.source_labels.entry(entry.id()).or_insert_with(|| entry_labels(entry));
+                let labels = self
+                    .source_labels
+                    .entry(entry.id())
+                    .or_insert_with(|| entry_labels(entry));
                 if !labels.is_empty() {
                     add_labels(&mut self.narrative_labels, labels.iter().cloned());
                 }
@@ -1548,6 +1554,12 @@ impl<'a, 'i> Conv<'a, 'i> {
         };
         match field {
             Some((key, value)) => ObservationValue::Read(key, value),
+            None if v
+                .children()
+                .any(|n| n.is_text() && n.text().is_some_and(|text| !text.trim().is_empty())) =>
+            {
+                ObservationValue::Unsupported
+            }
             // Checked after the type: a coded value outside the value set is `nullFlavor="OTH"`
             // with its translation or original text, and that is still the result.
             None if attr(v, "nullFlavor").is_some() => ObservationValue::Missing,

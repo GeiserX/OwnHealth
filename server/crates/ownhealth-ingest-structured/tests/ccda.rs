@@ -1953,3 +1953,32 @@ fn round_6_a_coded_result_value_with_a_null_flavor_keeps_its_translation() -> R 
     }
     Ok(())
 }
+
+#[test]
+fn round_6_unread_typed_result_text_is_reported() -> R {
+    for (value, unread) in [
+        (r#"<value xsi:type="TS">not-a-timestamp</value>"#, true),
+        (r#"<value xsi:type="TS" value="not-a-timestamp"/>"#, true),
+        (r#"<value xsi:type="TS" nullFlavor="OTH">not-a-timestamp</value>"#, true),
+        ("<value xsi:type=\"TS\">  \n\t  </value>", false),
+    ] {
+        let c = convert(&document(&format!(
+            r#"<component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>RESULTS</title>
+              <entry><observation classCode="OBS" moodCode="EVN">
+                <code code="13457-7" codeSystem="2.16.840.1.113883.6.1"/>{value}
+              </observation></entry>
+            </section></component>"#
+        )))?;
+        let expected: &[&str] = if unread {
+            &["observation (unsupported value type TS)"]
+        } else {
+            &[]
+        };
+        assert_eq!(c.sections[0].not_read, expected, "{value}");
+        let observations = resources(&c, "Observation");
+        assert_eq!(observations.len(), 1);
+        assert!(observations[0].get("valueDateTime").is_none());
+        assert!(observations[0].get("valueString").is_none());
+    }
+    Ok(())
+}
