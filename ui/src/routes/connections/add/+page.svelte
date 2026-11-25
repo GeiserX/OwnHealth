@@ -218,7 +218,7 @@
 					<fieldset class="list">
 						<legend class="sr">{t('cw_search')}</legend>
 						{#each hits as h (h.endpoint + h.name)}
-							<label class="opt"><input type="radio" name="server" checked={choice === 'hit:' + h.endpoint && facility === h.name} onchange={() => pickHit(h)} /> <span>{h.name}{#if h.state}<span class="dim"> · {h.state}</span>{/if}</span><span class="mono dim srv">{h.endpoint}</span></label>
+							<label class="opt"><input type="radio" name="server" checked={choice === 'hit:' + h.endpoint && facility === h.name} onchange={() => pickHit(h)} /> <span>{h.name}{#if h.state}<span class="dim">&nbsp;· {h.state}</span>{/if}</span><span class="mono dim srv">{h.endpoint}</span></label>
 						{/each}
 					</fieldset>
 				{/if}
