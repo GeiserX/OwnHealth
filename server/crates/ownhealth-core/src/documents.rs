@@ -462,8 +462,17 @@ pub const RETRACTED_WITH_DOCUMENT: &str = "document retracted: ";
 
 /// The profile of each imaging study retracted with document `document_id` (its report), each study
 /// locked: the profiles [`restore_studies`] could bring a study back on, for the caller to check its
-/// grant on.
+/// grant on. None while the document itself is not active: the status is read under its row lock,
+/// which a retraction holds until it commits, so an upload that found the document active (and did
+/// not bring it back) brings back no study a retraction took meanwhile.
 pub async fn retracted_study_profiles(conn: &mut PgConnection, document_id: Uuid) -> Result<BTreeSet<Uuid>> {
+    let status: Option<String> = sqlx::query_scalar("select status from document where id = $1 for share")
+        .bind(document_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if status.as_deref() != Some("active") {
+        return Ok(BTreeSet::new());
+    }
     let rows: Vec<Uuid> = sqlx::query_scalar(
         "select profile_id from imaging_study where report_document_id = $1 and status = 'retracted' \
          and starts_with(status_reason, $2) order by id for update",

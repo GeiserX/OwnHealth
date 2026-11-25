@@ -1911,3 +1911,106 @@ async fn a_provisional_study_retracted_with_its_report_comes_back_provisional() 
     assert_eq!(status().await?, "provisional");
     Ok(())
 }
+
+/// Waits until a session of `pool`'s database waits on a lock.
+async fn until_a_lock_wait(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    for _ in 0..400 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await?;
+        if waiting > 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("nothing waited on a lock")
+}
+
+/// Slice 43: an upload of a report that finds it active does not bring it back; when a retraction of
+/// it commits while that upload runs, the study it retracted stays retracted with it.
+#[tokio::test]
+async fn a_report_uploaded_while_its_retraction_commits_brings_no_study_back() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let pdf = b"%PDF-1.4 synthetic report e3".to_vec();
+    let report = upload_report(&w, &cookie, "alex", &pdf).await?;
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(ALEX_CT)
+        .execute(&w.db.pool)
+        .await?;
+    // a retraction in flight, as POST /api/documents/{id}/retract does it, not committed yet
+    let mut retracting = w.db.pool.begin().await?;
+    ownhealth_core::documents::lock_owner(&mut retracting, report).await?;
+    sqlx::query("update document set status = 'retracted', status_reason = 'wrong click' where id = $1")
+        .bind(report)
+        .execute(&mut *retracting)
+        .await?;
+    sqlx::query(
+        "update imaging_study set status = 'retracted', status_reason = $2, retracted_from = status \
+         where report_document_id = $1",
+    )
+    .bind(report)
+    .bind(format!(
+        "{}wrong click",
+        ownhealth_core::documents::RETRACTED_WITH_DOCUMENT
+    ))
+    .execute(&mut *retracting)
+    .await?;
+    let (uploaded, committed) = tokio::join!(upload_report(&w, &cookie, "alex", &pdf), async {
+        until_a_lock_wait(&w.db.pool).await?;
+        retracting.commit().await?;
+        anyhow::Ok(())
+    });
+    committed?;
+    assert_eq!(uploaded?, report);
+    let doc: String = sqlx::query_scalar("select status from document where id = $1")
+        .bind(report)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(doc, "retracted");
+    let study: String = sqlx::query_scalar("select status from imaging_study where study_instance_uid = $1")
+        .bind(ALEX_CT)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(
+        study, "retracted",
+        "a study came back while its report stayed retracted"
+    );
+    Ok(())
+}
+
+/// Slice 43: a sweeper that could not queue its sweep (the database failed for a moment) tries again
+/// soon, not at the next hourly tick: after a restore, the rebuild would wait an hour.
+#[tokio::test]
+async fn the_imaging_sweeper_tries_again_soon_after_a_failed_enqueue() -> R {
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let rt = Runtime::with_pool(db.settings(dir.path())?, db.pool.clone())?;
+    sqlx::query("alter table job rename to job_away")
+        .execute(&db.pool)
+        .await?;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let sweeper =
+        ownhealth::app::imaging_sweeper_every(&rt, stopped, Duration::from_secs(3600), Duration::from_millis(200));
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    sqlx::query("alter table job_away rename to job")
+        .execute(&db.pool)
+        .await?;
+    let mut queued = 0;
+    for _ in 0..60 {
+        queued = sqlx::query_scalar::<_, i64>("select count(*) from job where kind = 'imaging.sweep'")
+            .fetch_one(&db.pool)
+            .await?;
+        if queued > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    stop.send(true)?;
+    sweeper.await?;
+    assert_eq!(queued, 1, "no sweep queued after the failed enqueue");
+    Ok(())
+}
