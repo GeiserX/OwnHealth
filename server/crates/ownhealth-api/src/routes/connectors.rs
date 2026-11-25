@@ -600,9 +600,19 @@ fn shipped_profiles() -> R<&'static profiles::Profiles> {
 
 /// The wizard's vendors and the redirect URI to register at each of them.
 async fn vendor_profiles(State(rt): State<Runtime>, Caller(p): Caller) -> R {
-    let mut conn = rt.pool.acquire().await?;
-    manager(&mut conn, &p).await?;
+    let mut tx = rt.pool.begin().await?;
+    manager(&mut tx, &p).await?;
     let file = shipped_profiles()?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("GET /api/connectors/profiles".into()),
+            ..AuditEvent::new("user", "ui", "read")
+        },
+    )
+    .await?;
+    tx.commit().await?;
     ok(json!({"redirect_uri": file.redirect_uri(&rt.settings.base_url), "vendors": file.vendors}))
 }
 
@@ -622,14 +632,24 @@ const CLIENT_COLUMNS: &str =
     "id, vendor, issuer, client_id, client_secret_id is not null as confidential, redirect_uri, created_at";
 
 async fn list_clients(State(rt): State<Runtime>, Caller(p): Caller) -> R {
-    let mut conn = rt.pool.acquire().await?;
-    let household = manager(&mut conn, &p).await?;
+    let mut tx = rt.pool.begin().await?;
+    let household = manager(&mut tx, &p).await?;
     let clients: Vec<ClientOut> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "select {CLIENT_COLUMNS} from connector_client where household_id = $1 order by created_at, id"
     )))
     .bind(household)
-    .fetch_all(&mut *conn)
+    .fetch_all(&mut *tx)
     .await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("GET /api/connectors/clients".into()),
+            ..AuditEvent::new("user", "ui", "read")
+        },
+    )
+    .await?;
+    tx.commit().await?;
     ok(json!({"clients": clients}))
 }
 

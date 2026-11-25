@@ -125,6 +125,28 @@ async fn the_wizard_reads_every_vendor_profile_with_this_instances_redirect_uri(
 }
 
 #[tokio::test]
+async fn each_successful_wizard_read_commits_one_audit_row() -> R {
+    let env = env().await?;
+    let mut c = alex(&env).await?;
+    for path in ["/api/connectors/profiles", "/api/connectors/clients"] {
+        for expected in 1..=2 {
+            let r = c.get(path).await?;
+            assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+            let audited: i64 = sqlx::query_scalar(
+                "select count(*) from audit_event \
+                 where action = 'read' and actor_id = $1 and tool = $2",
+            )
+            .bind(env.user("alex"))
+            .bind(format!("GET {path}"))
+            .fetch_one(env.pool())
+            .await?;
+            assert_eq!(audited, expected, "{path}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it() -> R {
     let env = env().await?;
     let fake = Fake::recorded("healow").await;
