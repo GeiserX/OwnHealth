@@ -1046,3 +1046,37 @@ async fn a_damaged_profile_is_listed_and_utc_readings_still_import() -> R {
     assert_eq!(omitted(&result), [(path.to_string(), "invalid_member".to_string())]);
     assert_readings(&env, result, &[("hr", 70.0, "2024-07-12T08:00:00Z", 0)]).await
 }
+
+#[tokio::test]
+async fn a_heart_rate_row_with_only_a_date_is_left_out_and_a_daily_value_keeps_its_day() -> R {
+    let env = Env::new().await?;
+    let (state, error, result) = upload(
+        &env,
+        &[
+            (
+                "Takeout/Fitbit/Google Data/Heart Rate/2024-07.csv",
+                "timestamp,bpm\n2024-07-04,72\n2024-07-04T08:10:00Z,74\n",
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-05.json",
+                r#"[{"dateTime":"2024-07-05","value":{"bpm":80}}]"#,
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/hrv-2024-07-04.json",
+                r#"[{"dateTime":"2024-07-04","value":{"dailyRmssd":38.5}}]"#,
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(result["fitbit_takeout"]["rows_left_out"], 2, "{result}");
+    assert_readings(
+        &env,
+        result,
+        &[
+            ("hr", 74.0, "2024-07-04T08:10:00Z", 0),
+            ("hrv_rmssd", 38.5, "2024-07-04T00:00:00Z", 0),
+        ],
+    )
+    .await
+}

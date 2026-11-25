@@ -286,7 +286,8 @@ fn when(raw: &str, member: Member, zone: Option<Tz>) -> Option<(DateTime<Utc>, i
             .find_map(|format| NaiveDateTime::parse_from_str(raw, format).ok())
     };
     let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
-    if member.daily || date.is_some() {
+    // A minute heart-rate row needs its time of day; a date alone names only a day's value.
+    if member.daily || (date.is_some() && !matches!(member.metric, Metric::HeartRate)) {
         // A day's value keeps its calendar day: midnight UTC, the day rollup's own convention.
         let day = date
             .or_else(|| written.map(|t| t.naive_local().date()))
