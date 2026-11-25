@@ -114,8 +114,9 @@ fn fail(e: OAuthError) -> Fail {
     }
 }
 
-/// The household the caller manages (owner or guardian of one of its profiles).
-async fn manager(conn: &mut PgConnection, p: &Principal) -> R<Uuid> {
+/// The household the caller manages (owner or guardian of one of its profiles). The wearables setup
+/// guide (ow_proxy.rs) uses the same check.
+pub(crate) async fn manager(conn: &mut PgConnection, p: &Principal) -> R<Uuid> {
     let household = p
         .household_id
         .ok_or_else(|| Error::access_denied("forbidden", "Only a person of the household manages its connections."))?;

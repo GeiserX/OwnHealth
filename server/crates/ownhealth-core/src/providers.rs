@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const SHIPPED: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -28,7 +28,7 @@ pub enum Ingest {
 }
 
 /// Whether agents and the shared readers see a provider's data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mcp {
     Served,

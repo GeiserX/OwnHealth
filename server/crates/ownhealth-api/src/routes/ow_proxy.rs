@@ -1,0 +1,234 @@
+//! The browser-facing part of Open Wearables OAuth. The sidecar's authorize, user and
+//! management APIs stay on its private network.
+
+use std::time::Duration;
+
+use axum::extract::State;
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{any, get};
+use axum::{Json, Router};
+use ownhealth_core::audit::{AuditEvent, write_audit};
+use ownhealth_core::config::Settings;
+use ownhealth_core::{Runtime, providers};
+use ownhealth_devices::openwearables::PROVIDERS;
+use reqwest::{Client, Url, redirect::Policy};
+use serde::Serialize;
+
+use super::auth::R;
+use super::connectors::manager;
+use crate::extract::SessionCaller;
+
+const PREFIX: &str = "/ow";
+const OAUTH: &str = "/api/v1/oauth/";
+const SUCCESS: &str = "/api/v1/oauth/success";
+const ERROR: &str = "/api/v1/oauth/error";
+const MAX_RESULT_BYTES: usize = 64 * 1024;
+
+#[derive(Clone)]
+struct Upstream {
+    origin: Url,
+    client: Client,
+}
+
+impl Upstream {
+    fn new(settings: &Settings) -> Option<Self> {
+        let origin = settings.ow_url.clone()?;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(Policy::none())
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .inspect_err(|_| tracing::error!("could not initialize the Open Wearables proxy"))
+            .ok()?;
+        Some(Self { origin, client })
+    }
+
+    fn url(&self, path: &str, query: Option<&str>) -> Url {
+        let mut url = self.origin.clone();
+        url.set_path(path);
+        url.set_query(query);
+        url
+    }
+}
+
+fn allowed(provider: &str) -> bool {
+    PROVIDERS.contains(&provider) && providers::ingest_allowed(provider)
+}
+
+/// Keep the whole /ow namespace out of the SPA fallback, including requests for unknown paths.
+pub fn proxy_router(settings: &Settings) -> Router<Runtime> {
+    Router::new()
+        .route("/ow", any(proxy))
+        .route("/ow/", any(proxy))
+        .route("/ow/{*path}", any(proxy))
+        .with_state(Upstream::new(settings))
+}
+
+async fn proxy(State(upstream): State<Option<Upstream>>, method: Method, uri: Uri) -> Response {
+    let mut response = forward(upstream, method, uri).await;
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox; default-src 'none'; frame-ancestors 'none'"),
+    );
+    response
+}
+
+async fn forward(upstream: Option<Upstream>, method: Method, uri: Uri) -> Response {
+    let path = &uri.path()[PREFIX.len()..];
+    let provider = path
+        .strip_prefix(OAUTH)
+        .and_then(|tail| tail.strip_suffix("/callback"))
+        .filter(|p| allowed(p));
+    if provider.is_none() && !matches!(path, SUCCESS | ERROR) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Open Wearables has a dedicated HEAD handler for callback reachability probes.
+    let probe = method == Method::HEAD && provider.is_some();
+    if method != Method::GET && !probe {
+        let allow = if provider.is_some() { "GET, HEAD" } else { "GET" };
+        return (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response();
+    }
+    let Some(upstream) = upstream else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let url = upstream.url(path, uri.query());
+    if provider.is_none() && !result_allowed(&url, None) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // OW sees a fresh request with no caller headers or body. Do not log reqwest errors,
+    // which can contain the authorization code and state.
+    let Ok(mut res) = upstream.client.request(method, url).send().await else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    if res.status().is_redirection() {
+        // OW 0.11 answers 303 with an unprefixed result path. Never follow or relay another target.
+        if !probe
+            && res.status() == StatusCode::SEE_OTHER
+            && let Some(provider) = provider
+            && let Some(location) = res.headers().get(header::LOCATION)
+            && let Some(location) = result_location(&upstream, provider, location)
+        {
+            return (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response();
+        }
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+
+    if probe {
+        return res.status().into_response();
+    }
+
+    // The pinned sidecar's result pages are JSON. Treat any other response type as plain text.
+    let content_type = if res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|v| v == "application/json")
+    {
+        "application/json"
+    } else {
+        "text/plain; charset=utf-8"
+    };
+    let mut body = Vec::new();
+    loop {
+        match res.chunk().await {
+            Ok(Some(chunk)) if body.len() + chunk.len() <= MAX_RESULT_BYTES => body.extend_from_slice(&chunk),
+            Ok(None) => break,
+            _ => return StatusCode::BAD_GATEWAY.into_response(),
+        }
+    }
+    (res.status(), [(header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+fn result_allowed(url: &Url, expected: Option<&str>) -> bool {
+    let mut values = url.query_pairs().filter(|(k, _)| k == "provider");
+    match values.next() {
+        Some((_, p)) => allowed(&p) && expected.is_none_or(|want| want == p) && values.next().is_none(),
+        None => url.path() == ERROR, // OW's error page receives only a message
+    }
+}
+
+fn result_location(upstream: &Upstream, provider: &str, location: &HeaderValue) -> Option<HeaderValue> {
+    let raw = location.to_str().ok()?;
+    let uri: Uri = raw.parse().ok()?;
+    if !raw.starts_with('/') || !matches!(uri.path(), SUCCESS | ERROR) {
+        return None;
+    }
+    let url = upstream.url(uri.path(), uri.query());
+    if !result_allowed(&url, Some(provider)) {
+        return None;
+    }
+    HeaderValue::from_str(&format!("{PREFIX}{raw}")).ok()
+}
+
+#[derive(Serialize)]
+struct Setup {
+    /// Null, like every redirect URI, while `origin_fix` names a setting to correct.
+    api_base_url: Option<String>,
+    providers: Vec<SetupProvider>,
+    origin_fix: Option<OriginFix>,
+}
+
+#[derive(Serialize)]
+struct OriginFix {
+    setting: &'static str,
+    value: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SetupProvider {
+    id: &'static str,
+    mcp: providers::Mcp,
+    redirect_uri: Option<String>,
+}
+
+/// The signed-in guide reads the same provider policy the MCP readers and the poller use. It is an
+/// operator guide, so only those who manage the connections (an owner or guardian) read it.
+pub fn setup_router() -> Router<Runtime> {
+    Router::new().route("/wearables/setup", get(setup))
+}
+
+async fn setup(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) -> R<Json<Setup>> {
+    let mut tx = rt.pool.begin().await?;
+    manager(&mut tx, &p).await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("wearables_setup".into()),
+            ..AuditEvent::new("user", "ui", "read")
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    // Open Wearables would send another redirect URI than any this guide could show.
+    let origin_fix = rt.settings.ow_origin_fix.as_ref().map(|fix| OriginFix {
+        setting: fix.setting,
+        value: fix.value.clone(),
+    });
+    let origin = rt.settings.ow_public_url.as_deref().unwrap_or(&rt.settings.base_url);
+    let api_base_url = origin_fix
+        .is_none()
+        .then(|| format!("{}{PREFIX}", origin.trim_end_matches('/')));
+    let providers = PROVIDERS
+        .into_iter()
+        .filter_map(|id| {
+            let policy = providers::policy().providers.get(id)?;
+            (policy.ingest == providers::Ingest::Allow).then(|| SetupProvider {
+                id,
+                mcp: policy.mcp,
+                redirect_uri: api_base_url.as_ref().map(|base| format!("{base}{OAUTH}{id}/callback")),
+            })
+        })
+        .collect();
+    Ok(Json(Setup {
+        api_base_url,
+        providers,
+        origin_fix,
+    }))
+}

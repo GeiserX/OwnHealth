@@ -430,12 +430,18 @@ fn render_doc(compose: &Path, env_file: &Path, extra: &str, files: &[(&str, Stri
 }
 
 fn render_config(dir: &Path, project: Option<&str>) -> anyhow::Result<Value> {
+    render_config_with(dir, project, &[])
+}
+
+/// `render_config` with more flags before `config`, such as `--profile wearables`.
+fn render_config_with(dir: &Path, project: Option<&str>, flags: &[&str]) -> anyhow::Result<Value> {
     let mut cmd = Command::new("docker");
     cmd.arg("compose");
     if let Some(project) = project {
         cmd.args(["-p", project]);
     }
     let out = cmd
+        .args(flags)
         .args(["config", "--format", "json"])
         .current_dir(dir)
         .env_clear()
@@ -1457,10 +1463,10 @@ impl Drop for Container {
 
 /// deploy/Caddyfile in `image`, with a stub on app:8080 that names each request it receives and the
 /// X-Forwarded-For it came with. Returns the container and the host address of the share port.
-fn caddy(image: &str) -> anyhow::Result<(Container, String)> {
+fn caddy(image: &str, callback: Option<&str>) -> anyhow::Result<(Container, String)> {
     let name = format!("oh-share-block-{}", uuid::Uuid::new_v4().simple());
     let caddyfile = std::fs::read_to_string(root().join("deploy/Caddyfile"))?
-        + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
+        + "\nhttp://:8080 {\n\theader X-Upstream-URI {uri}\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
     let mut create = Command::new("docker");
     create.args(["create", "--name", &name, "--add-host", "app:127.0.0.1"]);
     create.args([
@@ -1469,6 +1475,9 @@ fn caddy(image: &str) -> anyhow::Result<(Container, String)> {
         "-e",
         "OWNHEALTH_DOMAIN=http://private.test:8081",
     ]);
+    if let Some(value) = callback {
+        create.args(["-e", &format!("OWNHEALTH_OW_CALLBACK={value}")]);
+    }
     let out = create.arg(image).output()?;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let c = Container(name.clone());
@@ -1636,7 +1645,7 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
         refused.push((method, f.clone()));
         refused.push((method, ice.clone()));
     }
-    let (_c, addr) = caddy(&image)?;
+    let (_c, addr) = caddy(&image, None)?;
     for (method, path, line) in &through {
         let (code, body) = fetch(&addr, method, path)?;
         let got = body.split(" xff=").next().unwrap_or_default();
@@ -1656,5 +1665,278 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
     let (_, body) = fetch_with(&addr, "POST", &m, &["X-Forwarded-For: 203.0.113.9"])?;
     let xff = body.split(" xff=").nth(1).unwrap_or_default();
     assert!(xff.starts_with("203.0.113.9, "), "{body}");
+    Ok(())
+}
+
+#[test]
+fn the_public_wearables_callback_needs_the_literal_true_switch() -> R {
+    if !ok(Command::new("docker").args(["info"])) {
+        eprintln!("docker not available: skipped");
+        return Ok(());
+    }
+    let image = caddy_image()?;
+    anyhow::ensure!(
+        ok(Command::new("docker").args(["image", "inspect", &image]))
+            || ok(Command::new("docker").args(["pull", &image])),
+        "docker pull {image}"
+    );
+    let callback = "/ow/api/v1/oauth/oura/callback?code=abc%2Bdef&state=xyz";
+    let success = "/ow/api/v1/oauth/success?provider=oura&user_id=demo";
+    let error = "/ow/api/v1/oauth/error?message=access+denied";
+    for value in [None, Some(""), Some("1"), Some("yes"), Some("true")] {
+        let (_container, addr) = caddy(&image, value)?;
+        for path in [callback, success, error] {
+            let (code, body) = fetch(&addr, "GET", path)?;
+            if value == Some("true") {
+                assert_eq!(code, 200, "{value:?} {path}: {body}");
+                assert_eq!(
+                    body.split(" xff=").next(),
+                    Some(format!("upstream GET {path}").as_str())
+                );
+            } else {
+                assert_eq!(code, 404, "{value:?} {path}: {body}");
+            }
+        }
+        // Test the raw path as well as the registered callback. HEAD has no body to echo the URI.
+        let probe = "/ow/api/v1/oauth/withings/callback";
+        let want = if value == Some("true") { 200 } else { 404 };
+        for path in [probe.to_owned(), format!("/login/..{probe}?check=1")] {
+            let (code, head) = fetch(&addr, "HEAD", &path)?;
+            assert_eq!(code, want, "{value:?} HEAD {path}: {head}");
+            if value == Some("true") {
+                let uri = head.lines().find_map(|line| {
+                    let (header, value) = line.split_once(':')?;
+                    header.eq_ignore_ascii_case("X-Upstream-URI").then(|| value.trim())
+                });
+                assert_eq!(uri, Some(path.strip_prefix("/login/..").unwrap_or(&path)), "{head}");
+            }
+        }
+        for (method, path) in [
+            ("HEAD", success),
+            ("HEAD", error),
+            ("HEAD", "/ow/api/v1/oauth/strava/callback"),
+            ("HEAD", "/ow/api/v1/oauth/withings/authorize"),
+            ("HEAD", "/ow/api/v1/users"),
+            ("HEAD", "/api/me"),
+            ("POST", callback),
+            ("OPTIONS", success),
+            ("GET", "/ow/api/v1/oauth/strava/callback"),
+            ("GET", "/ow/api/v1/oauth/oura/authorize"),
+            ("GET", "/ow/api/v1/users"),
+            ("GET", "/api/me"),
+        ] {
+            assert_eq!(fetch(&addr, method, path)?.0, 404, "{value:?} {method} {path}");
+        }
+        if value == Some("true") {
+            let (code, body) = fetch(&addr, "GET", &format!("/login/..{callback}"))?;
+            assert_eq!(code, 200, "{body}");
+            assert_eq!(
+                body.split(" xff=").next(),
+                Some(format!("upstream GET {callback}").as_str())
+            );
+        }
+    }
+    Ok(())
+}
+
+fn rendered_wearables_settings(app: &Value) -> Result<Settings, ownhealth_core::error::Error> {
+    let vars = [
+        "OWNHEALTH_SECRETS_KEY_FILE",
+        "OWNHEALTH_DB_PASSWORD_FILE",
+        "OWNHEALTH_SECRET_KEY_FILE",
+    ];
+    let env: HashMap<String, String> = app["environment"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| !vars.contains(&key.as_str()))
+        .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_owned())))
+        .collect();
+    Settings::from(&env)
+}
+
+#[test]
+fn both_stacks_start_with_a_wrong_wearables_origin_and_the_profile_off() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        let base = format!("\n{extra}COMPOSE_PROFILES=\n");
+        let (noncanonical, setting, value) = if case == "homelab" {
+            (
+                "OWNHEALTH_DOMAIN=Health.Example.test:443\n",
+                "OWNHEALTH_DOMAIN",
+                "health.example.test",
+            )
+        } else {
+            (
+                "OWNHEALTH_BASE_URL=\nOWNHEALTH_HTTP_PORT=80\n",
+                "OWNHEALTH_OW_PUBLIC_URL",
+                "http://localhost",
+            )
+        };
+        // The start cannot tell whether the sidecar runs, so the setup guide names the fix instead.
+        for (override_url, setting, value) in [
+            ("", setting, Some(value)),
+            ("OWNHEALTH_OW_PUBLIC_URL=invalid\n", "OWNHEALTH_OW_PUBLIC_URL", None),
+        ] {
+            let services = render(&compose, &env, &format!("{base}{noncanonical}{override_url}"), &[])?;
+            assert!(services.get("ow-app").is_none(), "{case}");
+            let settings =
+                rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
+            assert!(settings.ow_url.is_some() && settings.ow_public_url.is_none(), "{case}");
+            let fix = settings.ow_origin_fix.expect("the guide names the fix");
+            assert_eq!((fix.setting, fix.value.as_deref()), (setting, value), "{case}");
+        }
+    }
+    Ok(())
+}
+
+/// The services of both stacks started as `docker compose --profile wearables up -d` with
+/// COMPOSE_PROFILES left empty in .env.
+fn render_wearables_flag(compose: &Path, env_file: &Path, extra: &str) -> anyhow::Result<Value> {
+    let dir = tempfile::tempdir()?;
+    std::fs::copy(compose, dir.path().join("compose.yaml"))?;
+    std::fs::write(
+        dir.path().join(".env"),
+        std::fs::read_to_string(env_file)? + extra + "\nCOMPOSE_PROFILES=\n",
+    )?;
+    Ok(render_config_with(dir.path(), None, &["--profile", "wearables"])?["services"].clone())
+}
+
+#[test]
+fn both_stacks_turn_the_callback_proxy_on_with_the_wearables_profile_flag() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        for public in ["", "OWNHEALTH_OW_PUBLIC_URL=https://share.example.test\n"] {
+            let services = render_wearables_flag(&compose, &env, &format!("\n{extra}{public}"))?;
+            assert!(services.get("ow-app").is_some(), "{case}: the flag starts the sidecar");
+            let settings =
+                rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
+            assert_eq!(
+                settings.ow_url.as_ref().map(|url| url.as_str()),
+                Some("http://ow-app:8000/"),
+                "{case} {public}: the callback proxy is on whenever the sidecar runs"
+            );
+            let origin = settings.ow_public_url.as_deref().unwrap_or(&settings.base_url);
+            assert_eq!(
+                format!("{origin}/ow"),
+                env_str(&services["ow-app"], "API_BASE_URL"),
+                "{case} {public}: the guide shows the origin Open Wearables sends"
+            );
+            assert!(settings.ow_origin_fix.is_none(), "{case} {public}");
+        }
+        // A callback origin Open Wearables writes differently: no redirect URI, the guide names the fix.
+        let public = "OWNHEALTH_OW_PUBLIC_URL=https://Share.Example.test:443\n";
+        let services = render_wearables_flag(&compose, &env, &format!("\n{extra}{public}"))?;
+        let settings = rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
+        assert!(settings.ow_url.is_some() && settings.ow_public_url.is_none(), "{case}");
+        let fix = settings.ow_origin_fix.expect("the guide names the fix");
+        assert_eq!(
+            (fix.setting, fix.value.as_deref()),
+            ("OWNHEALTH_OW_PUBLIC_URL", Some("https://share.example.test")),
+            "{case}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn both_stacks_name_the_setting_to_fix_for_wearables_callbacks() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        let base = format!("\n{extra}COMPOSE_PROFILES=ocr,wearables\n");
+        let (noncanonical, source, correction) = if case == "homelab" {
+            (
+                "OWNHEALTH_DOMAIN=Health.Example.test:443\n",
+                "OWNHEALTH_DOMAIN",
+                "health.example.test",
+            )
+        } else {
+            (
+                "OWNHEALTH_BASE_URL=http://LOCALHOST:80\n",
+                "OWNHEALTH_BASE_URL",
+                "http://localhost",
+            )
+        };
+        for (override_url, source, correction) in [
+            ("", source, correction),
+            (
+                "OWNHEALTH_OW_PUBLIC_URL=https://Public.Example.test:443\n",
+                "OWNHEALTH_OW_PUBLIC_URL",
+                "https://public.example.test",
+            ),
+        ] {
+            let services = render(&compose, &env, &format!("{base}{noncanonical}{override_url}"), &[])?;
+            let err = rendered_wearables_settings(&services["app"])
+                .expect_err(case)
+                .to_string();
+            assert!(
+                err.contains(&format!("{source} must be written as {correction}")),
+                "{case}: {err}"
+            );
+        }
+
+        if case == "quickstart" {
+            let services = render(
+                &compose,
+                &env,
+                &format!("{base}OWNHEALTH_BASE_URL=\nOWNHEALTH_HTTP_PORT=80\n"),
+                &[],
+            )?;
+            let err = rendered_wearables_settings(&services["app"])
+                .expect_err(case)
+                .to_string();
+            assert!(err.contains("Set OWNHEALTH_OW_PUBLIC_URL=http://localhost "), "{err}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn both_stacks_give_the_guide_and_open_wearables_the_same_callback_origin() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        let base = format!("\n{extra}COMPOSE_PROFILES=wearables\n");
+        let public = "https://callbacks.example.test";
+        let services = render(&compose, &env, &base, &[])?;
+        let settings = rendered_wearables_settings(&services["app"])?;
+        let origin = settings.ow_public_url.as_deref().expect("default callback origin");
+        assert_eq!(
+            settings.ow_url.as_ref().map(|url| url.as_str()),
+            Some("http://ow-app:8000/"),
+            "{case}"
+        );
+        assert_eq!(
+            env_str(&services["ow-app"], "API_BASE_URL"),
+            format!("{origin}/ow"),
+            "{case}"
+        );
+        if case == "homelab" {
+            assert_eq!(env_str(&services["caddy"], "OWNHEALTH_OW_CALLBACK"), "false");
+        }
+        let custom = format!("{base}OWNHEALTH_OW_PUBLIC_URL={public}\nOWNHEALTH_OW_CALLBACK=true\n");
+        let services = render(&compose, &env, &custom, &[])?;
+        let settings = rendered_wearables_settings(&services["app"])?;
+        assert_eq!(settings.ow_public_url.as_deref(), Some(public), "{case}");
+        assert_eq!(
+            env_str(&services["ow-app"], "API_BASE_URL"),
+            format!("{public}/ow"),
+            "{case}"
+        );
+        if case == "homelab" {
+            assert_eq!(env_str(&services["caddy"], "OWNHEALTH_OW_CALLBACK"), "true");
+        }
+    }
     Ok(())
 }

@@ -47,6 +47,14 @@ services:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth_app@db:5432/ownhealth
       OWNHEALTH_DB_PASSWORD: ${OWNHEALTH_APP_DB_PASSWORD:?set OWNHEALTH_APP_DB_PASSWORD in .env}
       OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      # On in every install, so `--profile wearables` on the command line gets the callback proxy too.
+      # Without the sidecar the proxy answers 502.
+      OWNHEALTH_OW_URL: ${OWNHEALTH_OW_URL:-http://ow-app:8000}
+      OWNHEALTH_OW_PUBLIC_URL: ${OWNHEALTH_OW_PUBLIC_URL:-}
+      # Keep the fallback in sync with ow-app's API_BASE_URL. Pass its source for startup errors.
+      OWNHEALTH_OW_COMPOSE_FALLBACK: ${OWNHEALTH_BASE_URL:-http://localhost:${OWNHEALTH_HTTP_PORT:-8080}}
+      OWNHEALTH_OW_COMPOSE_FALLBACK_VAR: ${OWNHEALTH_BASE_URL:+OWNHEALTH_BASE_URL}
       OWNHEALTH_DATA_DIR: /data
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key
       # Throwaway demo only (docs/quickstart.md step 5); empty means off.
@@ -192,6 +200,7 @@ services:
     env_file: *ow-env-file
     environment: &ow-env
       ENVIRONMENT: production
+      API_BASE_URL: ${OWNHEALTH_OW_PUBLIC_URL:-${OWNHEALTH_BASE_URL:-http://localhost:${OWNHEALTH_HTTP_PORT:-8080}}}/ow
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: openwearables

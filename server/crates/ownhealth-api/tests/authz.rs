@@ -44,15 +44,18 @@ const PUBLIC: [&str; 20] = [
     "/shl/{id}/ice",
 ];
 
-/// Routes the imaging viewer is served on, outside `/api`: no login resolves there, a viewer link does
-/// (routes/imaging_proxy.rs, checked by crates/ownhealth/tests/imaging_proxy.rs).
-const VIEWER: [&str; 6] = [
+/// Routes outside `/api`: the imaging viewer checks its own link, and Open Wearables checks
+/// OAuth state. The assembled-app tests cover these routes in imaging_proxy.rs and app.rs.
+const OUTSIDE_API: [&str; 9] = [
     "/ohif",
     "/ohif/",
     "/ohif/{*rest}",
     "/dicom-web",
     "/dicom-web/",
     "/dicom-web/{*rest}",
+    "/ow",
+    "/ow/",
+    "/ow/{*path}",
 ];
 
 const METHODS: [Method; 5] = [Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE];
@@ -102,7 +105,7 @@ async fn every_route_resolves_the_caller() -> R {
     let mut anon = env.anon();
     let mut leaks = Vec::new();
     for path in route_paths()? {
-        if PUBLIC.contains(&path.as_str()) || VIEWER.contains(&path.as_str()) {
+        if PUBLIC.contains(&path.as_str()) || OUTSIDE_API.contains(&path.as_str()) {
             continue;
         }
         let mut routed = false;
@@ -134,7 +137,7 @@ async fn public_list_is_exact() -> R {
     let paths = route_paths()?;
     let stale: Vec<&str> = PUBLIC
         .iter()
-        .chain(&VIEWER)
+        .chain(&OUTSIDE_API)
         .copied()
         .filter(|p| !paths.contains(*p))
         .collect();

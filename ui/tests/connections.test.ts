@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { dict } from '../src/lib/i18n/dict.ts';
 import {
 	GRANT_SOON_DAYS,
+	mayManageConnections,
 	callbackOutcome,
 	canReconnect,
 	cardTitle,
@@ -348,4 +349,12 @@ test('the Open Wearables stops read in English and Spanish', () => {
 		'The server sent a next page it had sent before, so the rest was not read.'
 	);
 	assert.equal(runWords('PermanentJobError: too_large: Open Wearables answers for one day passed the size limit', hasKey, sayIn('es')), 'Las respuestas de esta ejecución pasaron el límite de tamaño, así que el resto no se leyó.');
+});
+
+test('the wearables setup button shows only to an owner or guardian (GET /wearables/setup refuses the rest)', () => {
+	assert.equal(mayManageConnections([{ role: 'viewer' }, { role: 'caregiver' }]), false);
+	assert.equal(mayManageConnections([]), false);
+	assert.equal(mayManageConnections(undefined), false);
+	assert.equal(mayManageConnections([{ role: 'viewer' }, { role: 'owner' }]), true);
+	assert.equal(mayManageConnections([{ role: 'guardian' }]), true);
 });

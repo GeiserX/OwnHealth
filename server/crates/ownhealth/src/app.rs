@@ -12,6 +12,7 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use ownhealth_api::ApiError;
 use ownhealth_api::routes::imaging_proxy::{self, Imaging};
+use ownhealth_api::routes::ow_proxy;
 use ownhealth_core::config::{DEV_SECRET_KEY, Settings};
 use ownhealth_core::{Error, Runtime, demo, jobs, migrate};
 use serde_json::json;
@@ -51,6 +52,7 @@ pub fn build_app_with(rt: Runtime, imaging: Arc<Imaging>) -> Router {
         )
         // The imaging viewer (/ohif) and its DICOMweb proxy (/dicom-web): never the UI fallback.
         .merge(imaging_proxy::viewer_router())
+        .merge(ow_proxy::proxy_router(&rt.settings))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback(move |uri: Uri| {

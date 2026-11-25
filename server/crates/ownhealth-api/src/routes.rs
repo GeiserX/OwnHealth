@@ -31,6 +31,7 @@ pub mod mcp_usage;
 pub mod next_draw;
 pub mod oauth;
 pub mod observations;
+pub mod ow_proxy;
 pub mod records;
 pub mod review;
 pub mod session_report;
@@ -75,6 +76,7 @@ pub fn all() -> Router<Runtime> {
         .merge(next_draw::router())
         .merge(oauth::router())
         .merge(observations::router())
+        .merge(ow_proxy::setup_router())
         .merge(records::router())
         .merge(review::router())
         .merge(session_report::router())

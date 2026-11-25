@@ -25,6 +25,9 @@ const base = `http://127.0.0.1:${port}`;
 const book = { grants: 0, revoked: 0, refused: 0, fhir: 0 };
 const books = new Map();
 let n = 0;
+const owOAuth = '/api/v1/oauth';
+const owStates = new Map();
+const owCallback = new URL('/ow/api/v1/oauth/whoop/callback', `http://localhost:${process.env.OWNHEALTH_E2E_PORT ?? 8190}`);
 
 /** The client id of a token or revocation request: the form's, else the user of Basic auth. */
 function clientOf(req, f) {
@@ -56,6 +59,48 @@ function form(req) {
 
 createServer(async (req, res) => {
 	const url = new URL(req.url ?? '/', base);
+	// Fake both sides of the WHOOP flow: OW issues the state, the vendor returns a code, and
+	// only the OW callback can redeem it once. OW redirects to its unprefixed result path.
+	if (req.method === 'GET' && url.pathname === `${owOAuth}/whoop/authorize`) {
+		const user = url.searchParams.get('user_id');
+		if (!user) return json(res, 400, { error: 'missing_user' });
+		const state = randomUUID();
+		owStates.set(state, { user, code: null });
+		const auth = new URL('/whoop/consent', base);
+		auth.searchParams.set('redirect_uri', owCallback.href);
+		auth.searchParams.set('state', state);
+		return json(res, 200, { authorization_url: auth.href, state });
+	}
+	if (req.method === 'GET' && url.pathname === '/whoop/consent') {
+		const state = url.searchParams.get('state');
+		const flow = owStates.get(state);
+		if (url.searchParams.get('redirect_uri') !== owCallback.href || !flow?.user) {
+			return json(res, 400, { error: 'invalid_authorization' });
+		}
+		flow.code = randomUUID();
+		const back = new URL(owCallback);
+		back.searchParams.set('state', state);
+		back.searchParams.set('code', flow.code);
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+		return res.end(`<title>WHOOP consent</title><a href="${back.href.replaceAll('&', '&amp;')}">Allow WHOOP access</a>`);
+	}
+	if (req.method === 'GET' && url.pathname === `${owOAuth}/whoop/callback`) {
+		const state = url.searchParams.get('state');
+		const flow = owStates.get(state);
+		let location = `${owOAuth}/error?message=Invalid+OAuth+state+or+code`;
+		if (flow?.code && flow.code === url.searchParams.get('code')) {
+			owStates.delete(state);
+			location = `${owOAuth}/success?${new URLSearchParams({ provider: 'whoop', user_id: flow.user })}`;
+		}
+		res.writeHead(303, { location });
+		return res.end();
+	}
+	if (req.method === 'GET' && url.pathname === `${owOAuth}/success`) {
+		return json(res, 200, { success: true, provider: url.searchParams.get('provider'), user_id: url.searchParams.get('user_id') });
+	}
+	if (req.method === 'GET' && url.pathname === `${owOAuth}/error`) {
+		return json(res, 200, { success: false, message: url.searchParams.get('message') });
+	}
 	if (req.method === 'GET' && url.pathname === '/.well-known/smart-configuration') {
 		return json(res, 200, {
 			issuer: base,

@@ -87,6 +87,7 @@ const GET_ROUTES: &[&str] = &[
     "/sources/{src_id}",
     "/tokens",
     "/tokens/{token_id}/usage",
+    "/wearables/setup",
 ];
 
 #[test]

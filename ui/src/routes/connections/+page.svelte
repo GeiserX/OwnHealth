@@ -29,6 +29,7 @@
 		refreshUntilFirstPull,
 		renewsItself,
 		endedVendors,
+		mayManageConnections,
 		runWords,
 		shownConnections,
 		statusWord,
@@ -204,6 +205,7 @@
 <PageHeader title={t('con_nav')} sub={t('con_sub')}>
 	{#snippet right()}
 		<PhaseChip phase="v1.0" />
+		{#if mayManageConnections(app.me?.profiles)}<a class="btn" href="/connections/wearables">{t('ow_setup_index')}</a>{/if}
 		<a class="btn" href="/inbox">{t('fu_inbox')}</a>
 		{#if manageable(app.me?.profiles ?? []).length}<a class="btn pri" href="/connections/add">{t('con_add')}</a>{/if}
 	{/snippet}

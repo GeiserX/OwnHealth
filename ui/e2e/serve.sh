@@ -59,6 +59,11 @@ if [ -n "${OWNHEALTH_E2E_ORTHANC_PORT:-}" ]; then
   [ -n "$OWNHEALTH_E2E_ORTHANC_PASSWORD" ] || { echo "the config sets OWNHEALTH_E2E_ORTHANC_PASSWORD with the port" >&2; exit 1; }
   export OWNHEALTH_ORTHANC_PASSWORD="$OWNHEALTH_E2E_ORTHANC_PASSWORD"
 fi
+# Open Wearables points to fake-vendor.mjs. Its OAuth callback uses the app's loopback host.
+if [ -n "${OWNHEALTH_E2E_FAKE_PORT:-}" ]; then
+  export OWNHEALTH_OW_URL="http://127.0.0.1:$OWNHEALTH_E2E_FAKE_PORT"
+  export OWNHEALTH_OW_PUBLIC_URL="http://localhost:$port"
+fi
 export RUST_LOG="${RUST_LOG:-warn}" # the access log stays out of the test output; errors still show
 
 "$bin" serve &

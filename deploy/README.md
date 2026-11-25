@@ -65,7 +65,7 @@ A person can share a scoped summary with a doctor through a SMART Health Link: a
 3. Set `OWNHEALTH_SHARE_URL` in `.env` to the https address the tunnel gives, such as `https://share.example.org`. The app refuses to start with an http address, except one on localhost, with a user name or password in it, and with anything after the host and port.
 4. `docker compose up -d`.
 
-What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES`. The homelab stack sets it to Caddy's own address on the `front` network (`OWNHEALTH_CADDY_IP`).
+What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Caddy also serves Open Wearables OAuth when you turn on the [public callback](#wearables). The tunnel answers 404 for other app routes, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES`. The homelab stack sets it to Caddy's own address on the `front` network (`OWNHEALTH_CADDY_IP`).
 
 Check it from outside: `curl -i https://share.example.org/login` answers 404, and a link the app makes opens in a SMART Health Links viewer. To turn sharing off again, remove `OWNHEALTH_SHARE_URL` and run `docker compose up -d`: every link and every file address already handed out then answers 404.
 
@@ -97,11 +97,13 @@ for k in DB_PASSWORD SECRET_KEY ADMIN_PASSWORD; do echo "OPENWEARABLES_$k=$(open
 chmod 600 openwearables.env   # compose reads it, not the containers
 ```
 
-Then add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES=ocr,wearables` with OCR on, otherwise `COMPOSE_PROFILES=wearables`. A second `COMPOSE_PROFILES` line replaces the first, so OCR would stop. Start it with `docker compose up -d`.
+Then add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES=ocr,wearables` with OCR on, otherwise `COMPOSE_PROFILES=wearables`. A second `COMPOSE_PROFILES` line replaces the first, so OCR would stop. With `wearables` in this line, OwnHealth refuses to start when the callback origin has a form Open Wearables would write differently, and names the setting to correct. Start the stack with `docker compose up -d`.
 
 The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy. So if `openwearables.env` is missing, or a line in it is empty, only the sidecar stops: OwnHealth keeps running, and `docker compose logs ow-db-init ow-app` names the missing variable. Fix the file and run `docker compose up -d` again.
 
-**Register the vendors.** Each vendor needs an app in its developer portal: Oura, Polar, WHOOP or Withings. Give it the redirect URL `http://localhost:8000/api/v1/oauth/<vendor>/callback`, with `oura`, `polar`, `whoop` or `withings` as `<vendor>`. Add its client id and secret to `openwearables.env`, for example `OURA_CLIENT_ID=...` and `OURA_CLIENT_SECRET=...` (`POLAR_`, `WHOOP_` and `WITHINGS_` for the others). Then run `docker compose up -d`.
+**Register the vendors.** In OwnHealth, open **Connections → Set up a wearable**. Each provider's guide gives you the redirect URI, the default OAuth scopes and the developer portal. The Compose files set Open Wearables' `API_BASE_URL` to your OwnHealth origin followed by `/ow`. For Oura and Withings, set up the public listener below first. Enter the redirect URI from the guide in the vendor portal. Put the vendor's client ID and secret in `openwearables.env`, then run `docker compose up -d`. If you registered a `localhost:8000` redirect on an earlier install, update it to the new URI in the portal before authorizing again.
+
+**Public callbacks for Oura and Withings.** These vendors require a public HTTPS redirect URI. With the homelab stack, point a tunnel at Caddy's share listener as described in [Sharing a summary](#sharing-a-summary). In `.env`, set `OWNHEALTH_OW_CALLBACK=true` and set `OWNHEALTH_OW_PUBLIC_URL` to the tunnel's HTTPS origin, such as `https://share.example.org`. Use a lowercase host and omit the default port and trailing slash. If the callback origin has another form, the app names the setting to correct: at start with `wearables` in `COMPOSE_PROFILES`, otherwise in the provider guide. If you are upgrading, update the deployed Caddyfile from `src/deploy/Caddyfile` and keep your local access restrictions. Run `docker compose up -d`, then `docker compose up -d --force-recreate caddy` to load the updated file. Copy the new redirect URI from the provider guide and register it. With this switch, the public listener accepts GET on the four vendor callbacks and their result pages. It also answers the HEAD request that Withings sends to the callback when you register it. WHOOP and Polar can use a localhost callback on the OwnHealth port for local setup.
 
 **Create the user and the API key.** The Open Wearables API stays off the network, so this one-off script runs inside `ow-app`. It signs in as the admin account (`admin@admin.com`, or `ADMIN_EMAIL` if you set it in `openwearables.env`, with `OPENWEARABLES_ADMIN_PASSWORD`). It creates an API key and a user, prints the user id, and writes `ow-credentials.json`, readable by you only:
 
@@ -127,20 +129,11 @@ EOF
 
 Without `new-user`, the script creates only a new API key.
 
-**Connect the vendors.** The person signs in to each vendor in a browser, and the vendor sends the browser back to `localhost:8000`. On the host, open a forward to Open Wearables on the loopback address only. The network is `<project>_ow-egress`, `ownhealth_ow-egress` for this stack (`docker network ls` lists it):
-
-```sh
-docker run -d --rm --name ow-forward --network ownhealth_ow-egress \
-  -p 127.0.0.1:8000:8000 alpine/socat:1.8.0.3 TCP-LISTEN:8000,fork,reuseaddr TCP:ow-app:8000
-```
-
-If the browser runs on another computer, forward the port over ssh there: `ssh -N -L 8000:127.0.0.1:8000 <host>`. Print the sign-in link of each vendor, and open it in that browser:
+**Connect the vendors.** Print the sign-in link and open it in a browser that can reach the registered redirect URI. Replace `oura` with the provider's ID and use the Open Wearables user ID from the preceding step.
 
 ```sh
 docker compose exec -T ow-app python -c 'import json, sys, urllib.request; print(json.load(urllib.request.urlopen(f"http://127.0.0.1:8000/api/v1/oauth/{sys.argv[1]}/authorize?user_id={sys.argv[2]}"))["authorization_url"])' oura "OPEN_WEARABLES_USER_UUID"
 ```
-
-When the last vendor is connected, close the forward with `docker stop ow-forward`.
 
 **Link a profile.** Pass `ow-credentials.json` on standard input:
 
@@ -162,11 +155,13 @@ docker compose exec -T app ownhealth openwearables-delete --user "OPEN_WEARABLES
 
 If you already deleted that user in Open Wearables, the same command clears it: Open Wearables answers that the user does not exist.
 
-**Registrar los proveedores.** Cada proveedor necesita una aplicación en su portal de desarrolladores: Oura, Polar, WHOOP o Withings. Dale la URL de redirección `http://localhost:8000/api/v1/oauth/<proveedor>/callback`, con `oura`, `polar`, `whoop` o `withings` como `<proveedor>`. Añade su id de cliente y su secreto a `openwearables.env`, por ejemplo `OURA_CLIENT_ID=...` y `OURA_CLIENT_SECRET=...` (`POLAR_`, `WHOOP_` y `WITHINGS_` para los demás). Después ejecuta `docker compose up -d`.
+**Registrar los proveedores.** En OwnHealth, abre **Conexiones → Configurar un dispositivo**. La guía de cada proveedor muestra la URI de redirección, los permisos OAuth predeterminados y el portal de desarrolladores. Los archivos de Compose añaden `/ow` al origen de OwnHealth para configurar `API_BASE_URL` en Open Wearables. Para Oura y Withings, configura primero el puerto público como se indica abajo. Registra la URI de la guía en el portal. Añade el id y el secreto del cliente a `openwearables.env` y ejecuta `docker compose up -d`. Si registraste una URI en `localhost:8000` en una instalación anterior, actualízala en el portal antes de volver a autorizar.
+
+**Redirección pública para Oura y Withings.** Estos proveedores requieren una URI de redirección HTTPS pública. Con la instalación homelab, dirige un túnel al puerto de enlaces de Caddy siguiendo [Sharing a summary](#sharing-a-summary). En `.env`, pon `OWNHEALTH_OW_CALLBACK=true` y asigna a `OWNHEALTH_OW_PUBLIC_URL` el origen HTTPS del túnel, por ejemplo `https://share.example.org`. Escribe el nombre del servidor en minúsculas y omite el puerto por defecto y la barra final. Si el origen de la redirección tiene otro formato, la aplicación indica qué variable corregir: al arrancar con `wearables` en `COMPOSE_PROFILES`, y en la guía del proveedor en otro caso. Si estás actualizando, incorpora los cambios de `src/deploy/Caddyfile` al Caddyfile instalado y conserva tus restricciones de acceso. Ejecuta `docker compose up -d` y luego `docker compose up -d --force-recreate caddy` para cargar el archivo actualizado. Copia y registra la URI nueva de la guía del proveedor. Con este interruptor, el puerto público acepta peticiones GET para la redirección de los cuatro proveedores y sus páginas de resultado. También responde a la petición HEAD que Withings envía a la redirección cuando la registras. WHOOP y Polar admiten localhost en el puerto de OwnHealth para la configuración local.
 
 **Crear el usuario y la clave de API.** La API de Open Wearables no está en la red, así que el script de arriba se ejecuta una vez dentro de `ow-app`. Inicia sesión con la cuenta de administración (`admin@admin.com`, o `ADMIN_EMAIL` si lo pusiste en `openwearables.env`, con `OPENWEARABLES_ADMIN_PASSWORD`). Crea una clave de API y un usuario, muestra el id del usuario y escribe `ow-credentials.json`, que solo tú puedes leer. Sin `new-user`, el script solo crea una clave de API nueva.
 
-**Conectar los proveedores.** La persona inicia sesión en cada proveedor desde un navegador, y el proveedor devuelve el navegador a `localhost:8000`. En el servidor, abre con el comando `docker run` de arriba un reenvío a Open Wearables solo en la dirección local. La red es `<proyecto>_ow-egress`, `ownhealth_ow-egress` en esta instalación (`docker network ls` la muestra). Si el navegador está en otro ordenador, reenvía el puerto por ssh desde ese ordenador: `ssh -N -L 8000:127.0.0.1:8000 <servidor>`. Muestra el enlace de inicio de sesión de cada proveedor con el comando `python -c` de arriba y ábrelo en ese navegador. Cuando el último proveedor esté conectado, cierra el reenvío con `docker stop ow-forward`.
+**Conectar los proveedores.** Muestra el enlace de inicio de sesión con el comando `python -c` de arriba y ábrelo en un navegador que pueda acceder a la URI registrada. Sustituye `oura` por el id del proveedor y usa el id del usuario de Open Wearables creado en el paso anterior.
 
 **Vincular un perfil.** Pasa `ow-credentials.json` por la entrada estándar del comando `openwearables-connect` de arriba.
 
