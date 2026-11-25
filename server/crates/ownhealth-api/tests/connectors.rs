@@ -913,12 +913,49 @@ async fn no_log_line_carries_a_token_on_the_happy_or_the_failing_paths() -> R {
 }
 
 #[tokio::test]
+async fn the_wearables_guide_names_the_setting_to_fix_instead_of_a_wrong_redirect_uri() -> R {
+    // `docker compose --profile wearables` with a callback origin Open Wearables writes differently:
+    // the app starts, and the guide shows what to correct, never a URI the vendor would refuse.
+    let mut env = env().await?;
+    let vars: std::collections::HashMap<String, String> = [
+        ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+        ("OWNHEALTH_OW_PUBLIC_URL", "https://Share.Example.test:443"),
+        ("OWNHEALTH_OW_COMPOSE_FALLBACK", "https://health.example.test"),
+        ("OWNHEALTH_OW_COMPOSE_FALLBACK_VAR", "OWNHEALTH_DOMAIN"),
+        ("COMPOSE_PROFILES", ""),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let configured = ownhealth_core::config::Settings::from(&vars)?;
+    env.settings.ow_url = configured.ow_url;
+    env.settings.ow_public_url = configured.ow_public_url;
+    env.settings.ow_origin_fix = configured.ow_origin_fix;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex.get("/api/wearables/setup").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        r.json["origin_fix"],
+        json!({"setting": "OWNHEALTH_OW_PUBLIC_URL", "value": "https://share.example.test"})
+    );
+    assert!(r.json["api_base_url"].is_null(), "{}", r.json);
+    let providers = r.json["providers"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !providers.is_empty() && providers.iter().all(|p| p["redirect_uri"].is_null()),
+        "{}",
+        r.json
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn only_an_owner_or_guardian_reads_the_wearables_setup_guide() -> R {
     let env = env().await?;
     let mut alex = env.as_user(env.user("alex")).await?;
     let r = alex.get("/api/wearables/setup").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     assert_eq!(r.json["api_base_url"], "https://testserver/ow");
+    assert!(r.json["origin_fix"].is_null(), "{}", r.json);
     let whoop = r.json["providers"]
         .as_array()
         .and_then(|list| list.iter().find(|p| p["id"] == "whoop"))

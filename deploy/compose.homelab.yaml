@@ -55,7 +55,9 @@ services:
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password
       OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
       COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
-      OWNHEALTH_OW_URL: ${OWNHEALTH_OW_URL:-}
+      # On in every install, so `--profile wearables` on the command line gets the callback proxy too.
+      # Without the sidecar the proxy answers 502.
+      OWNHEALTH_OW_URL: ${OWNHEALTH_OW_URL:-http://ow-app:8000}
       OWNHEALTH_OW_PUBLIC_URL: ${OWNHEALTH_OW_PUBLIC_URL:-}
       # Keep the fallback in sync with ow-app's API_BASE_URL. Pass its source for startup errors.
       OWNHEALTH_OW_COMPOSE_FALLBACK: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}

@@ -124,7 +124,14 @@
 			<li>
 				<h2>{t('ow_setup_enable')}</h2>
 				<p>{t('ow_setup_enable_d')} <a href={docs} target="_blank" rel="noreferrer">{t('ow_setup_deploy_docs')}</a></p>
-				<code class="mono">API_BASE_URL={setup.api_base_url}</code>
+				{#if setup.origin_fix}
+					<p class="p2err" role="alert">{tf('ow_setup_origin_fix', { setting: setup.origin_fix.setting })}</p>
+					{#if setup.origin_fix.value !== null}
+						<code class="mono">{setup.origin_fix.setting}={setup.origin_fix.value}</code>
+					{/if}
+				{:else}
+					<code class="mono">API_BASE_URL={setup.api_base_url}</code>
+				{/if}
 				{#if vendor.publicHttps}
 					<p class="dim">{tf('ow_setup_https', { vendor: vendor.name })}</p>
 				{/if}
@@ -132,7 +139,9 @@
 			<li>
 				<h2>{t('ow_setup_register')}</h2>
 				<p>{t('ow_setup_register_d')} <a href={vendor.portal} target="_blank" rel="noreferrer">{tf('ow_setup_portal', { vendor: vendor.name })}</a></p>
-				{@render copyField('ow-redirect', t('ow_setup_redirect'), t('ow_setup_copy_redirect'), provider.redirect_uri)}
+				{#if provider.redirect_uri}
+					{@render copyField('ow-redirect', t('ow_setup_redirect'), t('ow_setup_copy_redirect'), provider.redirect_uri)}
+				{/if}
 				{@render copyField('ow-scopes', t('ow_setup_scopes'), t('ow_setup_copy_scopes'), vendor.scopes)}
 				<p>{tf('ow_setup_credentials', { id: `${vendor.env}_CLIENT_ID`, secret: `${vendor.env}_CLIENT_SECRET` })}</p>
 			</li>

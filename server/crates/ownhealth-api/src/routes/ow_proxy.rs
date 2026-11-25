@@ -168,15 +168,23 @@ fn result_location(upstream: &Upstream, provider: &str, location: &HeaderValue) 
 
 #[derive(Serialize)]
 struct Setup {
-    api_base_url: String,
+    /// Null, like every redirect URI, while `origin_fix` names a setting to correct.
+    api_base_url: Option<String>,
     providers: Vec<SetupProvider>,
+    origin_fix: Option<OriginFix>,
+}
+
+#[derive(Serialize)]
+struct OriginFix {
+    setting: &'static str,
+    value: Option<String>,
 }
 
 #[derive(Serialize)]
 struct SetupProvider {
     id: &'static str,
     mcp: providers::Mcp,
-    redirect_uri: String,
+    redirect_uri: Option<String>,
 }
 
 /// The signed-in guide reads the same provider policy the MCP readers and the poller use. It is an
@@ -198,8 +206,15 @@ async fn setup(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) -> R<
     )
     .await?;
     tx.commit().await?;
+    // Open Wearables would send another redirect URI than any this guide could show.
+    let origin_fix = rt.settings.ow_origin_fix.as_ref().map(|fix| OriginFix {
+        setting: fix.setting,
+        value: fix.value.clone(),
+    });
     let origin = rt.settings.ow_public_url.as_deref().unwrap_or(&rt.settings.base_url);
-    let api_base_url = format!("{}{PREFIX}", origin.trim_end_matches('/'));
+    let api_base_url = origin_fix
+        .is_none()
+        .then(|| format!("{}{PREFIX}", origin.trim_end_matches('/')));
     let providers = PROVIDERS
         .into_iter()
         .filter_map(|id| {
@@ -207,12 +222,13 @@ async fn setup(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) -> R<
             (policy.ingest == providers::Ingest::Allow).then(|| SetupProvider {
                 id,
                 mcp: policy.mcp,
-                redirect_uri: format!("{api_base_url}{OAUTH}{id}/callback"),
+                redirect_uri: api_base_url.as_ref().map(|base| format!("{base}{OAUTH}{id}/callback")),
             })
         })
         .collect();
     Ok(Json(Setup {
         api_base_url,
         providers,
+        origin_fix,
     }))
 }

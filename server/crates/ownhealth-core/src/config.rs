@@ -59,11 +59,16 @@ pub struct Settings {
     /// every SMART Health Link points at. Unset: sharing is off. https, or http on a loopback host
     /// ([`check_share_url`]).
     pub share_url: Option<String>,
-    /// The private Open Wearables origin. Set by `OWNHEALTH_OW_URL` or the Compose wearables profile.
+    /// `OWNHEALTH_OW_URL`: the private Open Wearables origin. Unset: the OAuth proxy is off. Both
+    /// Compose files set it, so the proxy is on whenever the sidecar can run.
     pub ow_url: Option<reqwest::Url>,
     /// `OWNHEALTH_OW_PUBLIC_URL`: the origin the vendor sends the browser to, before the /ow prefix.
-    /// Set when the integration is on and a callback origin is configured. Otherwise the guide uses `base_url`.
+    /// In Compose, the same fallback as Open Wearables' API_BASE_URL. Unset: the guide uses `base_url`.
     pub ow_public_url: Option<String>,
+    /// A callback origin Open Wearables would write differently from the setup guide, while the start
+    /// cannot tell whether wearables are on (Compose without `wearables` in COMPOSE_PROFILES). The
+    /// guide then names the setting to correct instead of a redirect URI.
+    pub ow_origin_fix: Option<OwOriginFix>,
     /// `OWNHEALTH_TRUSTED_PROXIES`: comma-separated addresses or CIDR ranges of the proxies in front
     /// of the app. Only a request whose direct peer is one of them has its `X-Forwarded-For` read for
     /// the client address. Empty: the peer address is the client address.
@@ -114,6 +119,7 @@ impl Default for Settings {
             share_url: None,
             ow_url: None,
             ow_public_url: None,
+            ow_origin_fix: None,
             trusted_proxies: Vec::new(),
             anchor_dir: None,
             orthanc: None,
@@ -336,7 +342,27 @@ fn ow_origin(value: &str, setting: &str) -> Result<reqwest::Url> {
         .ok_or_else(|| Error::Invalid(format!("{setting} must be an HTTP or HTTPS origin.")))
 }
 
-fn configured_ow_public_url(env: &dyn Env, compose_fallback: Option<String>) -> Result<Option<String>> {
+/// The setting that makes the Open Wearables callback origin, and how to write it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwOriginFix {
+    pub setting: &'static str,
+    /// The value written as Open Wearables needs it. None: the value is no HTTP or HTTPS origin.
+    pub value: Option<String>,
+    message: String,
+}
+
+impl OwOriginFix {
+    /// The start error that names the setting and the value to write.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// The callback origin, or the fix when Open Wearables would write it differently from the guide.
+fn configured_ow_public_url(
+    env: &dyn Env,
+    compose_fallback: Option<String>,
+) -> Result<std::result::Result<Option<String>, OwOriginFix>> {
     const PUBLIC: &str = "OWNHEALTH_OW_PUBLIC_URL";
     const DOMAIN: &str = "OWNHEALTH_DOMAIN";
     let public = if compose_fallback.is_some() {
@@ -355,27 +381,45 @@ fn configured_ow_public_url(env: &dyn Env, compose_fallback: Option<String>) -> 
             };
             (value, source)
         }
-        (None, None) => return Ok(None),
+        (None, None) => return Ok(Ok(None)),
     };
-    let canonical = ow_origin(&value, source.unwrap_or(PUBLIC))?
-        .origin()
-        .ascii_serialization();
+    let canonical = match ow_origin(&value, source.unwrap_or(PUBLIC)) {
+        Ok(url) => url.origin().ascii_serialization(),
+        Err(err) => {
+            return Ok(Err(OwOriginFix {
+                setting: source.unwrap_or(PUBLIC),
+                value: None,
+                message: err.to_string(),
+            }));
+        }
+    };
     if value != canonical {
         // OW appends its callback path to the string as written. Normalizing only the guide
         // would tell the operator to register a redirect URI different from the one OW sends.
-        let guidance = match source {
-            Some(DOMAIN) => format!(
-                "{DOMAIN} must be written as {}",
-                canonical.trim_start_matches("https://")
+        let (setting, written, guidance) = match source {
+            Some(DOMAIN) => {
+                let host = canonical.trim_start_matches("https://").to_string();
+                let guidance = format!("{DOMAIN} must be written as {host}");
+                (DOMAIN, host, guidance)
+            }
+            Some(setting) => (
+                setting,
+                canonical.clone(),
+                format!("{setting} must be written as {canonical}"),
             ),
-            Some(setting) => format!("{setting} must be written as {canonical}"),
-            None => format!("Set {PUBLIC}={canonical} for the callback origin"),
+            None => (
+                PUBLIC,
+                canonical.clone(),
+                format!("Set {PUBLIC}={canonical} for the callback origin"),
+            ),
         };
-        return Err(Error::Invalid(format!(
-            "{guidance} because Open Wearables builds its redirect URI from the value as written."
-        )));
+        return Ok(Err(OwOriginFix {
+            setting,
+            value: Some(written),
+            message: format!("{guidance} because Open Wearables builds its redirect URI from the value as written."),
+        }));
     }
-    Ok(Some(value))
+    Ok(Ok(Some(value)))
 }
 
 impl Settings {
@@ -392,23 +436,27 @@ impl Settings {
         if let Some(password) = env_or(env, "DB_PASSWORD")? {
             url = with_password(&url, &password);
         }
-        // Compose starts the sidecar only with the wearables profile. A separately configured
-        // private URL also enables the integration, including outside Compose.
-        let ow_compose_fallback = env.var("OWNHEALTH_OW_COMPOSE_FALLBACK").filter(|_| {
-            env.var("COMPOSE_PROFILES").is_some_and(|profiles| {
+        // Both Compose files pass the private URL to every install, because `--profile wearables` on
+        // the command line starts the sidecar without telling the app. So a callback origin Open
+        // Wearables would write differently refuses the start only when wearables are known to be on:
+        // named in COMPOSE_PROFILES, or the URL set outside Compose. Otherwise the guide names the fix.
+        let ow_compose_fallback = env.var("OWNHEALTH_OW_COMPOSE_FALLBACK").filter(|v| !v.is_empty());
+        let ow_known_on = ow_compose_fallback.is_none()
+            || env.var("COMPOSE_PROFILES").is_some_and(|profiles| {
                 profiles
                     .split(',')
                     .any(|profile| matches!(profile.trim(), "wearables" | "*"))
-            })
-        });
+            });
         let ow_url = env_or(env, "OW_URL")?
-            .or_else(|| ow_compose_fallback.as_ref().map(|_| "http://ow-app:8000".into()))
             .map(|s| ow_origin(&s, "OWNHEALTH_OW_URL"))
             .transpose()?;
-        let ow_public_url = if ow_url.is_some() {
-            configured_ow_public_url(env, ow_compose_fallback)?
-        } else {
-            None
+        let (ow_public_url, ow_origin_fix) = match ow_url {
+            None => (None, None),
+            Some(_) => match configured_ow_public_url(env, ow_compose_fallback)? {
+                Ok(origin) => (origin, None),
+                Err(fix) if ow_known_on => return Err(Error::Invalid(fix.message)),
+                Err(fix) => (None, Some(fix)),
+            },
         };
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
         let dev_auth = flag(env, "DEV_AUTH", false)?;
@@ -451,6 +499,7 @@ impl Settings {
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
             ow_url,
             ow_public_url,
+            ow_origin_fix,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
             // serve's viewer proxy and every worker's DICOM import read the same Orthanc
@@ -759,6 +808,43 @@ mod tests {
             .expect(value);
             assert_eq!(s.ow_public_url.as_deref(), Some(value));
         }
+    }
+
+    #[test]
+    fn a_compose_start_without_the_wearables_profile_names_the_origin_fix_instead_of_failing() {
+        let compose = |profiles: &str, public: &str| {
+            env(&[
+                ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+                ("OWNHEALTH_OW_PUBLIC_URL", public),
+                ("OWNHEALTH_OW_COMPOSE_FALLBACK", "https://Health.Example.test:443"),
+                ("OWNHEALTH_OW_COMPOSE_FALLBACK_VAR", "OWNHEALTH_DOMAIN"),
+                ("COMPOSE_PROFILES", profiles),
+            ])
+        };
+        for (public, setting, value) in [
+            ("", "OWNHEALTH_DOMAIN", Some("health.example.test")),
+            (
+                "https://cb.example.test/",
+                "OWNHEALTH_OW_PUBLIC_URL",
+                Some("https://cb.example.test"),
+            ),
+            ("cb.example.test", "OWNHEALTH_OW_PUBLIC_URL", None),
+        ] {
+            let s = Settings::from(&compose("ocr", public)).expect(public);
+            assert!(s.ow_url.is_some() && s.ow_public_url.is_none(), "{public}");
+            let fix = s.ow_origin_fix.expect(public);
+            assert_eq!((fix.setting, fix.value.as_deref()), (setting, value), "{public}");
+            // With the profile named, the start refuses with the same words.
+            for profiles in ["wearables", "ocr, wearables", "*"] {
+                let err = Settings::from(&compose(profiles, public))
+                    .expect_err(profiles)
+                    .to_string();
+                assert!(err.contains(fix.message()), "{profiles}: {err}");
+            }
+        }
+        let s = Settings::from(&compose("", "https://cb.example.test")).expect("canonical");
+        assert_eq!(s.ow_public_url.as_deref(), Some("https://cb.example.test"));
+        assert!(s.ow_origin_fix.is_none());
     }
 
     #[test]

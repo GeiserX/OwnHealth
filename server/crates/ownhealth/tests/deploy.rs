@@ -430,12 +430,18 @@ fn render_doc(compose: &Path, env_file: &Path, extra: &str, files: &[(&str, Stri
 }
 
 fn render_config(dir: &Path, project: Option<&str>) -> anyhow::Result<Value> {
+    render_config_with(dir, project, &[])
+}
+
+/// `render_config` with more flags before `config`, such as `--profile wearables`.
+fn render_config_with(dir: &Path, project: Option<&str>, flags: &[&str]) -> anyhow::Result<Value> {
     let mut cmd = Command::new("docker");
     cmd.arg("compose");
     if let Some(project) = project {
         cmd.args(["-p", project]);
     }
     let out = cmd
+        .args(flags)
         .args(["config", "--format", "json"])
         .current_dir(dir)
         .env_clear()
@@ -1750,25 +1756,91 @@ fn rendered_wearables_settings(app: &Value) -> Result<Settings, ownhealth_core::
 }
 
 #[test]
-fn both_stacks_ignore_the_wearables_origin_with_the_profile_off() -> R {
+fn both_stacks_start_with_a_wrong_wearables_origin_and_the_profile_off() -> R {
     if !has_compose() {
         eprintln!("docker compose not available: skipped");
         return Ok(());
     }
     for (case, compose, env, extra) in cases() {
         let base = format!("\n{extra}COMPOSE_PROFILES=\n");
-        let noncanonical = if case == "homelab" {
-            "OWNHEALTH_DOMAIN=Health.Example.test:443\n"
+        let (noncanonical, setting, value) = if case == "homelab" {
+            (
+                "OWNHEALTH_DOMAIN=Health.Example.test:443\n",
+                "OWNHEALTH_DOMAIN",
+                "health.example.test",
+            )
         } else {
-            "OWNHEALTH_BASE_URL=\nOWNHEALTH_HTTP_PORT=80\n"
+            (
+                "OWNHEALTH_BASE_URL=\nOWNHEALTH_HTTP_PORT=80\n",
+                "OWNHEALTH_OW_PUBLIC_URL",
+                "http://localhost",
+            )
         };
-        for override_url in ["", "OWNHEALTH_OW_PUBLIC_URL=invalid\n"] {
+        // The start cannot tell whether the sidecar runs, so the setup guide names the fix instead.
+        for (override_url, setting, value) in [
+            ("", setting, Some(value)),
+            ("OWNHEALTH_OW_PUBLIC_URL=invalid\n", "OWNHEALTH_OW_PUBLIC_URL", None),
+        ] {
             let services = render(&compose, &env, &format!("{base}{noncanonical}{override_url}"), &[])?;
             assert!(services.get("ow-app").is_none(), "{case}");
             let settings =
                 rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
-            assert!(settings.ow_url.is_none() && settings.ow_public_url.is_none(), "{case}");
+            assert!(settings.ow_url.is_some() && settings.ow_public_url.is_none(), "{case}");
+            let fix = settings.ow_origin_fix.expect("the guide names the fix");
+            assert_eq!((fix.setting, fix.value.as_deref()), (setting, value), "{case}");
         }
+    }
+    Ok(())
+}
+
+/// The services of both stacks started as `docker compose --profile wearables up -d` with
+/// COMPOSE_PROFILES left empty in .env.
+fn render_wearables_flag(compose: &Path, env_file: &Path, extra: &str) -> anyhow::Result<Value> {
+    let dir = tempfile::tempdir()?;
+    std::fs::copy(compose, dir.path().join("compose.yaml"))?;
+    std::fs::write(
+        dir.path().join(".env"),
+        std::fs::read_to_string(env_file)? + extra + "\nCOMPOSE_PROFILES=\n",
+    )?;
+    Ok(render_config_with(dir.path(), None, &["--profile", "wearables"])?["services"].clone())
+}
+
+#[test]
+fn both_stacks_turn_the_callback_proxy_on_with_the_wearables_profile_flag() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        for public in ["", "OWNHEALTH_OW_PUBLIC_URL=https://share.example.test\n"] {
+            let services = render_wearables_flag(&compose, &env, &format!("\n{extra}{public}"))?;
+            assert!(services.get("ow-app").is_some(), "{case}: the flag starts the sidecar");
+            let settings =
+                rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
+            assert_eq!(
+                settings.ow_url.as_ref().map(|url| url.as_str()),
+                Some("http://ow-app:8000/"),
+                "{case} {public}: the callback proxy is on whenever the sidecar runs"
+            );
+            let origin = settings.ow_public_url.as_deref().unwrap_or(&settings.base_url);
+            assert_eq!(
+                format!("{origin}/ow"),
+                env_str(&services["ow-app"], "API_BASE_URL"),
+                "{case} {public}: the guide shows the origin Open Wearables sends"
+            );
+            assert!(settings.ow_origin_fix.is_none(), "{case} {public}");
+        }
+        // A callback origin Open Wearables writes differently: no redirect URI, the guide names the fix.
+        let public = "OWNHEALTH_OW_PUBLIC_URL=https://Share.Example.test:443\n";
+        let services = render_wearables_flag(&compose, &env, &format!("\n{extra}{public}"))?;
+        let settings = rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
+        assert!(settings.ow_url.is_some() && settings.ow_public_url.is_none(), "{case}");
+        let fix = settings.ow_origin_fix.expect("the guide names the fix");
+        assert_eq!(
+            (fix.setting, fix.value.as_deref()),
+            ("OWNHEALTH_OW_PUBLIC_URL", Some("https://share.example.test")),
+            "{case}"
+        );
     }
     Ok(())
 }
