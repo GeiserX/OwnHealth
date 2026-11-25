@@ -45,6 +45,10 @@ async fn one_access_line_per_request_without_the_query() -> anyhow::Result<()> {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
+    // With one dispatcher registered, tracing asks each thread's own default whether a line is wanted, so a
+    // line another test thread reaches first is cached as unwanted for every thread. A second, inert dispatcher
+    // makes it ask all of them.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
 
     let res = app
         .oneshot(Request::get("/healthz?x=secret").body(Body::empty())?)

@@ -18,6 +18,7 @@ pub mod documents;
 pub mod error;
 pub mod family;
 pub mod fhir;
+pub mod gedcom;
 pub mod ids;
 pub mod ingest;
 pub mod jobs;

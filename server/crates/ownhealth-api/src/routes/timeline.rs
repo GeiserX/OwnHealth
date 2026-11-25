@@ -6,7 +6,8 @@
 //! ```
 //!
 //! Lab draws (one event per report, not per value), medication starts and stops, diagnoses, vaccines,
-//! visits, procedures, non-lab documents, imaging studies and genome imports. Only current facts;
+//! visits, procedures, non-lab documents, imaging studies (one per study, with its linked report and
+//! the path that opens the viewer) and genome imports. Only current facts;
 //! sensitive rows only with `read:sensitive`; each event type only with the scope that guards its
 //! facts. Every fact event cites a `src`; a document event names its document, and its filename goes
 //! out as untrusted text.
@@ -72,6 +73,8 @@ struct Words {
     stopped: &'static str,
     genome: &'static str,
     visit: &'static str,
+    /// The title of a study whose disc names neither a description nor a modality.
+    imaging: &'static str,
     /// A document type (`document.doc_type`) as a title; any other type is `document`.
     doc_types: &'static [(&'static str, &'static str)],
     document: &'static str,
@@ -88,6 +91,7 @@ const EN: Words = Words {
     stopped: "{name} stopped",
     genome: "Genome facts imported",
     visit: "Visit",
+    imaging: "Imaging study",
     doc_types: &[
         ("discharge", "Discharge report"),
         ("imaging_report", "Imaging report"),
@@ -107,6 +111,7 @@ const ES: Words = Words {
     stopped: "Fin de {name}",
     genome: "Datos genómicos importados",
     visit: "Visita médica",
+    imaging: "Estudio de imagen",
     doc_types: &[
         ("discharge", "Informe de alta"),
         ("imaging_report", "Informe de imagen"),
@@ -155,7 +160,7 @@ impl Words {
 pub fn phrases() -> Value {
     let one = |w: &Words| {
         let mut v = vec![
-            w.draw, w.draw1, w.flagged, w.flagged1, w.started, w.stopped, w.genome, w.visit, w.document,
+            w.draw, w.draw1, w.flagged, w.flagged1, w.started, w.stopped, w.genome, w.visit, w.imaging, w.document,
         ];
         v.extend(w.doc_types.iter().map(|(_, t)| *t));
         v.extend(w.enums.iter().map(|(_, t)| *t));
@@ -295,6 +300,7 @@ async fn records(
     sens: bool,
     t: &Words,
     want: &BTreeSet<&str>,
+    viewer: Option<&str>,
 ) -> R<Vec<Option<Event>>> {
     let mut out = Vec::new();
     if want.contains("medication") {
@@ -414,24 +420,84 @@ async fn records(
         out.extend(documents(conn, pid, sens, t).await?);
     }
     if want.contains("imaging") {
-        let sql = "select i.modality, i.description, i.study_date, i.src_id, s.label \
-                   from imaging_study i join src s on s.id = i.src_id where i.profile_id = $1 and i.status = 'current'";
-        for r in rows(conn, sql, pid).await? {
-            let modality = text(&r, "modality")?.filter(|m| !m.is_empty());
-            let title = text(&r, "description")?
-                .filter(|d| !d.is_empty())
-                .or_else(|| modality.clone())
-                .unwrap_or_else(|| "Imaging study".into());
-            out.push(event(
-                day(&r, "study_date")?,
-                "imaging",
-                title,
-                modality,
-                text(&r, "src_id")?,
-                text(&r, "label")?,
-                None,
-            ));
+        out.extend(imaging(conn, pid, sens, t, viewer).await?);
+    }
+    Ok(out)
+}
+
+/// The documents a timeline shows (`d`): active, part of the record, sensitive only if allowed.
+fn shown_document_sql(sens: bool) -> String {
+    let hide = if sens {
+        String::new()
+    } else {
+        format!(" and not {}", sensitive_document_sql("d.id"))
+    };
+    format!("d.status = 'active' and {}{hide}", record_document_sql("d"))
+}
+
+/// One event per current study (slice 42). It names the study (`study_id`, `study_instance_uid`), the
+/// series and instances Orthanc holds, and the report the import linked to it (`report_document_id`,
+/// while that report is a document this reader sees on the timeline; it is then no document event of its
+/// own, see `fold_reports`). `viewer_open` is the path to POST for a viewer link (imaging_proxy.rs): null
+/// while Orthanc holds no study for it, or when the reader's own grant lacks read:records (emergency
+/// access reads the record but never opens the viewer). A disc may name no StudyDate (DICOM type 2):
+/// `study_date` is then null and the event sits on its report's day, else on the day it was recorded,
+/// so every current study is listed.
+async fn imaging(
+    conn: &mut PgConnection,
+    pid: Uuid,
+    sens: bool,
+    t: &Words,
+    viewer: Option<&str>,
+) -> R<Vec<Option<Event>>> {
+    let sql = format!(
+        "select i.id, i.study_instance_uid, i.orthanc_id, i.modality, i.description, i.study_date, \
+         coalesce(i.study_date, r.day, i.recorded_at::date) as day, \
+         (i.fhir->>'numberOfSeries')::int as series, (i.fhir->>'numberOfInstances')::int as instances, \
+         r.id as report, i.src_id, s.label \
+         from imaging_study i join src s on s.id = i.src_id \
+         left join lateral (select d.id, coalesce(d.collected_at, d.reported_at)::date as day from document d \
+           where d.id = i.report_document_id and d.profile_id = i.profile_id and {}) r on true \
+         where i.profile_id = $1 and i.status = 'current' \
+         order by i.id",
+        shown_document_sql(sens)
+    );
+    let mut out = Vec::new();
+    for r in rows(conn, &sql, pid).await? {
+        let modality = text(&r, "modality")?.filter(|m| !m.is_empty());
+        let title = text(&r, "description")?
+            .filter(|d| !d.is_empty())
+            .or_else(|| modality.clone())
+            .unwrap_or_else(|| t.imaging.to_string());
+        let Some(mut e) = event(
+            day(&r, "day")?,
+            "imaging",
+            title,
+            modality,
+            text(&r, "src_id")?,
+            text(&r, "label")?,
+            None,
+        ) else {
+            continue;
+        };
+        let id: Uuid = r.try_get("id")?;
+        let uid: String = r.try_get("study_instance_uid")?;
+        let open = match (viewer, text(&r, "orthanc_id")?) {
+            (Some(slug), Some(_)) => json!(format!("/api/profiles/{slug}/imaging/studies/{uid}/open")),
+            _ => Value::Null,
+        };
+        let report: Option<Uuid> = r.try_get("report")?;
+        if let Some(m) = e.json.as_object_mut() {
+            m.insert("study_id".into(), json!(id));
+            m.insert("study_instance_uid".into(), json!(uid));
+            m.insert("study_date".into(), json!(day(&r, "study_date")?.map(|d| py_date(&d))));
+            m.insert("report_document_id".into(), json!(report));
+            m.insert("viewer_open".into(), open);
+            m.insert("series".into(), json!(r.try_get::<Option<i32>, _>("series")?));
+            m.insert("instances".into(), json!(r.try_get::<Option<i32>, _>("instances")?));
         }
+        e.tie = id.to_string();
+        out.push(Some(e));
     }
     Ok(out)
 }
@@ -442,18 +508,12 @@ async fn records(
 /// (the day it was uploaded is not a day anything happened). A document with a sensitive fact is
 /// sensitive. A document has no `src`: it is its own source.
 async fn documents(conn: &mut PgConnection, pid: Uuid, sens: bool, t: &Words) -> R<Vec<Option<Event>>> {
-    let hide = if sens {
-        String::new()
-    } else {
-        format!(" and not {}", sensitive_document_sql("d.id"))
-    };
     let sql = format!(
         "select d.id, d.doc_type, d.filename, d.provider_name, coalesce(d.collected_at, d.reported_at)::date as day \
-         from document d where d.profile_id = $1 and d.status = 'active' \
+         from document d where d.profile_id = $1 and {shown} \
          and d.doc_type is distinct from 'lab_report' and d.doc_type is distinct from 'genomics' \
-         and {record}{hide} \
          order by d.id",
-        record = record_document_sql("d"),
+        shown = shown_document_sql(sens),
     );
     let mut out = Vec::new();
     for r in rows(conn, &sql, pid).await? {
@@ -662,6 +722,18 @@ async fn genome(conn: &mut PgConnection, pid: Uuid, t: &Words) -> R<Vec<Option<E
     Ok(out)
 }
 
+/// A report that an imaging event of the answer names is part of that study's event, not a document
+/// event of its own. Only a study event the answer holds takes it: with no imaging asked, or a from/to
+/// window that leaves the study out, the report stays a document event, so it is never lost.
+fn fold_reports(items: &mut Vec<Event>) {
+    let named: BTreeSet<String> = items
+        .iter()
+        .filter(|e| e.kind == "imaging")
+        .filter_map(|e| e.json["report_document_id"].as_str().map(str::to_owned))
+        .collect();
+    items.retain(|e| e.kind != "document" || !e.json["document_id"].as_str().is_some_and(|id| named.contains(id)));
+}
+
 /// Python's `repr(sorted(set_of_str))`: `['a', 'b']`.
 fn py_list(items: &BTreeSet<&str>) -> String {
     let parts: Vec<String> = items.iter().map(|s| ownhealth_normalize::text::py_repr(s)).collect();
@@ -711,7 +783,12 @@ async fn timeline(
     if want.contains("lab") {
         events.extend(labs(&mut tx, pid, perm.may_read_sensitive("read:labs"), t).await?);
     }
-    events.extend(records(&mut tx, pid, sens, t, &want).await?);
+    // the viewer opens with the reader's own read:records only (imaging_proxy.rs viewer_permission)
+    let viewer = perm
+        .own_scopes
+        .contains("read:records")
+        .then_some(perm.profile.slug.as_str());
+    events.extend(records(&mut tx, pid, sens, t, &want, viewer).await?);
     if want.contains("genome") {
         events.extend(genome(&mut tx, pid, t).await?);
     }
@@ -723,6 +800,7 @@ async fn timeline(
         .flatten()
         .filter(|e| from.as_ref().is_none_or(|f| &e.date >= f) && to.as_ref().is_none_or(|t| &e.date <= t))
         .collect();
+    fold_reports(&mut items);
     // newest first, as Python's sort(reverse=True); the src breaks the remaining ties
     items.sort_by(|a, b| {
         (&b.date, b.kind, &b.title)

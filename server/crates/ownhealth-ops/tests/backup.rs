@@ -2292,3 +2292,76 @@ async fn round_eleven_a_closed_profile_stays_closed_after_another_backup_and_res
     assert_eq!(shredded_row(&db, alex).await?, None);
     Ok(())
 }
+
+/// A profile listed in keys.closed that has a newer key in the keyring (made on another restored
+/// timeline) keeps that key on restore, and a later backup still finds it in keyring.json: the closed
+/// list never shreds a key the keyring still publishes.
+#[tokio::test]
+async fn a_closed_profile_keeps_a_newer_keyring_key_on_restore() -> R {
+    use ownhealth_core::keyfile;
+    use ownhealth_core::keys::shred;
+
+    ownhealth_ops::register();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/upgrade/0.4.0");
+    let dir = tempfile::tempdir()?;
+    let first = TestDb::empty().await?;
+    let s1 = first.settings(&dir.path().join("first"))?;
+    ownhealth_ops::restore(&s1, &fixture).await?;
+    migrate::migrate_embedded(&first.pool).await?;
+    let alex: Uuid = sqlx::query_scalar("select id from profile where slug = 'alex'")
+        .fetch_one(&first.pool)
+        .await?;
+    BlobStore::for_settings(&s1)?.put_bytes(BlobOwner::Profile(alex), b"%PDF-1.4 one")?;
+    let keyed = ownhealth_ops::backup(&s1, &dir.path().join("keyed")).await?;
+    let mut tx = first.pool.begin().await?;
+    shred(&mut tx, alex).await?;
+    tx.commit().await?;
+    let mut c = first.pool.acquire().await?;
+    keyfile::rewrite(&mut c, &s1).await?;
+    drop(c);
+    let stack = |db: &TestDb, name: &str| -> anyhow::Result<Settings> {
+        let mut s = db.settings(&dir.path().join(name))?;
+        s.secrets_key = s1.secrets_key.clone();
+        s.keyring_dir = Some(s1.keyring_path());
+        Ok(s)
+    };
+    // timeline 2: restore the keyed backup (Alex closed), back it up: keys.closed = [alex]
+    let second = TestDb::empty().await?;
+    let s2 = stack(&second, "second")?;
+    assert_eq!(ownhealth_ops::restore(&s2, &keyed).await?["ok"], true);
+    let closed_backup = ownhealth_ops::backup(&s2, &dir.path().join("closed")).await?;
+    assert_eq!(strs(&manifest(&closed_backup)?["keys"]["closed"]), [alex.to_string()]);
+    // timeline 3: the keyless 0.4.0 backup brings Alex back with no row; the named tombstone lets
+    // Alex make a new key, which the keyring publishes
+    let third = TestDb::empty().await?;
+    let s3 = stack(&third, "third")?;
+    ownhealth_ops::restore(&s3, &fixture).await?;
+    migrate::migrate_embedded(&third.pool).await?;
+    BlobStore::for_settings(&s3)?.put_bytes(BlobOwner::Profile(alex), b"%PDF-1.4 two")?;
+    let mut c = third.pool.acquire().await?;
+    let ring = keyfile::rewrite(&mut c, &s3).await?;
+    drop(c);
+    assert!(
+        ring.profiles.contains_key(&alex),
+        "timeline 3 published no key for Alex"
+    );
+    let newer = ring.profiles[&alex].clone();
+    // restore the closed backup: Alex keeps the newer key
+    let fourth = TestDb::empty().await?;
+    let s4 = stack(&fourth, "fourth")?;
+    let report = ownhealth_ops::restore(&s4, &closed_backup).await?;
+    assert_eq!(report["ok"], true, "{report:#}");
+    let row: Option<Option<Vec<u8>>> = sqlx::query_scalar("select wrapped_dek from profile_key where profile_id = $1")
+        .bind(alex)
+        .fetch_optional(&fourth.pool)
+        .await?;
+    assert_eq!(row, Some(Some(newer.clone())), "Alex did not keep the keyring key");
+    ownhealth_ops::backup(&s4, &dir.path().join("fourth-backup")).await?;
+    let after = keyfile::read(&keyfile::path(&s4))?.expect("keyring");
+    assert_eq!(
+        after.profiles.get(&alex),
+        Some(&newer),
+        "the newer key left keyring.json"
+    );
+    Ok(())
+}

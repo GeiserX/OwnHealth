@@ -1,0 +1,892 @@
+﻿0 HEAD
+1 GEDC
+2 VERS 7.0
+1 NOTE Zirkhaven synthetic text
+2 MIME text/plain
+2 LANG en-US
+2 TRAN Zirkhaven synthetic text
+3 LANG de
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S1@
+3 PAGE 2
+1 SCHMA
+2 TAG _SKYPEID http://xmlns.com/foaf/0.1/skypeID
+2 TAG _JABBERID http://xmlns.com/foaf/0.1/jabberID
+2 TAG _RECORD http://example.com/record-type
+2 TAG _STRUCT http://example.com/substructure-type
+2 TAG _ENUMVAL http://example.com/enumeration-value
+2 TAG _CALENDAR http://example.com/calendar
+2 TAG _MONTH http://example.com/month
+2 TAG _EPOCH http://example.com/epoch
+2 TAG _USER https://gedcom.io/terms/v7/record-SUBM
+2 TAG _CREATOR https://gedcom.io/terms/v7/SUBM
+2 TAG _CALENDRIER https://gedcom.io/terms/v7/cal-FRENCH_R
+2 TAG _JOUR https://gedcom.io/terms/v7/month-COMP
+2 TAG _CHILD https://gedcom.io/terms/v7/enum-CHIL
+2 TAG _PHRASE https://gedcom.io/terms/v7/PHRASE
+2 TAG _PARTY http://example.com/party-participation
+2 TAG _PARTY http://example.com/party
+1 SOUR Zirkhaven synthetic text
+2 VERS 0.4
+2 NAME Alex /Rivera Vexlorn/
+2 CORP Zirkhaven synthetic text
+3 ADDR Zirkhaven synthetic text
+4 CONT Zirkhaven synthetic text
+4 CONT Zirkhaven synthetic text
+4 CITY Zirkhaven synthetic text
+4 STAE UT
+4 POST 84150
+4 CTRY USA
+3 PHON Zirkhaven synthetic text
+3 PHON Zirkhaven synthetic text
+3 EMAIL Zirkhaven synthetic text
+3 EMAIL Zirkhaven synthetic text
+3 FAX Zirkhaven synthetic text
+3 FAX Zirkhaven synthetic text
+3 WWW Zirkhaven synthetic text
+3 WWW Zirkhaven synthetic text
+1 DEST Zirkhaven synthetic text
+1 DATE 10 JUN 2022
+2 TIME 15:43:20.48Z
+1 SUBM @U1@
+1 COPR Zirkhaven synthetic text
+1 LANG en-US
+1 PLAC
+2 FORM City, County, State, Country
+0 @F1@ FAM
+1 RESN CONFIDENTIAL, LOCKED
+1 NCHI 2
+2 TYPE Zirkhaven synthetic text
+2 HUSB
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+2 WIFE
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+1 RESI Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+2 HUSB
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+2 WIFE
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+1 FACT Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+2 HUSB
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+2 WIFE
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+1 ANUL Y
+1 CENS Y
+1 DIV Y
+1 DIVF Y
+1 ENGA Y
+1 MARB Y
+1 MARC Y
+1 MARL Y
+1 MARS Y
+1 MARR Y
+2 HUSB
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+2 WIFE
+3 AGE 25y
+4 PHRASE Zirkhaven synthetic text
+2 DATE 27 MAR 2022
+3 TIME 16:02
+3 PHRASE Zirkhaven synthetic text
+2 PLAC Quillmoor, Murcia
+2 ADDR Zirkhaven synthetic text
+2 PHON Zirkhaven synthetic text
+2 PHON Zirkhaven synthetic text
+2 EMAIL Zirkhaven synthetic text
+2 EMAIL Zirkhaven synthetic text
+2 FAX Zirkhaven synthetic text
+2 FAX Zirkhaven synthetic text
+2 WWW Zirkhaven synthetic text
+2 WWW Zirkhaven synthetic text
+2 AGNC Zirkhaven synthetic text
+2 RELI Zirkhaven synthetic text
+2 CAUS Zirkhaven synthetic text
+2 RESN CONFIDENTIAL, LOCKED
+2 SDATE Zirkhaven synthetic text
+3 TIME 16:03
+3 PHRASE Zirkhaven synthetic text
+2 ASSO @VOID@
+3 ROLE OFFICIATOR
+2 ASSO @VOID@
+3 ROLE WITN
+3 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S1@
+3 PAGE 2
+2 OBJE @O1@
+2 OBJE @O2@
+2 UID bbcc0025-34cb-4542-8cfb-45ba201c9c2c
+2 UID 9ead4205-5bad-4c05-91c1-0aecd3f5127d
+1 EVEN Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 NO DIV
+2 DATE FROM 1700 TO 1800
+3 PHRASE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N2@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S1@
+3 PAGE 2
+1 NO ANUL
+1 HUSB @I1@
+2 PHRASE Zirkhaven synthetic text
+1 WIFE @I2@
+2 PHRASE Zirkhaven synthetic text
+1 CHIL @I4@
+2 PHRASE Zirkhaven synthetic text
+1 CHIL @VOID@
+2 PHRASE Zirkhaven synthetic text
+1 ASSO @I3@
+2 PHRASE Zirkhaven synthetic text
+2 ROLE OTHER
+3 PHRASE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+3 PAGE 2
+1 ASSO @VOID@
+2 ROLE CLERGY
+1 SUBM @U1@
+1 SUBM @U2@
+1 SUBM @VOID@
+1 SLGS
+2 DATE 27 MAR 2022
+3 TIME 15:47
+3 PHRASE Zirkhaven synthetic text
+2 TEMP LOGAN
+2 PLAC Quillmoor, Murcia
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+3 PAGE 2
+1 SLGS
+2 DATE 27 MAR 2022
+2 STAT CANCELED
+3 DATE 27 MAR 2022
+1 SLGS
+2 DATE 27 MAR 2022
+2 STAT DNS
+3 DATE 27 MAR 2022
+1 SLGS
+2 DATE 27 MAR 2022
+2 STAT DNS_CAN
+3 DATE 27 MAR 2022
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID f096b664-5e40-40e2-bb72-c1664a46fe45
+1 UID 1f76f868-8a36-449c-af0d-a29247b3ab50
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 NOTE Zirkhaven synthetic text
+1 SNOTE @N1@
+1 SOUR @S1@
+2 PAGE 1
+2 QUAY 1
+1 SOUR @S2@
+2 PAGE 2
+2 QUAY 2
+1 OBJE @O1@
+1 OBJE @O2@
+1 OBJE @VOID@
+2 TITL Zirkhaven synthetic text
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+0 @F2@ FAM
+1 MARR
+2 DATE 1998
+1 CHIL @I1@
+0 @I1@ INDI
+1 RESN CONFIDENTIAL, LOCKED
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE OTHER
+3 PHRASE Zirkhaven synthetic text
+2 NPFX Zirkhaven synthetic text
+2 GIVN Zirkhaven synthetic text
+2 NICK Zirkhaven synthetic text
+2 SPFX Zirkhaven synthetic text
+2 SURN Zirkhaven synthetic text
+2 NSFX Zirkhaven synthetic text
+2 TRAN Zirkhaven synthetic text
+3 LANG en-GB
+3 NPFX Zirkhaven synthetic text
+3 GIVN Zirkhaven synthetic text
+3 NICK Zirkhaven synthetic text
+3 SPFX Zirkhaven synthetic text
+3 SURN Zirkhaven synthetic text
+3 NSFX Zirkhaven synthetic text
+2 TRAN Zirkhaven synthetic text
+3 LANG en-CA
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SNOTE @VOID@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE BIRTH
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE AKA
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE IMMIGRANT
+1 SEX M
+1 CAST Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 DSCR Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+2 SOUR @VOID@
+3 PAGE Zirkhaven synthetic text
+1 EDUC Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 IDNO Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 NATI Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 NCHI 2
+2 TYPE Zirkhaven synthetic text
+1 NMR 2
+2 TYPE Zirkhaven synthetic text
+1 OCCU Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 PROP Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 RELI Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 RESI Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 SSN Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 TITL Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 FACT Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 BAPM
+2 TYPE Zirkhaven synthetic text
+1 BAPM Y
+1 BARM
+2 TYPE Zirkhaven synthetic text
+1 BASM
+2 TYPE Zirkhaven synthetic text
+1 BLES
+2 TYPE Zirkhaven synthetic text
+1 BURI
+2 TYPE Zirkhaven synthetic text
+2 DATE 30 MAR 2022
+1 CENS
+2 TYPE Zirkhaven synthetic text
+1 CHRA
+2 TYPE Zirkhaven synthetic text
+1 CONF
+2 TYPE Zirkhaven synthetic text
+1 CREM
+2 TYPE Zirkhaven synthetic text
+1 DEAT
+2 TYPE Zirkhaven synthetic text
+2 DATE 28 MAR 2022
+2 PLAC Quillmoor, Murcia
+2 ADDR Zirkhaven synthetic text
+2 PHON Zirkhaven synthetic text
+2 PHON Zirkhaven synthetic text
+2 EMAIL Zirkhaven synthetic text
+2 EMAIL Zirkhaven synthetic text
+2 FAX Zirkhaven synthetic text
+2 FAX Zirkhaven synthetic text
+2 WWW Zirkhaven synthetic text
+2 WWW Zirkhaven synthetic text
+2 AGNC Zirkhaven synthetic text
+2 RELI Zirkhaven synthetic text
+2 CAUS Zirkhaven synthetic text
+2 RESN CONFIDENTIAL, LOCKED
+2 SDATE Zirkhaven synthetic text
+3 TIME 16:47
+3 PHRASE Zirkhaven synthetic text
+2 ASSO @I3@
+3 ROLE CHIL
+2 ASSO @VOID@
+3 ROLE PARENT
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+3 PAGE 2
+2 OBJE @O1@
+2 OBJE @O2@
+2 UID 82092878-6f4f-4bca-ad59-d1ae87c5e521
+2 UID daf4b8c0-4141-42c4-bec8-01d1d818dfaf
+1 EMIG
+2 TYPE Zirkhaven synthetic text
+1 FCOM
+2 TYPE Zirkhaven synthetic text
+1 GRAD
+2 TYPE Zirkhaven synthetic text
+1 IMMI
+2 TYPE Zirkhaven synthetic text
+1 NATU
+2 TYPE Zirkhaven synthetic text
+1 ORDN
+2 TYPE Zirkhaven synthetic text
+1 PROB
+2 TYPE Zirkhaven synthetic text
+1 RETI
+2 TYPE Zirkhaven synthetic text
+1 WILL
+2 TYPE Zirkhaven synthetic text
+1 ADOP
+2 TYPE Zirkhaven synthetic text
+2 FAMC @VOID@
+3 ADOP BOTH
+4 PHRASE Zirkhaven synthetic text
+1 ADOP
+2 FAMC @VOID@
+3 ADOP HUSB
+1 ADOP
+2 FAMC @VOID@
+3 ADOP WIFE
+1 BIRT
+2 TYPE Zirkhaven synthetic text
+2 DATE 1 JAN 2000
+1 CHR
+2 TYPE Zirkhaven synthetic text
+2 DATE 9 JAN 2000
+2 AGE 8d
+3 PHRASE Zirkhaven synthetic text
+1 EVEN Zirkhaven synthetic text
+2 TYPE Zirkhaven synthetic text
+1 NO NATU
+2 DATE FROM 1700 TO 1800
+3 PHRASE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S1@
+3 PAGE 2
+1 NO EMIG
+1 BAPL
+2 STAT STILLBORN
+3 DATE 27 MAR 2022
+1 BAPL
+2 DATE 27 MAR 2022
+1 CONL
+2 DATE 27 MAR 2022
+1 ENDL
+2 STAT CHILD
+3 DATE 27 MAR 2022
+1 ENDL
+2 DATE 27 MAR 2022
+1 INIL
+2 DATE 27 MAR 2022
+1 SLGC
+2 DATE 27 MAR 2022
+3 TIME 15:47
+3 PHRASE Zirkhaven synthetic text
+2 TEMP SLAKE
+2 FAMC @VOID@
+1 SLGC
+2 PLAC Quillmoor, Murcia
+2 STAT BIC
+3 DATE 27 MAR 2022
+4 TIME 15:48
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+3 PAGE 2
+2 FAMC @VOID@
+1 SLGC
+2 FAMC @F2@
+1 FAMC @VOID@
+2 PEDI OTHER
+3 PHRASE Zirkhaven synthetic text
+2 STAT CHALLENGED
+3 PHRASE Zirkhaven synthetic text
+1 FAMC @VOID@
+2 PEDI FOSTER
+1 FAMC @VOID@
+2 PEDI SEALING
+1 FAMC @F2@
+2 PEDI ADOPTED
+2 STAT PROVEN
+1 FAMC @F2@
+2 PEDI BIRTH
+2 STAT DISPROVEN
+1 FAMS @VOID@
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+1 FAMS @F1@
+1 SUBM @U1@
+1 SUBM @U2@
+1 ASSO @VOID@
+2 PHRASE Zirkhaven synthetic text
+2 ROLE FRIEND
+1 ASSO @VOID@
+2 ROLE NGHBR
+1 ASSO @VOID@
+2 ROLE FATH
+1 ASSO @VOID@
+2 ROLE GODP
+1 ASSO @VOID@
+2 ROLE HUSB
+1 ASSO @VOID@
+2 ROLE MOTH
+1 ASSO @VOID@
+2 ROLE MULTIPLE
+1 ASSO @VOID@
+2 ROLE SPOU
+1 ASSO @VOID@
+2 ROLE WIFE
+1 ALIA @VOID@
+1 ALIA @I3@
+2 PHRASE Zirkhaven synthetic text
+1 ANCI @U1@
+1 ANCI @VOID@
+1 DESI @U1@
+1 DESI @VOID@
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID 3d75b5eb-36e9-40b3-b79f-f088b5c18595
+1 UID cb49c361-7124-447e-b587-4c6d36e51825
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 NOTE Zirkhaven synthetic text
+2 CONT Zirkhaven synthetic text
+2 CONT Zirkhaven synthetic text
+1 SNOTE @N1@
+1 SOUR @S1@
+2 PAGE 1
+2 QUAY 3
+1 SOUR @S2@
+1 OBJE @O1@
+1 OBJE @O2@
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+0 @I2@ INDI
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE MAIDEN
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE MARRIED
+1 NAME Alex /Rivera Vexlorn/
+2 TYPE PROFESSIONAL
+1 SEX F
+1 FAMS @F1@
+0 @I3@ INDI
+1 SEX X
+0 @I4@ INDI
+1 SEX U
+1 FAMC @F1@
+0 @O1@ OBJE
+1 RESN CONFIDENTIAL, LOCKED
+1 FILE Zirkhaven synthetic text
+2 FORM image/jpeg
+3 MEDI OTHER
+4 PHRASE Zirkhaven synthetic text
+1 FILE Zirkhaven synthetic text
+2 FORM text/plain
+3 MEDI OTHER
+4 PHRASE Zirkhaven synthetic text
+1 FILE Zirkhaven synthetic text
+2 FORM audio/mp3
+3 MEDI AUDIO
+2 TITL Zirkhaven synthetic text
+2 TRAN Zirkhaven synthetic text
+3 FORM audio/ogg
+2 TRAN Zirkhaven synthetic text
+3 FORM text/vtt
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID 69ebdd0e-c78c-4b81-873f-dc8ac30a48b9
+1 UID 79cae8c4-e673-4e4f-bc5d-13b02d931302
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 NOTE Zirkhaven synthetic text
+2 MIME text/plain
+2 LANG en-US
+2 TRAN Zirkhaven synthetic text
+3 MIME text/plain
+3 LANG en-GB
+2 TRAN Zirkhaven synthetic text
+3 MIME text/plain
+3 LANG en-CA
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+3 PAGE 2
+1 SNOTE @N1@
+1 SOUR @S1@
+2 PAGE 1
+2 DATA
+3 DATE 28 MAR 2022
+4 TIME 10:29
+4 PHRASE Zirkhaven synthetic text
+3 TEXT Zirkhaven synthetic text
+4 MIME text/plain
+4 LANG en-US
+3 TEXT Zirkhaven synthetic text
+4 MIME text/plain
+4 LANG en-US
+2 EVEN BIRT
+3 PHRASE Zirkhaven synthetic text
+3 ROLE OTHER
+4 PHRASE Zirkhaven synthetic text
+2 QUAY 0
+2 OBJE @O3@
+3 CROP
+4 TOP 0
+4 LEFT 0
+4 HEIGHT 100
+4 WIDTH 100
+3 TITL Zirkhaven synthetic text
+2 OBJE @O3@
+3 CROP
+4 TOP 100
+4 LEFT 100
+3 TITL Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+3 MIME text/plain
+3 LANG en-US
+3 TRAN Zirkhaven synthetic text
+4 LANG en-GB
+3 SOUR @S1@
+4 PAGE 1
+3 SOUR @S2@
+4 PAGE 2
+2 SNOTE @N1@
+1 SOUR @S1@
+2 PAGE 2
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+0 @O2@ OBJE
+1 RESN PRIVACY
+1 FILE Zirkhaven synthetic text
+2 FORM text/plain
+3 MEDI ELECTRONIC
+0 @O3@ OBJE
+1 RESN PRIVACY
+1 FILE Zirkhaven synthetic text
+2 FORM text/plain
+3 MEDI ELECTRONIC
+0 @R1@ REPO
+1 NAME Alex /Rivera Vexlorn/
+1 ADDR Zirkhaven synthetic text
+2 CONT Zirkhaven synthetic text
+2 CONT Zirkhaven synthetic text
+2 CITY Zirkhaven synthetic text
+2 STAE UT
+2 POST 84150
+2 CTRY USA
+1 PHON Zirkhaven synthetic text
+1 PHON Zirkhaven synthetic text
+1 EMAIL Zirkhaven synthetic text
+1 EMAIL Zirkhaven synthetic text
+1 FAX Zirkhaven synthetic text
+1 FAX Zirkhaven synthetic text
+1 WWW Zirkhaven synthetic text
+1 WWW Zirkhaven synthetic text
+1 NOTE Zirkhaven synthetic text
+1 SNOTE @N1@
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID efa7885b-c806-4590-9f1b-247797e4c96d
+1 UID d530f6ab-cfd4-44cd-ab2c-e40bddb76bf8
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+0 @R2@ REPO
+1 NAME Alex /Rivera Vexlorn/
+0 @N1@ SNOTE Zirkhaven synthetic text
+1 MIME text/plain
+1 LANG en-US
+1 TRAN Zirkhaven synthetic text
+2 MIME text/plain
+2 LANG en-GB
+1 TRAN Zirkhaven synthetic text
+2 MIME text/plain
+2 LANG en-CA
+1 SOUR @S1@
+2 PAGE 1
+1 SOUR @S2@
+2 PAGE 2
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID 6efbee0b-96a1-43ea-83c8-828ec71c54d7
+1 UID 4094d92a-5525-44ec-973d-6c527aa5535a
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+0 @N2@ SNOTE Zirkhaven synthetic text
+0 @S1@ SOUR
+1 DATA
+2 EVEN BIRT, DEAT
+3 DATE FROM 1701 TO 1800
+4 PHRASE Zirkhaven synthetic text
+3 PLAC Quillmoor, Murcia
+4 FORM City, County, State, Country
+4 LANG en-US
+4 TRAN Zirkhaven synthetic text
+5 LANG en-GB
+4 TRAN Zirkhaven synthetic text
+5 LANG en
+4 MAP
+5 LATI Zirkhaven synthetic text
+5 LONG Zirkhaven synthetic text
+4 EXID 123
+5 TYPE Zirkhaven synthetic text
+4 EXID 456
+5 TYPE Zirkhaven synthetic text
+4 NOTE Zirkhaven synthetic text
+5 MIME text/plain
+5 LANG en-US
+5 TRAN Zirkhaven synthetic text
+6 LANG en-GB
+5 SOUR @S1@
+6 PAGE 1
+5 SOUR @S2@
+6 PAGE 2
+4 SNOTE @N1@
+2 EVEN MARR
+3 DATE FROM 1701 TO 1800
+4 PHRASE Zirkhaven synthetic text
+2 AGNC Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+3 MIME text/plain
+3 LANG en-US
+3 TRAN Zirkhaven synthetic text
+4 LANG en-GB
+3 SOUR @S1@
+4 PAGE 1
+3 SOUR @S2@
+4 PAGE 2
+2 SNOTE @N1@
+1 AUTH Zirkhaven synthetic text
+1 TITL Zirkhaven synthetic text
+1 ABBR Zirkhaven synthetic text
+1 PUBL Zirkhaven synthetic text
+1 TEXT Zirkhaven synthetic text
+2 MIME text/plain
+2 LANG en-US
+1 REPO @R1@
+2 NOTE Zirkhaven synthetic text
+2 SNOTE @N1@
+2 CALN Zirkhaven synthetic text
+3 MEDI BOOK
+4 PHRASE Zirkhaven synthetic text
+1 REPO @R2@
+2 CALN Zirkhaven synthetic text
+3 MEDI VIDEO
+2 CALN Zirkhaven synthetic text
+3 MEDI CARD
+2 CALN Zirkhaven synthetic text
+3 MEDI FICHE
+2 CALN Zirkhaven synthetic text
+3 MEDI FILM
+2 CALN Zirkhaven synthetic text
+3 MEDI MAGAZINE
+2 CALN Zirkhaven synthetic text
+3 MEDI MANUSCRIPT
+2 CALN Zirkhaven synthetic text
+3 MEDI MAP
+2 CALN Zirkhaven synthetic text
+3 MEDI NEWSPAPER
+2 CALN Zirkhaven synthetic text
+3 MEDI PHOTO
+2 CALN Zirkhaven synthetic text
+3 MEDI TOMBSTONE
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID f065a3e8-5c03-4b4a-a89d-6c5e71430a8d
+1 UID 9441c3f3-74df-42b4-bbc1-fed42fd7f536
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 NOTE Zirkhaven synthetic text
+1 SNOTE @N1@
+1 OBJE @O2@
+1 OBJE @O3@
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+0 @S2@ SOUR
+1 TITL Zirkhaven synthetic text
+0 @U1@ SUBM
+1 NAME Alex /Rivera Vexlorn/
+1 ADDR Zirkhaven synthetic text
+2 CONT Zirkhaven synthetic text
+2 CONT Zirkhaven synthetic text
+2 CITY Zirkhaven synthetic text
+2 STAE UT
+2 POST 84150
+2 CTRY USA
+1 PHON Zirkhaven synthetic text
+1 PHON Zirkhaven synthetic text
+1 EMAIL Zirkhaven synthetic text
+1 EMAIL Zirkhaven synthetic text
+1 FAX Zirkhaven synthetic text
+1 FAX Zirkhaven synthetic text
+1 WWW Zirkhaven synthetic text
+1 WWW Zirkhaven synthetic text
+1 OBJE @O1@
+2 CROP
+3 TOP 0
+3 LEFT 0
+3 HEIGHT 100
+3 WIDTH 100
+2 TITL Zirkhaven synthetic text
+1 OBJE @O1@
+2 CROP
+3 TOP 100
+3 LEFT 100
+2 TITL Zirkhaven synthetic text
+1 LANG en-US
+1 LANG en-GB
+1 REFN 1
+2 TYPE Zirkhaven synthetic text
+1 REFN 10
+2 TYPE Zirkhaven synthetic text
+1 UID 24132fe0-26f6-4f87-9924-389a4f40f0ec
+1 UID b451c8df-5550-473b-a55c-ed31e65c60c8
+1 EXID 123
+2 TYPE Zirkhaven synthetic text
+1 EXID 456
+2 TYPE Zirkhaven synthetic text
+1 NOTE Zirkhaven synthetic text
+2 MIME text/plain
+2 LANG en-US
+2 TRAN Zirkhaven synthetic text
+3 LANG en-GB
+2 SOUR @S1@
+3 PAGE 1
+2 SOUR @S2@
+3 PAGE 2
+1 SNOTE @N1@
+1 CHAN
+2 DATE 27 MAR 2022
+3 TIME 08:56
+2 NOTE Zirkhaven synthetic text
+2 NOTE Zirkhaven synthetic text
+1 CREA
+2 DATE 27 MAR 2022
+3 TIME 08:55
+1 _SKYPEID Zirkhaven synthetic text
+1 _JABBERID Zirkhaven synthetic text
+0 @U2@ SUBM
+1 NAME Alex /Rivera Vexlorn/
+0 @XU1@ _USER
+1 NAME Alex /Rivera Vexlorn/
+0 @XU2@ SUBM
+1 NAME Alex /Rivera Vexlorn/
+0 @XI1@ INDI
+1 _CREATOR @XU1@
+1 _CREATOR @XU2@
+1 FAMC @VOID@
+2 _PHRASE Zirkhaven synthetic text
+2 PEDI _ENUMVAL
+1 FAMC @VOID@
+2 PEDI _ENUM2
+1 _EXT1 @XR1@
+0 @XR1@ _RECORD Zirkhaven synthetic text
+1 _IN @XB1@
+2 ROLE CHIL
+0 INDI
+1 SUBM @XU1@
+1 SUBM @XU2@
+1 ASSO @XI1@
+2 ROLE _CHILD
+1 BIRT
+2 DATE BET FRENCH_R 2 _JOUR 8 AND _CALENDRIER 4 COMP 8
+1 DEAT
+2 DATE _CALENDAR 8 _MONTH 190 _EPOCH
+1 GRAD
+2 DATE _CAL2 23 _MON2 88 _EP2
+2 _LOC @XL1@
+1 _PARTY @XP1@
+2 ROLE NGHBR
+0 @XP1@ _PARTY
+1 NAME Alex /Rivera Vexlorn/
+0 @XL1@ _LOC
+1 SUBM @XU2@
+1 DATE TO 1880
+2 PHRASE Zirkhaven synthetic text
+0 SOUR
+1 DATA
+2 EVEN DEAT, _CHILD
+3 _CREATOR @XU2@
+0 TRLR

@@ -126,6 +126,7 @@ pub type AcceptHandler =
 static ACCEPT_HANDLERS: LazyLock<RwLock<HashMap<String, AcceptHandler>>> = LazyLock::new(|| {
     let mut m: HashMap<String, AcceptHandler> = HashMap::new();
     m.insert("candidate_row".into(), accept_candidate_boxed);
+    m.insert(crate::gedcom::KIND.into(), crate::gedcom::accept_proposal_boxed);
     RwLock::new(m)
 });
 
