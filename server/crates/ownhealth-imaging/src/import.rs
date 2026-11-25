@@ -1122,13 +1122,8 @@ async fn record_reports(
             .map_err(retry)?;
         let blobs = ctx.blobs.clone();
         let stored = tokio::task::spawn_blocking(move || {
-            let pdf = match encapsulated_file(file) {
-                Ok(pdf) => pdf,
-                // a read that failed says nothing about the report: the job tries again, unmarked
-                Err(Part10Error::Io(e)) => return Err(JobError::retry(format!("reading a report failed: {e}"))),
-                Err(_) => None,
-            };
-            pdf.map(|p| blobs.put_reader(owner, p))
+            report_pdf(file)?
+                .map(|p| blobs.put_reader(owner, p))
                 .transpose()
                 .map_err(|e| JobError::from(Error::from(e)))
         })
@@ -1148,6 +1143,16 @@ async fn record_reports(
             .await?;
     }
     Ok((first, reports))
+}
+
+/// The PDF a staged report instance holds, if any. A read that failed says nothing about the report:
+/// the job tries again, and the SOP is not marked handled. Content that holds no PDF is `None`.
+fn report_pdf(file: File) -> Result<Option<std::io::Take<File>>, JobError> {
+    match encapsulated_file(file) {
+        Ok(pdf) => Ok(pdf),
+        Err(Part10Error::Io(e)) => Err(JobError::retry(format!("reading a report failed: {e}"))),
+        Err(_) => Ok(None),
+    }
 }
 
 /// An Encapsulated PDF of the study: stored for the profile and filed as an `imaging_report` document
@@ -1409,4 +1414,29 @@ pub async fn accept(
     let key = format!("{JOB}:{import_id}:accept:{uid}");
     enqueue(&mut *conn, JOB, &payload, EnqueueOptions::dedupe(&key)).await?;
     Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_report_that_cannot_be_read_retries_and_one_with_no_pdf_is_handled() {
+        let dir = tempfile::tempdir().expect("staging directory");
+        let path = dir.path().join("staged");
+        std::fs::write(&path, vec![0u8; 256]).expect("staged bytes");
+        // opened for writing only: every read fails, as a failing disk does
+        let unreadable = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("staged file");
+        let read = report_pdf(unreadable).map(|pdf| pdf.is_some());
+        assert!(
+            matches!(&read, Err(e) if !e.permanent),
+            "an unreadable report was not retried: {read:?}"
+        );
+        // the same bytes, read: not DICOM, so no PDF, and the SOP counts as handled
+        let readable = File::open(&path).expect("staged file");
+        assert!(matches!(report_pdf(readable), Ok(None)));
+    }
 }
