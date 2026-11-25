@@ -99,6 +99,10 @@ pub(crate) struct ConnectionHealth {
     /// re-read of days already stored does not count. OwnHealth sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing_since: Option<DateTime<Utc>>,
+    /// The last poll whose report included this connection. When no newer report says anything about
+    /// it, its gap is judged as of this poll, not as of a later one. OwnHealth sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
 }
 
 impl ConnectionHealth {
@@ -118,11 +122,13 @@ impl ConnectionHealth {
 pub(crate) const CURSOR_KEY: &str = "connections";
 pub(crate) type Connections = BTreeMap<String, ConnectionHealth>;
 
-/// Whether a vendor's last known health is a gap at `now`.
-pub(crate) fn in_gap(vendor: &str, health: ConnectionHealth, now: DateTime<Utc>) -> bool {
-    policy()
-        .and_then(|p| p.providers.get(vendor))
-        .is_some_and(|provider| health.is_gap(provider, now))
+/// Whether a vendor was in a gap when a report last included it.
+pub(crate) fn in_gap_when_observed(vendor: &str, health: ConnectionHealth) -> bool {
+    let provider = policy().and_then(|p| p.providers.get(vendor));
+    match (provider, health.observed_at) {
+        (Some(provider), Some(at)) => health.is_gap(provider, at),
+        _ => false,
+    }
 }
 
 pub(crate) fn observed_connections(cursor: Option<&Value>) -> Connections {

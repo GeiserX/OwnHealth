@@ -774,6 +774,7 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
             let mut health = ConnectionHealth {
                 seen_since: None,
                 failing_since: None,
+                observed_at: Some(now),
                 ..*report
             };
             match health.status {
@@ -801,10 +802,11 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
         })
         .collect();
     // A vendor that drops out of the report (its connection deleted in the sidecar) sends no more data.
-    // If it was in a gap, it has not recovered: keep its last health, so its alert stays open. A vendor
-    // removed while it synced has nothing to report and is dropped.
+    // If it was in a gap when a report last included it, it has not recovered: keep its last health, so
+    // its alert stays open. A vendor that was syncing then has nothing to report and is dropped, even if
+    // its window has passed since.
     for (vendor, health) in previous {
-        if gaps::in_gap(&vendor, health, now) {
+        if gaps::in_gap_when_observed(&vendor, health) {
             observed.entry(vendor).or_insert(health);
         }
     }

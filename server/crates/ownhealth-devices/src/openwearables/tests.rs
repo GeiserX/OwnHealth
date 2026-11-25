@@ -2116,3 +2116,38 @@ async fn vendor_read_failures_are_not_an_open_wearables_outage() -> anyhow::Resu
     assert!(message.contains("is running"), "{message}");
     Ok(())
 }
+
+/// A vendor that was inside its window when a poll last saw it, and is missing from the next report, is
+/// dropped even if its window passed in between: it was not in a gap when it was last seen.
+#[tokio::test]
+async fn a_vendor_removed_just_before_its_window_passes_raises_no_alert() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let now = Utc::now();
+    env.fake().connections = json!([["polar", "active", now - Duration::hours(19)], ["whoop", "active", now]]);
+    poll(&env.ctx, &env.base, id).await?;
+    // that poll ran two hours ago: Polar's last sync was 19 h old then and is 21 h old now
+    sqlx::query(
+        "update source set cursor = jsonb_set(jsonb_set(cursor, '{connections,polar,last_synced_at}', to_jsonb($2::timestamptz)), \
+         '{connections,polar,observed_at}', to_jsonb($3::timestamptz)) where id = $1",
+    )
+    .bind(id)
+    .bind(now - Duration::hours(21))
+    .bind(now - Duration::hours(2))
+    .execute(&env.ctx.pool)
+    .await?;
+    env.fake().connections = json!([["whoop", "active", now]]);
+    poll(&env.ctx, &env.base, id).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    assert!(
+        open_gaps(&env, id).await?.is_empty(),
+        "a vendor removed while healthy alerts"
+    );
+    let kept: Option<Value> = sqlx::query_scalar("select cursor #> '{connections,polar}' from source where id = $1")
+        .bind(id)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert_eq!(kept, None, "a vendor removed while healthy stays in the cursor");
+    Ok(())
+}
