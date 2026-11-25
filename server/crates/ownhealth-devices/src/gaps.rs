@@ -23,13 +23,40 @@ struct Policy {
     dexcom: Localized,
 }
 
-static POLICY: LazyLock<Policy> = LazyLock::new(|| {
-    serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../data/connectors/sync_gaps.json"
-    )))
-    .expect("bundled wearable sync-gap policy")
-});
+const FILE: &str = "data/connectors/sync_gaps.json";
+const SHIPPED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../../data/connectors/sync_gaps.json"
+));
+
+/// Read a sync-gap policy. Every Open Wearables vendor needs a window, and every window a vendor.
+fn parse(text: &str) -> Result<Policy, String> {
+    let policy: Policy = serde_json::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
+    for key in super::PROVIDERS {
+        if policy.providers.get(key).is_none_or(|p| p.stale_hours <= 0) {
+            return Err(format!("{FILE}: {key} has no freshness window"));
+        }
+    }
+    if let Some(key) = policy
+        .providers
+        .keys()
+        .find(|k| !super::PROVIDERS.contains(&k.as_str()))
+    {
+        return Err(format!("{FILE}: {key} has no Open Wearables poller"));
+    }
+    Ok(policy)
+}
+
+/// The shipped policy, or None when it does not read: the error is logged once and no gap check runs.
+/// The tests read the shipped file, so a broken one fails CI before it ships.
+fn policy() -> Option<&'static Policy> {
+    static POLICY: LazyLock<Option<Policy>> = LazyLock::new(|| {
+        parse(SHIPPED)
+            .inspect_err(|e| tracing::error!("{e}: sync-gap alerts are off"))
+            .ok()
+    });
+    POLICY.as_ref()
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -75,11 +102,12 @@ pub(crate) fn observed_connections(cursor: Option<&Value>) -> Connections {
 }
 
 fn openwearables_gap(cursor: Option<&Value>, pull_failed: bool, now: DateTime<Utc>) -> Option<Value> {
+    let policy = policy()?;
     let connections = observed_connections(cursor);
     let providers: Vec<_> = super::PROVIDERS
         .iter()
         .filter_map(|key| {
-            let provider = POLICY.providers.get(*key)?;
+            let provider = policy.providers.get(*key)?;
             connections
                 .get(*key)?
                 .is_gap(provider, now)
@@ -87,15 +115,15 @@ fn openwearables_gap(cursor: Option<&Value>, pull_failed: bool, now: DateTime<Ut
         })
         .collect();
     if !providers.is_empty() {
-        Some(ow_message(&providers.join(", ")))
+        Some(ow_message(policy, &providers.join(", ")))
     } else {
         // The sidecar itself does not answer: reconnecting accounts would not help.
-        pull_failed.then(|| json!({"message": POLICY.openwearables_down}))
+        pull_failed.then(|| json!({"message": policy.openwearables_down}))
     }
 }
 
-fn ow_message(names: &str) -> Value {
-    let message: BTreeMap<_, _> = POLICY
+fn ow_message(policy: &Policy, names: &str) -> Value {
+    let message: BTreeMap<_, _> = policy
         .openwearables
         .iter()
         .map(|(lang, text)| (lang, text.replace("{providers}", names)))
@@ -107,10 +135,15 @@ fn ow_message(names: &str) -> Value {
 // 3 h elsewhere, so a freshness window must allow for both; the native connector (slice 38) adds that
 // check with its own window.
 fn dexcom_gap(_: Option<&Value>, pull_failed: bool, _: DateTime<Utc>) -> Option<Value> {
-    pull_failed.then(|| json!({"message": POLICY.dexcom}))
+    let policy = policy()?;
+    pull_failed.then(|| json!({"message": policy.dexcom}))
 }
 
+/// Register the gap checks at start. A policy that does not read is logged here, not at a gap check.
 pub(crate) fn register() {
+    if policy().is_none() {
+        return;
+    }
     sources::register_gap_check(super::KIND, openwearables_gap);
     sources::register_gap_check("dexcom", dexcom_gap);
 }
@@ -120,19 +153,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_open_wearables_provider_has_a_freshness_window() {
-        for key in super::super::PROVIDERS {
-            assert!(POLICY.providers[key].stale_hours > 0, "{key}");
-        }
+    fn the_shipped_policy_reads() {
+        assert!(parse(SHIPPED).is_ok(), "{:?}", parse(SHIPPED).err());
+        assert!(policy().is_some());
     }
 
     #[test]
-    fn every_provider_window_is_an_open_wearables_provider() {
-        for key in POLICY.providers.keys() {
-            assert!(
-                super::super::PROVIDERS.contains(&key.as_str()),
-                "{key} has no Open Wearables poller"
-            );
+    fn a_broken_policy_is_refused_with_the_file_and_what_is_wrong() {
+        let mut shipped: Value = serde_json::from_str(SHIPPED).expect("the shipped policy is JSON");
+        let mut drop_field = shipped.clone();
+        drop_field["providers"]["polar"]
+            .as_object_mut()
+            .expect("polar")
+            .shift_remove("stale_hours");
+        let mut no_window = shipped.clone();
+        no_window["providers"]
+            .as_object_mut()
+            .expect("providers")
+            .shift_remove("oura");
+        shipped["providers"]["dexcom"] = json!({"name": "Dexcom", "stale_hours": 3});
+        for (broken, wanted) in [
+            (drop_field, "stale_hours"),
+            (no_window, "oura has no freshness window"),
+            (shipped, "dexcom has no Open Wearables poller"),
+        ] {
+            let err = parse(&broken.to_string()).err().unwrap_or_default();
+            assert!(err.starts_with(FILE) && err.contains(wanted), "{err}");
         }
     }
 }
