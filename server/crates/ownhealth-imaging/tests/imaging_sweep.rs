@@ -1037,6 +1037,167 @@ async fn a_study_recorded_before_the_upload_links_rebuilds_from_every_upload_tha
     Ok(())
 }
 
+/// Links of upload `import_id` to study `uid`.
+async fn links(e: &Env, import_id: Uuid, uid: &str) -> anyhow::Result<i64> {
+    e.count(&format!(
+        "select count(*) from imaging_import_study where study_instance_uid = '{uid}' and import_id = '{import_id}'"
+    ))
+    .await
+}
+
+/// Queues a sweep and runs the rebuild it queues for Alex: the rebuild's result.
+async fn sweep_and_rebuild(e: &Env) -> anyhow::Result<Value> {
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    Ok(rebuilt)
+}
+
+#[tokio::test]
+async fn an_upload_replayed_for_one_study_is_read_again_for_another_study_it_holds_unlinked() -> R {
+    let e = env().await?;
+    let b = Study {
+        series: 3,
+        ..Study::new(U2, ALEX)
+    };
+    e.upload("alex", &series_files(&b, &[0, 1], "DICOM/B")).await?;
+    e.import().await?;
+    // one disc with study U1 whole and the third series of U2
+    let mut disc = study_files(&Study::new(U1, ALEX), "DICOM/A");
+    disc.extend(series_files(&b, &[2], "DICOM/B"));
+    let (x, _) = e.upload("alex", &disc).await?;
+    e.import().await?;
+    // as migration 1234 left it: the disc is linked to U1 only
+    sqlx::query("delete from imaging_import_study where import_id = $1 and study_instance_uid = $2")
+        .bind(x.import_id)
+        .bind(U2)
+        .execute(&e.rt.pool)
+        .await?;
+    assert_eq!(links(&e, x.import_id, U1).await?, 1);
+
+    e.orthanc.wipe();
+    let rebuilt = sweep_and_rebuild(&e).await?;
+    assert_eq!(
+        (rebuilt["rebuilt"].clone(), rebuilt["missing"].clone()),
+        (2.into(), 0.into()),
+        "{rebuilt}"
+    );
+    assert_eq!(e.orthanc.series_under(U2), (0..3).map(|s| b.series_uid(s)).collect());
+    assert_eq!(e.orthanc.instances_under(U1), 6);
+    assert_eq!(links(&e, x.import_id, U2).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rebuild_leaves_out_an_upload_whose_part_of_the_study_waits_in_review() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&three, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (held, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
+    e.import().await?;
+    // the later upload's part of U1 is held for an identity conflict instead: no link, an open item
+    sqlx::query("delete from imaging_import_study where import_id = $1")
+        .bind(held.import_id)
+        .execute(&e.rt.pool)
+        .await?;
+    let item_id = review::create_item(
+        &mut *e.rt.pool.acquire().await?,
+        &review::ReviewItemIn {
+            kind: REVIEW_KIND.into(),
+            household_id: Some(e.fam.household_id),
+            profile_id: Some(e.fam.profile("alex")),
+            payload: serde_json::json!({"import_id": held.import_id, "study_uid": U1, "reason": "identity_conflict"}),
+            reasons: vec!["identity_conflict".into()],
+            ref_table: Some("imaging_import".into()),
+            ref_id: Some(held.import_id),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    e.orthanc.wipe();
+    let rebuilt = sweep_and_rebuild(&e).await?;
+    assert_eq!(
+        (rebuilt["missing"].clone(), rebuilt["linked_uploads"].clone()),
+        (1.into(), 0.into()),
+        "{rebuilt}"
+    );
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        (0..2).map(|s| three.series_uid(s)).collect()
+    );
+    assert_eq!(links(&e, held.import_id, U1).await?, 0);
+    assert_eq!(e.in_review("alex").await?.len(), 1);
+
+    // dismissed, the held part stays out too: the person said it is not this study's
+    let mut tx = e.rt.pool.begin().await?;
+    review::dismiss(&mut tx, item_id, e.fam.user("alex"), None).await?;
+    tx.commit().await?;
+    sqlx::query("delete from job where kind = $1")
+        .bind(rebuild::JOB)
+        .execute(&e.rt.pool)
+        .await?;
+    let rebuilt = sweep_and_rebuild(&e).await?;
+    assert_eq!(rebuilt["linked_uploads"], 0, "{rebuilt}");
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        (0..2).map(|s| three.series_uid(s)).collect()
+    );
+    assert_eq!(links(&e, held.import_id, U1).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rebuild_sends_nothing_from_an_upload_removed_while_it_waited() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    let (first, _) = e.upload("alex", &series_files(&three, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (later, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
+    e.import().await?;
+    // a study recorded before the links: none at all, and the study names the first upload only
+    sqlx::query("delete from imaging_import_study where study_instance_uid = $1")
+        .bind(U1)
+        .execute(&e.rt.pool)
+        .await?;
+    e.orthanc.wipe();
+    let mut conn = e.rt.pool.acquire().await?;
+    assert!(rebuild::enqueue(&mut conn, e.fam.profile("alex")).await?.is_some());
+    drop(conn);
+    // the rebuild reads both uploads, then waits for the UID while the later one is removed
+    let mut hold = e.rt.pool.begin().await?;
+    lock_study(&mut hold, U1).await?;
+    let rebuilding = spawn_run(&e, rebuild::JOB);
+    assert!(
+        until_waiting(&e, &rebuilding).await?,
+        "the rebuild did not wait for the UID lock"
+    );
+    let mut tx = e.rt.pool.begin().await?;
+    let removed = remove::remove(&mut tx, later.import_id, Some(e.fam.user("alex")), false).await?;
+    assert_eq!(removed, Removal::Removed { dismissed: 0 });
+    tx.commit().await?;
+    hold.commit().await?;
+    assert_eq!(rebuilding.await??, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(rebuilt["sent_files"], 6, "{rebuilt}");
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        (0..2).map(|s| three.series_uid(s)).collect()
+    );
+    assert_eq!(links(&e, first.import_id, U1).await?, 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_held_study_an_import_adds_while_the_removal_waits_keeps_the_upload() -> R {
     let e = env().await?;

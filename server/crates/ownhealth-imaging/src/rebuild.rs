@@ -9,7 +9,9 @@
 //! The job replays, for each such study, every upload that holds it (`imaging_import_study`): a
 //! second disc can add series to a recorded study, so the first upload alone is not enough. A study
 //! recorded before that table names only its first upload; when one is still short after those
-//! replays, the profile's other uploads are read for its UID too, and each one that holds it is linked. It sends
+//! replays, every upload of the profile not yet replayed for it is read for its UID too, and each one
+//! that holds it is linked. An upload whose part of the study waits in review, or was dismissed or
+//! rejected there, sends nothing of it. It sends
 //! each file of the study under the one StudyInstanceUID lock every Orthanc writer takes
 //! ([`ownhealth_core::orthanc::lock_study`]), after it reads the record again under that lock.
 //! Orthanc files a study by PatientID and UID, so the rebuilt study gets the id the record names; a
@@ -27,7 +29,7 @@ use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::import::{StudyFiles, retry};
+use crate::import::{REVIEW_KIND, StudyFiles, retry};
 use crate::orthanc::{Orthanc, Stored};
 use crate::sweep::recorded_series;
 
@@ -138,19 +140,21 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     .fetch_all(&ctx.pool)
     .await?;
     let mut tally = Tally::default();
-    let mut replayed: Vec<Uuid> = Vec::new();
+    // upload -> the studies it was replayed for
+    let mut replayed: BTreeMap<Uuid, BTreeSet<String>> = BTreeMap::new();
     for (import_id, zip, holds) in uploads {
         let holds: BTreeSet<String> = holds.into_iter().collect();
         replay(
             &ctx, &orthanc, profile_id, import_id, &zip, &holds, &needed, false, &mut tally,
         )
         .await?;
-        replayed.push(import_id);
+        replayed.insert(import_id, holds);
     }
     // A study recorded before `imaging_import_study` existed names only its first upload (migration
     // 1234 copied `imaging_study.import_id`), so a series a later upload added is not replayed above.
-    // When a study is still short, the profile's other uploads that hold its UID are replayed too, and
-    // each one that held it is linked to it.
+    // When a study is still short, every upload of the profile is read for its UID too (an upload
+    // replayed above for one study can hold an unlinked part of another), skipping only the pairs
+    // already replayed, and each one that held it is linked to it.
     let mut short: BTreeSet<String> = BTreeSet::new();
     for (uid, (id, fhir)) in &needed {
         if !complete(&orthanc, id, fhir).await? {
@@ -158,17 +162,21 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         }
     }
     if !short.is_empty() {
-        let others: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
-            "select id, zip_blob from imaging_import where profile_id = $1 and id <> all($2) \
-             order by created_at, id",
-        )
-        .bind(profile_id)
-        .bind(&replayed)
-        .fetch_all(&ctx.pool)
-        .await?;
-        for (import_id, zip) in others {
+        let all: Vec<(Uuid, Vec<u8>)> =
+            sqlx::query_as("select id, zip_blob from imaging_import where profile_id = $1 order by created_at, id")
+                .bind(profile_id)
+                .fetch_all(&ctx.pool)
+                .await?;
+        for (import_id, zip) in all {
+            let holds: BTreeSet<String> = match replayed.get(&import_id) {
+                Some(done) => short.difference(done).cloned().collect(),
+                None => short.clone(),
+            };
+            if holds.is_empty() {
+                continue;
+            }
             replay(
-                &ctx, &orthanc, profile_id, import_id, &zip, &short, &needed, true, &mut tally,
+                &ctx, &orthanc, profile_id, import_id, &zip, &holds, &needed, true, &mut tally,
             )
             .await?;
         }
@@ -208,9 +216,12 @@ struct Tally {
 }
 
 /// Sends again, from upload `import_id` (its stored `zip`), each study of `holds` that the rebuild
-/// `needed`, under the UID lock and after the record is read again under it. With `link`, an upload
-/// that held such a study (Orthanc filed a file of it under the recorded study) is linked to it in
-/// `imaging_import_study`.
+/// `needed`, under the UID lock and after the record is read again under it. The upload row is held
+/// (`for key share`) from then on, so a removal waits for the link below; an upload removed meanwhile
+/// sends nothing. A study whose part in this upload a person holds in review (an open item), or
+/// dismissed or rejected there, is not sent from it: that decision stays the person's. With `link`,
+/// an upload that held such a study (Orthanc filed a file of it under the recorded study) is linked to
+/// it in `imaging_import_study`.
 #[allow(clippy::too_many_arguments)]
 async fn replay(
     ctx: &JobContext,
@@ -238,6 +249,28 @@ async fn replay(
         };
         let mut tx = ctx.pool.begin().await?;
         lock_study(&mut tx, uid).await?;
+        // the upload row, as the link insert below would take it: a removal (`for update`) waits
+        let here: Option<Uuid> = sqlx::query_scalar("select id from imaging_import where id = $1 for key share")
+            .bind(import_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if here.is_none() {
+            tx.commit().await?;
+            return Ok(());
+        }
+        let held: bool = sqlx::query_scalar(
+            "select exists (select 1 from review_item where kind = $1 and ref_table = 'imaging_import' \
+             and ref_id = $2 and payload->>'study_uid' = $3 and status <> 'accepted')",
+        )
+        .bind(REVIEW_KIND)
+        .bind(import_id)
+        .bind(uid)
+        .fetch_one(&mut *tx)
+        .await?;
+        if held {
+            tx.commit().await?;
+            continue;
+        }
         let still: Option<Option<String>> = sqlx::query_scalar(
             "select orthanc_id from imaging_study where study_instance_uid = $1 and profile_id = $2",
         )
