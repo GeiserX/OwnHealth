@@ -592,3 +592,174 @@ async fn the_reading_limit_counts_minutes_so_a_long_history_fits() -> R {
     assert_eq!(count, 50_001);
     Ok(())
 }
+
+#[tokio::test]
+async fn values_out_of_range_or_in_the_future_are_not_readings() -> R {
+    let env = Env::new().await?;
+    let future = (chrono::Utc::now() + chrono::Duration::days(3)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let data = "Takeout/Fitbit/Physical Activity_GoogleData";
+    let (state, error, result) = upload(
+        &env,
+        &[
+            (
+                &format!("{data}/Oxygen Saturation/oxygen_saturation_2024-07-01.csv"),
+                "timestamp,oxygen saturation percentage\n2024-07-04T02:00:00Z,100.5\n\
+                 2024-07-04T02:01:00Z,0\n2024-07-04T02:02:00Z,97\n",
+            ),
+            (
+                &format!("{data}/Heart Rate/heart_rate_2024-07-01.csv"),
+                &format!(
+                    "timestamp,beats per minute\n2024-07-04T08:00:00Z,300\n2024-07-04T08:01:00Z,20\n\
+                     {future},70\n2024-07-04T08:02:00Z,70\n"
+                ),
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_readings(
+        &env,
+        result,
+        &[
+            ("hr", 70.0, "2024-07-04T08:02:00Z", 0),
+            ("spo2", 97.0, "2024-07-04T02:02:00Z", 0),
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_profile_without_a_usable_zone_does_not_stop_times_with_an_offset() -> R {
+    let env = Env::new().await?;
+    let heart = (
+        "Takeout/Fitbit/Physical Activity_GoogleData/Heart Rate/heart_rate_2024-07-01.csv",
+        "timestamp,beats per minute\n2024-07-04T08:00:00+02:00,70\n",
+    );
+    for profile in [
+        "\"not,csv\n\u{0}",
+        "id,timezone\nABC123,Mars/Olympus\n",
+        "id,city\nABC123,Murcia\n",
+    ] {
+        let (state, error, result) =
+            upload(&env, &[("Takeout/Fitbit/Your Profile/Profile.csv", profile), heart]).await?;
+        assert_eq!(state, "done", "{profile}: {error}");
+        assert_eq!(
+            result["fitbit_takeout"]["not_imported"],
+            serde_json::json!([]),
+            "{result}"
+        );
+    }
+    let points: Vec<(chrono::DateTime<chrono::Utc>, Option<i16>)> =
+        sqlx::query_as("select t, tz_offset_min from wearable_sample")
+            .fetch_all(&env.db.pool)
+            .await?;
+    assert_eq!(points, [("2024-07-04T06:00:00Z".parse()?, Some(120))]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fitbit_zip_from_an_inbox_takes_its_own_lock_and_is_seen_once() -> R {
+    use ownhealth_core::arrive::{Arrival, Arrived, arrive};
+    use ownhealth_core::documents::{FITBIT_READINGS_MIME, lock_exports};
+    use sqlx::Acquire;
+
+    let env = Env::new().await?;
+    let profile = env.fam.profile("lucia");
+    let owner = BlobOwner::Profile(profile);
+    let inbox = env.source("folder", Some("lucia"), serde_json::json!({}), None).await?;
+    let member = "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json";
+    let bytes = archive(&[(member, r#"[{"dateTime":"07/04/24 08:10:00","value":{"bpm":72}}]"#)])?;
+    let sha = env.blobs.put_bytes(owner, &bytes)?;
+    let arrival = Arrival {
+        source_id: Some(inbox.id),
+        external_id: Some("first-arrival"),
+        filename: Some("takeout.zip"),
+        ..Arrival::new(env.fam.household_id, profile, "folder", &sha, bytes.len() as i64)
+    };
+
+    // While a Fitbit import of the profile holds its lock, a new arrival waits for it.
+    let mut holder = env.db.pool.begin().await?;
+    lock_exports(&mut holder, profile, "fitbit_takeout").await?;
+    let mut c = env.db.pool.acquire().await?;
+    let mut tx = c.begin().await?;
+    sqlx::query("set local lock_timeout = '200ms'")
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        arrive(&mut tx, &env.blobs, &arrival).await.is_err(),
+        "the arrival did not wait for the Fitbit lock"
+    );
+    drop(tx);
+    holder.rollback().await?;
+
+    let mut tx = c.begin().await?;
+    let Arrived::Queued { job_id: Some(id), .. } = arrive(&mut tx, &env.blobs, &arrival).await? else {
+        anyhow::bail!("the inbox arrival did not enqueue the import");
+    };
+    tx.commit().await?;
+    jobs::drain(&env.ctx, "core", 10, None).await?;
+    let result: Value = sqlx::query_scalar("select result from job where id = $1 and state = 'done'")
+        .bind(id)
+        .fetch_one(&env.db.pool)
+        .await?;
+    let doc: Uuid = result["document_id"].as_str().expect("document").parse()?;
+    let channels: Vec<(String, String)> = sqlx::query_as(
+        "select d.mime, s.channel from document d join document_source s on s.document_id = d.id \
+         where d.profile_id = $1 and d.doc_type = 'wearables'",
+    )
+    .bind(profile)
+    .fetch_all(&env.db.pool)
+    .await?;
+    assert_eq!(channels, [(FITBIT_READINGS_MIME.to_string(), "folder".to_string())]);
+    assert!(!env.blobs.exists(owner, &sha), "raw ZIP still exists");
+
+    // The same ZIP under a new inbox id is the document already made, and its bytes go again.
+    env.blobs.put_bytes(owner, &bytes)?;
+    let duplicate = Arrival {
+        external_id: Some("second-arrival"),
+        ..arrival
+    };
+    let mut tx = c.begin().await?;
+    assert_eq!(
+        arrive(&mut tx, &env.blobs, &duplicate).await?,
+        Arrived::Duplicate { document_id: doc }
+    );
+    tx.commit().await?;
+    assert!(!env.blobs.exists(owner, &sha), "the duplicate stored the raw ZIP again");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_garmin_run_never_reads_a_fitbit_readings_document() -> R {
+    let env = Env::new().await?;
+    let (state, error, result) = upload(
+        &env,
+        &[(
+            "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json",
+            r#"[{"dateTime":"07/04/24 08:10:00","value":{"bpm":72}}]"#,
+        )],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    let doc = result["document_id"].as_str().expect("document");
+    let mut c = env.db.pool.acquire().await?;
+    let id = jobs::enqueue(
+        &mut c,
+        ownhealth_devices::garmin_zip::JOB,
+        &serde_json::json!({"document_id": doc, "profile_id": env.fam.profile("lucia").to_string()}),
+        jobs::EnqueueOptions::default(),
+    )
+    .await?
+    .expect("job");
+    drop(c);
+    jobs::drain(&env.ctx, "core", 10, None).await?;
+    let (state, error): (String, Option<String>) = sqlx::query_as("select state, last_error from job where id = $1")
+        .bind(id)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(
+        (state.as_str(), error.as_deref()),
+        ("dead", Some("PermanentJobError: the Garmin Connect document is gone"))
+    );
+    Ok(())
+}
