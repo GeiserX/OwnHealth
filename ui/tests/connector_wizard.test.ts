@@ -122,11 +122,16 @@ test('the scopes paste as one line, and the token facts follow the profile', () 
 // here fails this test.
 const routes = readFileSync(new URL('../../server/crates/ownhealth-api/src/routes/connectors.rs', import.meta.url), 'utf8');
 
-test('every code of the client save reads in es and en', () => {
+test('every code of the client save and the wizard launch reads in es and en', () => {
 	const codes = new Set([...routes.matchAll(/unfit\(\s*"([a-z_]+)"/g)].map((m) => m[1]));
 	// the scan can fail: the codes the save route has today are all found
 	for (const c of ['unknown_vendor', 'bad_client_id', 'bad_client_secret', 'client_secret_missing', 'client_secret_unexpected', 'issuer_required', 'bad_issuer']) {
 		assert.ok(codes.has(c), `the scan missed ${c}`);
+	}
+	// the wizard also reads the refused replace of a client others use, and a launch at a wrong address
+	for (const c of ['client_in_use', 'not_a_smart_server']) {
+		assert.ok(routes.includes(`"${c}"`), `the routes no longer answer ${c}`);
+		codes.add(c);
 	}
 	const en = dict.en as Record<string, string>;
 	const es = dict.es as Record<string, string>;

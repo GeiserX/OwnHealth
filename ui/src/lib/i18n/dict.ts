@@ -2195,6 +2195,8 @@ export const dict = {
 		con_err_profile_key_unopened: "OwnHealth could not open this profile's key, so it did not renew this connection. The operator checks that OWNHEALTH_SECRETS_KEY is the key this server was set up with, then tries again.",
 		con_err_reconsent_needed: "The vendor no longer accepts this connection. Reconnect signs in again.",
 		con_err_vendor_unreachable: "The vendor's server could not be reached. Try again later.",
+		con_err_not_a_smart_server: "This address does not answer as a SMART server. Check the FHIR base address the facility gives.",
+		con_err_client_in_use: "Connections of profiles you do not manage use this client. Only someone who manages them can replace it.",
 		con_err_unknown: "The connection did not finish (code {code}). Start it again.",
 		// Slice 19: the add-connection wizard (routes/connections/add) and the codes of its client save.
 		con_add: "Add connection",
@@ -4662,6 +4664,8 @@ export const dict = {
 		con_err_profile_key_unopened: "OwnHealth no pudo abrir la clave de este perfil, así que no renovó esta conexión. Quien administra el servidor comprueba que OWNHEALTH_SECRETS_KEY es la clave con la que se configuró este servidor y vuelve a intentarlo.",
 		con_err_reconsent_needed: "El proveedor ya no acepta esta conexión. Reconectar vuelve a iniciar sesión.",
 		con_err_vendor_unreachable: "No se pudo contactar con el servidor del proveedor. Inténtalo más tarde.",
+		con_err_not_a_smart_server: "Esta dirección no responde como servidor SMART. Revisa la dirección base FHIR que da el centro.",
+		con_err_client_in_use: "Conexiones de perfiles que no gestionas usan este cliente. Solo quien los gestiona puede sustituirlo.",
 		con_err_unknown: "La conexión no terminó (código {code}). Vuelve a empezarla.",
 		// Slice 19: el asistente para añadir conexiones (routes/connections/add) y los códigos de su guardado de cliente.
 		con_add: "Añadir conexión",

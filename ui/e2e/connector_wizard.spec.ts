@@ -3,7 +3,7 @@
 // saves the app's client id and secret (sealed, never shown again), and connects; then Medicare (Blue
 // Button) the same way, in Spanish. The directory is seeded with psql as a switched-off source, so
 // opening the wizard never downloads a real vendor file. Every row made here is removed after.
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Browser, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 
 const db = process.env.OWNHEALTH_E2E_DB ?? '';
@@ -23,7 +23,7 @@ function collectPageErrors(page: Page): string[] {
 /** A fresh client secret per run: no secret literal in the repository. */
 const freshSecret = () => Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) => b.toString(16).padStart(2, '0')).join('');
 
-const CLIENT_IDS = ['e2e-healow', 'e2e-medicare'];
+const CLIENT_IDS = ['e2e-healow', 'e2e-medicare', 'e2e-oracle'];
 const SCOPES_V2 =
 	'openid fhirUser launch/patient offline_access patient/Patient.rs patient/AllergyIntolerance.rs patient/Condition.rs patient/DiagnosticReport.rs patient/DocumentReference.rs patient/Encounter.rs patient/Immunization.rs patient/Medication.rs patient/MedicationRequest.rs patient/Observation.rs patient/Procedure.rs';
 
@@ -120,11 +120,14 @@ test('a person adds a SMART vendor from the directory, saves the client and conn
 	await expect(save).toBeDisabled();
 	await page.getByLabel('Client secret', { exact: true }).fill(secret);
 	const answer = page.waitForResponse((r) => r.url().endsWith('/api/connectors/clients') && r.request().method() === 'POST');
-	await save.click();
+	await page.getByLabel('Client secret', { exact: true }).press('Enter');
 	const saved = await answer;
 	expect(saved.status()).toBe(201);
 	expect(await saved.text()).not.toContain(secret);
-	await expect(page.getByRole('status').filter({ hasText: 'Client saved. The secret is sealed and not shown again.' })).toBeVisible();
+	// the form the keyboard was in is gone: the focus moves to its answer, not to the page body
+	const done = page.getByRole('status').filter({ hasText: 'Client saved. The secret is sealed and not shown again.' });
+	await expect(done).toBeVisible();
+	await expect(done).toBeFocused();
 	await expect(page.getByText('A client is saved for this server: e2e-healow. Its secret is sealed.')).toBeVisible();
 	// the secret is nowhere on the page after the save, and sealed in the database
 	await expect(page.locator('input[type="password"]')).toHaveCount(0);
@@ -200,4 +203,82 @@ test('Medicare through the wizard, in Spanish, with the client saved once and re
 	await expect(page).toHaveURL(`${app}/connections`);
 	await expect(page.getByRole('article', { name: 'Medicare' })).toContainText('Medicare (Blue Button)');
 	expect(errors).toEqual([]);
+});
+
+test('a late directory answer does not fill the list of the vendor picked after it', async ({ page }) => {
+	const errors = collectPageErrors(page);
+	await page.goto('/connections/add?lang=en');
+	await page.getByText('eClinicalWorks (healow)', { exact: true }).click();
+	// hold the search answer until the person has moved on to Epic
+	let release = () => {};
+	const held = new Promise<void>((r) => (release = r));
+	await page.route('**/api/brands?*', async (route) => {
+		await held;
+		await route.continue();
+	});
+	await page.getByLabel('Hospital or clinic name').fill('LabNorte');
+	const answer = page.waitForResponse((r) => r.url().includes('/api/brands?'));
+	await page.getByRole('button', { name: 'Search' }).click();
+	await page.getByText('Epic', { exact: true }).click();
+	await expect(page.getByLabel('Hospital or clinic name')).toHaveValue('');
+	release();
+	await answer;
+	// the healow search answered after the switch: Epic's list stays empty, not filled from it
+	await page.waitForTimeout(500);
+	await expect(page.locator('.opt').filter({ hasText: 'LabNorte Family Clinic' })).toHaveCount(0);
+	await expect(page.getByText('No facility of this vendor matches that name.')).toHaveCount(0);
+	// Epic's own search still finds Epic's facility
+	await page.unroute('**/api/brands?*');
+	await page.getByLabel('Hospital or clinic name').fill('LabNorte');
+	await page.getByRole('button', { name: 'Search' }).click();
+	await expect(page.locator('.opt').filter({ hasText: 'LabNorte Family Clinic' })).toContainText('https://fhir.labnorte.example/epic/r4');
+	expect(errors).toEqual([]);
+});
+
+test('a launch at an address that is not a SMART server says to check the address', async ({ page }) => {
+	const errors = collectPageErrors(page);
+	await page.goto('/connections/add?lang=en');
+	await page.getByText('Oracle Health', { exact: true }).click();
+	await page.getByText('Another server address', { exact: true }).click();
+	// a page of the right host, but not the FHIR base: no SMART document there
+	await page.getByLabel('The FHIR base address the facility gives').fill(`${fake}/es`);
+	await page.getByLabel('Client id', { exact: true }).fill('e2e-oracle');
+	await page.getByRole('button', { name: 'Save client' }).click();
+	await expect(page.getByRole('status').filter({ hasText: 'Client saved.' })).toBeVisible();
+	await page.getByRole('button', { name: 'Connect at Oracle Health' }).click();
+	await expect(page.getByRole('alert')).toHaveText('This address does not answer as a SMART server. Check the FHIR base address the facility gives.');
+	await expect(page).toHaveURL(`${app}/connections/add?lang=en`);
+	expect(errors).toEqual([]);
+});
+
+/** A new member of the household who only views Alex, signed in with a password. */
+async function viewer(browser: Browser) {
+	const headers = { Origin: app };
+	const owner = await browser.newContext({ baseURL: app });
+	const invite = await owner.request.post('/api/household/invites', { headers, data: { display_name: `Pat Rivera ${Date.now()}`, locale: 'en' } });
+	expect(invite.status()).toBe(201);
+	const { user_id, code } = await invite.json();
+	const grant = await owner.request.put('/api/grants', { headers, data: { user_id, profile: 'alex', role: 'viewer' } });
+	expect(grant.status(), await grant.text()).toBe(200);
+	await owner.close();
+	const ctx = await browser.newContext({ baseURL: app, colorScheme: 'dark' });
+	const enrol = await ctx.request.post('/api/auth/enroll/password', { headers, data: { code, password: 'synthetic-pass-phrase-19' } });
+	expect(enrol.status(), await enrol.text()).toBe(200);
+	return ctx;
+}
+
+test('a person who only views a record gets no Add connection button, and the wizard says who connects', async ({ browser }) => {
+	const ctx = await viewer(browser);
+	const page = await ctx.newPage();
+	const errors = collectPageErrors(page);
+	await page.goto('/connections?lang=en');
+	await expect(page.getByRole('heading', { name: 'Connections', level: 1 })).toBeVisible();
+	await page.waitForLoadState('networkidle');
+	await expect(page.getByRole('link', { name: 'Add connection' })).toHaveCount(0);
+	// a typed address reaches the wizard, which says who may connect instead of "not shared"
+	await page.goto('/connections/add?lang=en');
+	await expect(page.getByText('Only an owner or guardian of a profile connects its records.')).toBeVisible();
+	await expect(page.getByText('Not shared with you')).toHaveCount(0);
+	expect(errors).toEqual([]);
+	await ctx.close();
 });

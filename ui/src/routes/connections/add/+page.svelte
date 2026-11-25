@@ -5,6 +5,7 @@
 	// app's client id (and secret, sealed by the server and never shown again), then connect through the
 	// one launch route. Every vendor says it is not verified live. Logic in ./wizard.ts.
 	import '#lib/components/pages2/pages2.css';
+	import { tick } from 'svelte';
 	import { ApiError } from '#lib/api/core';
 	import { getConnectorProfiles, launchConnector, listConnectorClients, openBrands, saveConnectorClient, searchBrands } from '#lib/api/connections';
 	import type { BrandDirectory, BrandHit, ConnectorProfiles, SavedClient } from '#lib/api/types';
@@ -35,6 +36,8 @@
 	});
 
 	let vendorKey = $state<string | null>(null);
+	// one count per vendor pick: a search answer from before the latest pick is dropped
+	let picks = 0;
 	const vendor = $derived(profiles.data?.vendors.find((v) => v.key === vendorKey) ?? null);
 
 	// The server: a directory hit, one of the vendor's servers, or an address the person typed.
@@ -57,6 +60,7 @@
 	let saving = $state(false);
 	let saveError = $state<{ text: string; raw: string } | null>(null);
 	let saved = $state<'secret' | 'public' | null>(null);
+	let savedEl: HTMLElement | undefined = $state();
 
 	// The connection: whose record, its name, the launch.
 	const mine = $derived(manageable(app.me?.profiles ?? []));
@@ -75,6 +79,7 @@
 
 	async function pickVendor(key: string) {
 		vendorKey = key;
+		picks += 1;
 		const v = profiles.data?.vendors.find((x) => x.key === key);
 		hits = null;
 		q = '';
@@ -102,15 +107,19 @@
 
 	async function search(e: SubmitEvent) {
 		e.preventDefault();
-		if (!vendor || !q.trim()) return;
+		const asked = vendor;
+		const pick = picks;
+		if (!asked || !q.trim()) return;
 		searching = true;
 		searchError = null;
 		try {
 			const found = await searchBrands(q.trim(), 50);
+			// the person picked another vendor while this search ran: its answer fills no list
+			if (pick !== picks) return;
 			directory = found.directory;
-			hits = hitsOf(found.results, vendor);
+			hits = hitsOf(found.results, asked);
 		} catch (err) {
-			searchError = failure(err);
+			if (pick === picks) searchError = failure(err);
 		} finally {
 			searching = false;
 		}
@@ -138,6 +147,9 @@
 			replacing = false;
 			clientId = '';
 			await loadClients();
+			// the form that held the focus is gone: the focus goes to the answer that replaced it
+			await tick();
+			savedEl?.focus();
 		} catch (err) {
 			saveError = failure(err);
 		} finally {
@@ -179,7 +191,9 @@
 	{/snippet}
 </PageHeader>
 
-{#if profiles.error}
+{#if profiles.error instanceof ApiError && profiles.error.status === 403}
+	<div class="note" role="note">{t('cw_no_profiles')}</div>
+{:else if profiles.error}
 	<NotReady error={profiles.error} onretry={() => profiles.run(getConnectorProfiles)} />
 {:else if !profiles.data}
 	<div class="empty">{t('loading')}</div>
@@ -272,7 +286,7 @@
 		{#if server}
 			<section class="card step" aria-labelledby="cw-client">
 				<h3 id="cw-client">{t('cw_client')}</h3>
-				{#if saved}<div class="p2ok" role="status">{t(saved === 'secret' ? 'cw_saved' : 'cw_saved_public')}</div>{/if}
+				{#if saved}<div class="p2ok" role="status" tabindex="-1" bind:this={savedEl}>{t(saved === 'secret' ? 'cw_saved' : 'cw_saved_public')}</div>{/if}
 				{#if client && !replacing}
 					<div class="p2row">
 						<span>{tf('cw_have_client', { client_id: client.client_id })}{#if client.confidential}&nbsp;{t('cw_have_client_secret')}{/if}</span>

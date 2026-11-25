@@ -35,6 +35,7 @@
 		type ConnectionRow,
 		type ConnectionState
 	} from '#lib/logic/connections';
+	import { manageable } from '#lib/logic/inbox';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
 	// One clock for every date on the screen: it moves on each minute and on each load, so a grant that
@@ -194,7 +195,7 @@
 	{#snippet right()}
 		<PhaseChip phase="v1.0" />
 		<a class="btn" href="/inbox">{t('fu_inbox')}</a>
-		<a class="btn pri" href="/connections/add">{t('con_add')}</a>
+		{#if manageable(app.me?.profiles ?? []).length}<a class="btn pri" href="/connections/add">{t('con_add')}</a>{/if}
 	{/snippet}
 </PageHeader>
 
