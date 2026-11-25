@@ -5,7 +5,8 @@
 //! sample that is already there:
 //! - `Keep`: the first file to bring a sample owns it (Gadgetbridge exports, Nightscout readings);
 //! - `Refresh`: a push may carry a newer value for the same bucket (Health Auto Export sums a minute or
-//!   an hour that was still open at the previous push), so the value is replaced when it differs;
+//!   an hour that was still open at the previous push), so the value, the end and the UTC offset are
+//!   replaced when one of them differs;
 //! - `Adopt`: the newest file owns the samples it holds (Gadgetbridge exports are cumulative, so each
 //!   holds the previous ones): a stored sample moves to the new document and takes its value, and
 //!   retracting an older export leaves what a newer one still holds.
@@ -164,7 +165,8 @@ pub async fn insert(
         Conflict::Refresh => {
             "on conflict (profile_id, metric, source_id, t) do update set v = excluded.v, t_end = excluded.t_end, \
              tz_offset_min = excluded.tz_offset_min where wearable_sample.v is distinct from excluded.v \
-             or wearable_sample.t_end is distinct from excluded.t_end"
+             or wearable_sample.t_end is distinct from excluded.t_end \
+             or wearable_sample.tz_offset_min is distinct from excluded.tz_offset_min"
         }
         Conflict::Adopt => {
             "on conflict (profile_id, metric, source_id, t) do update set document_id = excluded.document_id, \
@@ -183,7 +185,7 @@ pub async fn insert(
          cast($5 as timestamptz[]), cast($6 as real[]), cast($7 as smallint[]), cast($8 as smallint[])) \
          as x(m, t, te, v, tz, s) {on_conflict} returning not exists (select 1 from wearable_sample o \
          where o.profile_id = wearable_sample.profile_id and o.metric = wearable_sample.metric \
-         and o.source_id = wearable_sample.source_id and o.t = wearable_sample.t) as inserted"
+         and o.source_id = wearable_sample.source_id and o.t = wearable_sample.t) as inserted, metric, source_id, t"
     );
     for chunk in rows.chunks(CHUNK) {
         let metrics: Vec<&str> = chunk.iter().map(|s| s.metric).collect();
@@ -192,7 +194,7 @@ pub async fn insert(
         let vs: Vec<f32> = chunk.iter().map(|s| s.v as f32).collect();
         let tzs: Vec<Option<i16>> = chunk.iter().map(|s| s.tz).collect();
         let srcs: Vec<i16> = chunk.iter().map(|s| s.source).collect();
-        let flags: Vec<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        let changed: Vec<(bool, String, i16, DateTime<Utc>)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(profile_id)
             .bind(document_id)
             .bind(&metrics)
@@ -203,18 +205,14 @@ pub async fn insert(
             .bind(&srcs)
             .fetch_all(&mut *conn)
             .await?;
-        if flags.is_empty() {
-            continue;
-        }
-        out.new += flags.iter().filter(|f| **f).count() as i64;
-        out.refreshed += flags.iter().filter(|f| !**f).count() as i64;
-        // a chunk that wrote anything may have touched any of its metrics and sources
-        touched.metrics.extend(chunk.iter().map(|s| s.metric.to_string()));
-        touched.sources.extend(chunk.iter().map(|s| s.source));
-        for s in chunk {
-            let (lo, hi) = touched.span.get_or_insert((s.t, s.t));
-            *lo = (*lo).min(s.t);
-            *hi = (*hi).max(s.t);
+        for (inserted, metric, source, t) in changed {
+            out.new += i64::from(inserted);
+            out.refreshed += i64::from(!inserted);
+            touched.metrics.insert(metric);
+            touched.sources.insert(source);
+            let (lo, hi) = touched.span.get_or_insert((t, t));
+            *lo = (*lo).min(t);
+            *hi = (*hi).max(t);
         }
     }
     Ok(out)

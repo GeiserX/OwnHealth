@@ -62,9 +62,9 @@ services:
       # The `imaging` profile (below): Orthanc's address, empty when imaging is off, and its password.
       OWNHEALTH_ORTHANC_URL: ${OWNHEALTH_ORTHANC_URL:-}
       OWNHEALTH_ORTHANC_PASSWORD_FILE: /run/secrets/imaging/orthanc_password
-      # Only Caddy reaches the app, from the compose network, so its X-Forwarded-For names the client
-      # (the share link access log keeps that address).
-      OWNHEALTH_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
+      # Trust forwarded client addresses only from Caddy's address on the front network.
+      OWNHEALTH_TRUSTED_PROXIES: ${OWNHEALTH_CADDY_IP:-172.31.253.2}
+    networks: [default, front, ow-api]
     secrets: [app_db_password, secret_key, secrets_key]
     volumes:
       - ownhealth-data:/data
@@ -73,7 +73,7 @@ services:
       # Only the Orthanc password, from its own folder: a secret listed above must exist even with
       # imaging off, and the app must not see the other files in secrets/.
       - ./secrets/imaging:/run/secrets/imaging:ro
-    # No published port: only Caddy reaches the app, on the compose network.
+    # Caddy publishes the web port. The app listens on its Compose networks.
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -163,6 +163,9 @@ services:
     image: caddy:2.11.9
     restart: unless-stopped
     depends_on: [app]
+    networks:
+      front:
+        ipv4_address: ${OWNHEALTH_CADDY_IP:-172.31.253.2}
     environment:
       OWNHEALTH_DOMAIN: ${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
     ports:
@@ -192,9 +195,7 @@ services:
   # - Fenced off: no published port (Caddy does not route to it), none of OwnHealth's secrets, and its
   #   own database and role on the same Postgres (deploy/db/ow-role.sql). That role cannot connect to
   #   the ownhealth database. OW's database is a cache, so `ownhealth backup` leaves it out.
-  # - Off OwnHealth's network: the sidecar shares only ow-db with OwnHealth, and db is the one OwnHealth
-  #   container on it, so OW and the app cannot reach each other. OW reaches the vendors through
-  #   ow-egress.
+  # - The app calls ow-app:8000 on ow-api. The sidecar reaches Postgres on ow-db and vendors on ow-egress.
   # - Redis is OW's Celery broker, on an internal network that only the sidecar joins. It keeps nothing
   #   on disk: a restart drops queued syncs, and beat queues them again.
   ow-db-init:
@@ -267,7 +268,7 @@ services:
       timeout: 5s
       retries: 6
       start_period: 300s
-    networks: [ow-db, wearables, ow-egress]
+    networks: [ow-db, wearables, ow-egress, ow-api]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -328,6 +329,15 @@ services:
     security_opt: ["no-new-privileges:true"]
 
 networks:
+  front:
+    ipam:
+      config:
+        - subnet: ${OWNHEALTH_CADDY_SUBNET:-172.31.253.0/28}
+          # Docker hands out addresses (and picks its gateway) from this range only, so Caddy's fixed
+          # address, outside it, is always free: the app starts first and could take it otherwise.
+          ip_range: ${OWNHEALTH_CADDY_RANGE:-172.31.253.8/29}
+  ow-api:
+    internal: true # the OwnHealth poller and the Open Wearables API
   wearables:
     internal: true # no route out: Redis reaches nothing, and only the sidecar reaches Redis
   ow-db:

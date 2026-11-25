@@ -1,0 +1,2354 @@
+{
+  "components": {
+    "schemas": {
+      "Body_login_api_v1_auth_login_post": {
+        "properties": {
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Id"
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "format": "password",
+            "title": "Client Secret"
+          },
+          "grant_type": {
+            "anyOf": [
+              {
+                "pattern": "^password$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grant Type"
+          },
+          "password": {
+            "format": "password",
+            "title": "Password",
+            "type": "string"
+          },
+          "scope": {
+            "default": "",
+            "title": "Scope",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "Body_login_api_v1_auth_login_post",
+        "type": "object"
+      },
+      "ComputedBy": {
+        "description": "Who computed an aggregate: the provider, or Open Wearables from stored samples.",
+        "enum": [
+          "provider",
+          "open_wearables"
+        ],
+        "title": "ComputedBy",
+        "type": "string"
+      },
+      "ConnectionStatus": {
+        "description": "Status of a user connection to a provider.",
+        "enum": [
+          "active",
+          "revoked",
+          "expired"
+        ],
+        "title": "ConnectionStatus",
+        "type": "string"
+      },
+      "DataGranularity": {
+        "description": "How finely a provider's 24/7 data is stored.\n\nDAILY  \u2014 one aggregated value per day (server-side rollup).\nHOURLY \u2014 one aggregated value per hour (server-side rollup).\nRAW    \u2014 every individual reading (no aggregation), where the provider supports it.",
+        "enum": [
+          "daily",
+          "hourly",
+          "raw"
+        ],
+        "title": "DataGranularity",
+        "type": "string"
+      },
+      "DeviceType": {
+        "description": "Type of device that collected health data.",
+        "enum": [
+          "watch",
+          "band",
+          "phone",
+          "scale",
+          "ring",
+          "tablet",
+          "chest_strap",
+          "hr_sensor",
+          "headphones",
+          "head_mounted",
+          "glasses",
+          "smart_display",
+          "bp_monitor",
+          "glucose_meter",
+          "thermometer",
+          "sleep_monitor",
+          "bike_computer",
+          "fitness_machine",
+          "other",
+          "unknown"
+        ],
+        "title": "DeviceType",
+        "type": "string"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthScoreCategory": {
+        "enum": [
+          "sleep",
+          "recovery",
+          "readiness",
+          "activity",
+          "stress",
+          "resilience",
+          "body_battery",
+          "strain"
+        ],
+        "title": "HealthScoreCategory",
+        "type": "string"
+      },
+      "HealthScoreResponse": {
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/HealthScoreCategory"
+          },
+          "components": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/ScoreComponent"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Components"
+          },
+          "data_source_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Data Source Id"
+          },
+          "event_record_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The sleep session or workout this score describes. Null for whole-day scores.",
+            "title": "Event Record Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderName"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "qualifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Textual rating from the provider, e.g. GOOD or EXCELLENT",
+            "title": "Qualifier"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The data source the score was computed from or reported by. Null for scores without one."
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Overall numeric score. Range varies by provider and category \u2014 see HEALTH_SCORE_RANGES for scale.",
+            "title": "Value"
+          },
+          "zone_offset": {
+            "anyOf": [
+              {
+                "maxLength": 10,
+                "pattern": "^[+-]\\d{2}:\\d{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Timezone offset in the format '+01:00' or '-05:30'",
+            "examples": [
+              "+01:00",
+              "-05:30"
+            ],
+            "title": "Zone Offset"
+          }
+        },
+        "required": [
+          "category",
+          "recorded_at",
+          "id",
+          "data_source_id",
+          "provider"
+        ],
+        "title": "HealthScoreResponse",
+        "type": "object"
+      },
+      "LiveSyncMode": {
+        "enum": [
+          "pull",
+          "webhook"
+        ],
+        "title": "LiveSyncMode",
+        "type": "string"
+      },
+      "PaginatedResponse_HealthScoreResponse_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/HealthScoreResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/TimeseriesMetadata"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        },
+        "required": [
+          "data",
+          "pagination",
+          "metadata"
+        ],
+        "title": "PaginatedResponse[HealthScoreResponse]",
+        "type": "object"
+      },
+      "PaginatedResponse_TimeSeriesSample_": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/TimeSeriesSample"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/TimeseriesMetadata"
+          },
+          "pagination": {
+            "$ref": "#/components/schemas/Pagination"
+          }
+        },
+        "required": [
+          "data",
+          "pagination",
+          "metadata"
+        ],
+        "title": "PaginatedResponse[TimeSeriesSample]",
+        "type": "object"
+      },
+      "Pagination": {
+        "properties": {
+          "has_more": {
+            "description": "Whether more data is available",
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor to fetch next page, null if no more data",
+            "example": "eyJpZCI6IjEyMzQ1Njc4OTAiLCJ0cyI6MTcwNDA2NzIwMH0",
+            "title": "Next Cursor"
+          },
+          "previous_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Cursor to fetch previous page",
+            "title": "Previous Cursor"
+          },
+          "total_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Total number of records matching the query",
+            "example": 150,
+            "title": "Total Count"
+          }
+        },
+        "required": [
+          "has_more"
+        ],
+        "title": "Pagination",
+        "type": "object"
+      },
+      "PasswordChangePrompt": {
+        "description": "How the portal should ask a developer who signed in with the default password to change it.",
+        "enum": [
+          "required",
+          "recommended"
+        ],
+        "title": "PasswordChangePrompt",
+        "type": "string"
+      },
+      "ProviderName": {
+        "description": "Supported data providers.",
+        "enum": [
+          "apple",
+          "samsung",
+          "garmin",
+          "health_connect",
+          "google_health",
+          "polar",
+          "suunto",
+          "whoop",
+          "strava",
+          "oura",
+          "fitbit",
+          "ultrahuman",
+          "sensorbio",
+          "withings",
+          "unknown",
+          "internal"
+        ],
+        "title": "ProviderName",
+        "type": "string"
+      },
+      "ProviderSettingRead": {
+        "description": "Provider setting with metadata.",
+        "properties": {
+          "credentials_configured": {
+            "default": true,
+            "description": "Whether the OAuth client ID and secret are set. Always true for SDK-only providers.",
+            "title": "Credentials Configured",
+            "type": "boolean"
+          },
+          "data_granularity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DataGranularity"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How finely 24/7 data is stored ('daily', 'hourly', 'raw'). Null = provider default."
+          },
+          "has_cloud_api": {
+            "description": "Whether provider uses cloud OAuth API",
+            "title": "Has Cloud Api",
+            "type": "boolean"
+          },
+          "icon_url": {
+            "description": "Relative URL to provider icon (e.g., '/static/provider-icons/garmin.svg'). Resolve against the API base URL.",
+            "title": "Icon Url",
+            "type": "string"
+          },
+          "is_enabled": {
+            "description": "Whether provider is enabled by admin",
+            "title": "Is Enabled",
+            "type": "boolean"
+          },
+          "live_sync_configurable": {
+            "default": false,
+            "description": "Whether the admin can switch live_sync_mode for this provider.",
+            "title": "Live Sync Configurable",
+            "type": "boolean"
+          },
+          "live_sync_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveSyncMode"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Current live sync mode ('pull' or 'webhook'). Null for SDK-only providers."
+          },
+          "name": {
+            "description": "Display name (e.g., 'Apple Health', 'Garmin')",
+            "title": "Name",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider identifier (e.g., 'apple', 'garmin')",
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "name",
+          "has_cloud_api",
+          "is_enabled",
+          "icon_url"
+        ],
+        "title": "ProviderSettingRead",
+        "type": "object"
+      },
+      "ProviderSettingUpdate": {
+        "description": "Schema for updating a single provider setting.",
+        "properties": {
+          "data_granularity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DataGranularity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Enabled"
+          },
+          "live_sync_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveSyncMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "ProviderSettingUpdate",
+        "type": "object"
+      },
+      "Resolution": {
+        "description": "Bucket width requested when reading time series. RAW returns stored samples untouched; day, week\nand month read the day aggregates instead of the samples.",
+        "enum": [
+          "raw",
+          "1min",
+          "5min",
+          "15min",
+          "1hour",
+          "1day",
+          "1week",
+          "1month"
+        ],
+        "title": "Resolution",
+        "type": "string"
+      },
+      "ScoreComponent": {
+        "description": "A single constituent of a health score (e.g. deep sleep percentage).",
+        "properties": {
+          "qualifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Textual rating from the provider, e.g. GOOD or EXCELLENT",
+            "title": "Qualifier"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Numeric score value. Range varies by provider and category \u2014 see HEALTH_SCORE_RANGES for scale.",
+            "title": "Value"
+          }
+        },
+        "title": "ScoreComponent",
+        "type": "object"
+      },
+      "SeriesStats": {
+        "description": "Every statistic held for a period. The sample's value is the one its series is read by.",
+        "properties": {
+          "avg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "last": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last"
+          },
+          "max": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max"
+          },
+          "min": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min"
+          },
+          "sum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sum"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "SeriesStats",
+        "type": "object"
+      },
+      "SeriesType": {
+        "description": "All supported time-series metric types.",
+        "enum": [
+          "heart_rate",
+          "resting_heart_rate",
+          "heart_rate_variability_sdnn",
+          "heart_rate_recovery_one_minute",
+          "walking_heart_rate",
+          "heart_rate_variability_rmssd",
+          "oxygen_saturation",
+          "blood_glucose",
+          "blood_pressure_systolic",
+          "blood_pressure_diastolic",
+          "respiratory_rate",
+          "sleeping_breathing_disturbances",
+          "breathing_disturbance_index",
+          "blood_alcohol_content",
+          "peripheral_perfusion_index",
+          "forced_vital_capacity",
+          "forced_expiratory_volume_1",
+          "peak_expiratory_flow_rate",
+          "height",
+          "weight",
+          "body_fat_percentage",
+          "body_mass_index",
+          "lean_body_mass",
+          "body_temperature",
+          "skin_temperature",
+          "skin_temperature_deviation",
+          "skin_temperature_trend_deviation",
+          "waist_circumference",
+          "body_fat_mass",
+          "skeletal_muscle_mass",
+          "bone_mass",
+          "body_water_mass",
+          "vo2_max",
+          "six_minute_walk_test_distance",
+          "cardiovascular_age",
+          "steps",
+          "active_energy",
+          "basal_energy",
+          "stand_time",
+          "exercise_time",
+          "physical_effort",
+          "flights_climbed",
+          "active_time",
+          "total_energy",
+          "distance_walking_running",
+          "distance_cycling",
+          "distance_swimming",
+          "distance_downhill_snow_sports",
+          "distance_other",
+          "walking_step_length",
+          "walking_speed",
+          "walking_double_support_percentage",
+          "walking_asymmetry_percentage",
+          "walking_steadiness",
+          "stair_descent_speed",
+          "stair_ascent_speed",
+          "running_power",
+          "running_speed",
+          "running_vertical_oscillation",
+          "running_ground_contact_time",
+          "running_stride_length",
+          "running_vertical_ratio",
+          "running_stance_time_balance",
+          "swimming_stroke_count",
+          "underwater_depth",
+          "cadence",
+          "power",
+          "speed",
+          "distance",
+          "elevation_gain",
+          "workout_effort_score",
+          "estimated_workout_effort_score",
+          "environmental_audio_exposure",
+          "headphone_audio_exposure",
+          "environmental_sound_reduction",
+          "time_in_daylight",
+          "water_temperature",
+          "uv_exposure",
+          "inhaler_usage",
+          "weather_temperature",
+          "weather_humidity",
+          "elevation",
+          "latitude",
+          "longitude",
+          "air_temperature",
+          "garmin_stress_level",
+          "garmin_skin_temperature",
+          "garmin_fitness_age",
+          "garmin_body_battery",
+          "withings_pulse_wave_velocity",
+          "withings_metabolic_age",
+          "dietary_energy_consumed",
+          "dietary_carbohydrates",
+          "dietary_fiber",
+          "dietary_sugar",
+          "dietary_fat_total",
+          "dietary_fat_saturated",
+          "dietary_fat_monounsaturated",
+          "dietary_fat_polyunsaturated",
+          "dietary_cholesterol",
+          "dietary_protein",
+          "dietary_sodium",
+          "dietary_potassium",
+          "dietary_calcium",
+          "dietary_iron",
+          "dietary_magnesium",
+          "dietary_phosphorus",
+          "dietary_zinc",
+          "dietary_copper",
+          "dietary_manganese",
+          "dietary_selenium",
+          "dietary_chromium",
+          "dietary_molybdenum",
+          "dietary_iodine",
+          "dietary_chloride",
+          "dietary_vitamin_a",
+          "dietary_vitamin_b6",
+          "dietary_vitamin_b12",
+          "dietary_vitamin_c",
+          "dietary_vitamin_d",
+          "dietary_vitamin_e",
+          "dietary_vitamin_k",
+          "dietary_thiamin",
+          "dietary_riboflavin",
+          "dietary_niacin",
+          "dietary_folate",
+          "dietary_pantothenic_acid",
+          "dietary_biotin",
+          "dietary_caffeine",
+          "dietary_fat_trans",
+          "dietary_energy_from_fat",
+          "dietary_fat_unsaturated",
+          "dietary_folic_acid",
+          "electrodermal_activity",
+          "push_count",
+          "atrial_fibrillation_burden",
+          "insulin_delivery",
+          "number_of_times_fallen",
+          "number_of_alcoholic_beverages",
+          "nike_fuel",
+          "hydration"
+        ],
+        "title": "SeriesType",
+        "type": "string"
+      },
+      "SourceMetadata": {
+        "properties": {
+          "device": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "example": "iPhone15,2",
+            "title": "Device"
+          },
+          "device_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "example": "R9ZW30ABC12",
+            "title": "Device Id"
+          },
+          "device_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Marketing name for ``device``, derived so it cannot drift from the raw model.",
+            "readOnly": true,
+            "title": "Device Name"
+          },
+          "device_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "example": "phone"
+          },
+          "provider": {
+            "example": "apple",
+            "title": "Provider",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "example": "Connect",
+            "title": "Source"
+          }
+        },
+        "required": [
+          "provider",
+          "device_name"
+        ],
+        "title": "SourceMetadata",
+        "type": "object"
+      },
+      "TimeSeriesSample": {
+        "properties": {
+          "computed_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComputedBy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "is_daily_total": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Daily Total"
+          },
+          "period_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Period End"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SeriesStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timestamp": {
+            "format": "date-time",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SeriesType"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Value"
+          },
+          "window_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Seconds"
+          },
+          "zone_offset": {
+            "anyOf": [
+              {
+                "maxLength": 10,
+                "pattern": "^[+-]\\d{2}:\\d{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Timezone offset in the format '+01:00' or '-05:30'",
+            "examples": [
+              "+01:00",
+              "-05:30"
+            ],
+            "title": "Zone Offset"
+          }
+        },
+        "required": [
+          "timestamp",
+          "type",
+          "value",
+          "unit"
+        ],
+        "title": "TimeSeriesSample",
+        "type": "object"
+      },
+      "TimeseriesMetadata": {
+        "properties": {
+          "end_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Time"
+          },
+          "resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Resolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sample_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Count"
+          },
+          "start_time": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Time"
+          }
+        },
+        "title": "TimeseriesMetadata",
+        "type": "object"
+      },
+      "TokenResponse": {
+        "description": "Token response with optional refresh token.",
+        "properties": {
+          "access_token": {
+            "title": "Access Token",
+            "type": "string"
+          },
+          "expires_in": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires In"
+          },
+          "password_change": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PasswordChangePrompt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "refresh_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Token"
+          },
+          "token_type": {
+            "default": "bearer",
+            "title": "Token Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "access_token"
+        ],
+        "title": "TokenResponse",
+        "type": "object"
+      },
+      "UserConnectionSummary": {
+        "description": "Compact per-provider connection state, embedded in user list rows.",
+        "properties": {
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConnectionStatus"
+          }
+        },
+        "required": [
+          "provider",
+          "status"
+        ],
+        "title": "UserConnectionSummary",
+        "type": "object"
+      },
+      "UserConnectionWithCapabilities": {
+        "description": "UserConnectionRead enriched with provider capability metadata.\n\nExtra fields are populated by the endpoint, not from the ORM model.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Relative URL to provider icon (e.g., '/static/provider-icons/garmin.svg'). Resolve against the API base URL.",
+            "title": "Icon Url"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
+          "linked_user_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Linked User Ids",
+            "type": "array"
+          },
+          "live_sync_mode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveSyncMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "max_historical_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Historical Days"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "provider_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider User Id"
+          },
+          "provider_username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Username"
+          },
+          "rest_pull": {
+            "default": false,
+            "title": "Rest Pull",
+            "type": "boolean"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ConnectionStatus"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          },
+          "webhook_callback": {
+            "default": false,
+            "title": "Webhook Callback",
+            "type": "boolean"
+          },
+          "webhook_ping": {
+            "default": false,
+            "title": "Webhook Ping",
+            "type": "boolean"
+          },
+          "webhook_stream": {
+            "default": false,
+            "title": "Webhook Stream",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "user_id",
+          "provider",
+          "id",
+          "status",
+          "last_synced_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "UserConnectionWithCapabilities",
+        "type": "object"
+      },
+      "UserDetailRead": {
+        "description": "A single user. Carries what the list rows carry, plus the tab-gating flags.",
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/UserConnectionSummary"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Connections of every status. Present only when requested via `include=connections`",
+            "title": "Connections"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "external_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "deprecated": true,
+            "description": "Deprecated: no data-fetching endpoint (timeseries, workouts, sleep, summaries, health-scores, etc.) accepts external_user_id - they all require the Open Wearables UUID. This field was added early in the project but never wired into those endpoints, so it only works as a filter on GET /users. Store the UUID returned by POST /users in your own system instead.",
+            "title": "External User Id"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "has_active_connection": {
+            "default": false,
+            "description": "Whether any connection is active. Mirrors the has_active_connection filter",
+            "title": "Has Active Connection",
+            "type": "boolean"
+          },
+          "has_womens_health_data": {
+            "default": false,
+            "description": "Whether the user has any menstrual cycle events, from any provider",
+            "title": "Has Womens Health Data",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
+          "last_synced_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider that synced most recently, or null if none of them ever synced",
+            "title": "Last Synced Provider"
+          }
+        },
+        "required": [
+          "id",
+          "created_at"
+        ],
+        "title": "UserDetailRead",
+        "type": "object"
+      },
+      "UserInclude": {
+        "description": "Optional expansions for user read models, requested via the `include` query parameter.",
+        "enum": [
+          "connections"
+        ],
+        "title": "UserInclude",
+        "type": "string"
+      },
+      "UserRead": {
+        "properties": {
+          "connections": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/UserConnectionSummary"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Connections of every status. Present only when requested via `include=connections`",
+            "title": "Connections"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "format": "email",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "external_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "deprecated": true,
+            "description": "Deprecated: no data-fetching endpoint (timeseries, workouts, sleep, summaries, health-scores, etc.) accepts external_user_id - they all require the Open Wearables UUID. This field was added early in the project but never wired into those endpoints, so it only works as a filter on GET /users. Store the UUID returned by POST /users in your own system instead.",
+            "title": "External User Id"
+          },
+          "first_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Name"
+          },
+          "has_active_connection": {
+            "default": false,
+            "description": "Whether any connection is active. Mirrors the has_active_connection filter",
+            "title": "Has Active Connection",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "last_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Name"
+          },
+          "last_synced_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Synced At"
+          },
+          "last_synced_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Provider that synced most recently, or null if none of them ever synced",
+            "title": "Last Synced Provider"
+          }
+        },
+        "required": [
+          "id",
+          "created_at"
+        ],
+        "title": "UserRead",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "OAuth2PasswordBearer": {
+        "flows": {
+          "password": {
+            "scopes": {},
+            "tokenUrl": "/api/v1/auth/login"
+          }
+        },
+        "type": "oauth2"
+      }
+    }
+  },
+  "info": {
+    "title": "Open Wearables API",
+    "version": "0.11.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "description": "Authenticate developer and return access token with refresh token.",
+        "operationId": "login_api_v1_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_login_api_v1_auth_login_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "Internal: Auth"
+        ]
+      }
+    },
+    "/api/v1/oauth/providers": {
+      "get": {
+        "description": "Get providers with their configuration and metadata.\n\nQuery params:\n- enabled_only: Filter to only enabled providers (default: False, returns all)\n- cloud_only: Filter to only providers with cloud OAuth API (default: False)\n\nReturns full provider details including name, icon_url, has_cloud_api, is_enabled.",
+        "operationId": "get_providers_api_v1_oauth_providers_get",
+        "parameters": [
+          {
+            "description": "Return only enabled providers",
+            "in": "query",
+            "name": "enabled_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Return only enabled providers",
+              "title": "Enabled Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Return only cloud (OAuth) providers",
+            "in": "query",
+            "name": "cloud_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Return only cloud (OAuth) providers",
+              "title": "Cloud Only",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderSettingRead"
+                  },
+                  "title": "Response Get Providers Api V1 Oauth Providers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Providers",
+        "tags": [
+          "External: Providers"
+        ]
+      }
+    },
+    "/api/v1/oauth/providers/{provider}": {
+      "put": {
+        "description": "Update is_enabled and/or live_sync_mode for a single provider.",
+        "operationId": "update_provider_setting_api_v1_oauth_providers__provider__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderSettingUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderSettingRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Update Provider Setting",
+        "tags": [
+          "Internal: Providers"
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}": {
+      "delete": {
+        "operationId": "delete_user_api_v1_users__user_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Open-Wearables-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Open-Wearables-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Delete User",
+        "tags": [
+          "External: Users"
+        ]
+      },
+      "get": {
+        "description": "Returns one user with its latest sync state and connection summary.",
+        "operationId": "get_user_api_v1_users__user_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional expansions to embed; repeat the parameter for several",
+            "in": "query",
+            "name": "include",
+            "required": false,
+            "schema": {
+              "description": "Optional expansions to embed; repeat the parameter for several",
+              "items": {
+                "$ref": "#/components/schemas/UserInclude"
+              },
+              "title": "Include",
+              "type": "array"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Open-Wearables-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Open-Wearables-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserDetailRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Input should be a valid UUID"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "Authentication required: provide JWT token or API key"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "User with ID: 123e4567-e89b-12d3-a456-426614174000 not found."
+                }
+              }
+            },
+            "description": "User not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get User",
+        "tags": [
+          "External: Users"
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/connections": {
+      "get": {
+        "description": "Get all connections for a user, enriched with provider capability metadata.",
+        "operationId": "get_connections_endpoint_api_v1_users__user_id__connections_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Open-Wearables-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Open-Wearables-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/UserConnectionWithCapabilities"
+                  },
+                  "title": "Response Get Connections Endpoint Api V1 Users  User Id  Connections Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get Connections Endpoint",
+        "tags": [
+          "External: Connections"
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/health-scores": {
+      "get": {
+        "description": "Returns health scores (sleep, recovery, readiness, etc.) for a user.\n\nOne OW score (provider `internal`) per category and day, from the highest-priority source.\n\nScores computed by Open Wearables (`provider: internal`) are deprecated: no new ones are\ncomputed starting November 6, 2026. Previously computed scores are still returned.",
+        "operationId": "list_health_scores_api_v1_users__user_id__health_scores_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "description": "ISO 8601 datetime (e.g. `2023-11-07T05:31:56Z`) or Unix timestamp in seconds. Date-only strings (e.g. `2023-11-07`) are also accepted and cover the whole day, so a date-only range includes both boundary days.",
+                  "examples": [
+                    "2023-11-07T05:31:56Z",
+                    "2023-11-07"
+                  ],
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "description": "ISO 8601 datetime (e.g. `2023-11-07T05:31:56Z`) or Unix timestamp in seconds. Date-only strings (e.g. `2023-11-07`) are also accepted and cover the whole day, so a date-only range includes both boundary days.",
+                  "examples": [
+                    "2023-11-07T05:31:56Z",
+                    "2023-11-07"
+                  ],
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/HealthScoreCategory"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ProviderName"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Open-Wearables-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Open-Wearables-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedResponse_HealthScoreResponse_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "List Health Scores",
+        "tags": [
+          "External: Health Scores"
+        ]
+      }
+    },
+    "/api/v1/users/{user_id}/timeseries": {
+      "get": {
+        "description": "Returns granular time series data (biometrics or activity).",
+        "operationId": "get_timeseries_api_v1_users__user_id__timeseries_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ISO 8601 datetime (e.g. `2023-11-07T05:31:56Z`) or Unix timestamp in seconds. Date-only strings (e.g. `2023-11-07`) are also accepted and cover the whole day, so a date-only range includes both boundary days.",
+            "in": "query",
+            "name": "start_time",
+            "required": true,
+            "schema": {
+              "description": "ISO 8601 datetime (e.g. `2023-11-07T05:31:56Z`) or Unix timestamp in seconds. Date-only strings (e.g. `2023-11-07`) are also accepted and cover the whole day, so a date-only range includes both boundary days.",
+              "examples": [
+                "2023-11-07T05:31:56Z",
+                "2023-11-07"
+              ],
+              "format": "date-time",
+              "title": "Start Time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ISO 8601 datetime (e.g. `2023-11-07T05:31:56Z`) or Unix timestamp in seconds. Date-only strings (e.g. `2023-11-07`) are also accepted and cover the whole day, so a date-only range includes both boundary days.",
+            "in": "query",
+            "name": "end_time",
+            "required": true,
+            "schema": {
+              "description": "ISO 8601 datetime (e.g. `2023-11-07T05:31:56Z`) or Unix timestamp in seconds. Date-only strings (e.g. `2023-11-07`) are also accepted and cover the whole day, so a date-only range includes both boundary days.",
+              "examples": [
+                "2023-11-07T05:31:56Z",
+                "2023-11-07"
+              ],
+              "format": "date-time",
+              "title": "End Time",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "types",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "$ref": "#/components/schemas/SeriesType"
+              },
+              "title": "Types",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Resolution",
+              "default": "raw"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/ProviderName"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "device_model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Device Model"
+            }
+          },
+          {
+            "in": "query",
+            "name": "data_source_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Data Source Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "filter_by_priority",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Filter By Priority",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Open-Wearables-API-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Open-Wearables-Api-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedResponse_TimeSeriesSample_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "summary": "Get Timeseries",
+        "tags": [
+          "External: Timeseries"
+        ]
+      }
+    }
+  }
+}

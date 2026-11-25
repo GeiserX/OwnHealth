@@ -28,6 +28,7 @@
 		daysLeft,
 		refreshUntilFirstPull,
 		renewsItself,
+		endedVendors,
 		runWords,
 		shownConnections,
 		statusWord,
@@ -60,6 +61,8 @@
 	const codeText = (code: string) => tf(connectorErrorKey(code, has), { code });
 	// a poller's stop or problem, kept in English by the server, in the reader's language when its code has words
 	const runText = (text: string) => runWords(text, has, tf);
+	// a vendor by its name (fu_k_oura: Oura), else by its id
+	const vendorName = (p: string) => (has('fu_k_' + p) ? t('fu_k_' + p) : p);
 
 	// What the vendor's redirect said, read once; the address is then cleaned so a reload does not repeat it.
 	let outcome = $state<{ connected: string } | { error: string } | null>(null);
@@ -174,8 +177,15 @@
 	const stateLine = (r: ConnectionRow, s: ConnectionState): { text: string; tone: string } | null => {
 		const n = daysLeft(r.grant_expires_at, now) ?? 0;
 		switch (s) {
-			case 'reconsent':
+			case 'reconsent': {
+				// Open Wearables: one vendor's connection ended there; the others keep syncing, and only
+				// the operator can reconnect it in the sidecar, so there is no Reconnect here.
+				if (r.kind === 'openwearables') {
+					const vendors = endedVendors(r).map(vendorName);
+					return { text: vendors.length ? tf('con_st_ow_ended', { vendors: vendors.join(', ') }) : t('con_st_ow_ended_any'), tone: 'var(--out)' };
+				}
 				return { text: t('con_st_reconsent'), tone: 'var(--out)' };
+			}
 			case 'expired':
 				return { text: tf('con_st_expired', { date: day(r.grant_expires_at) }), tone: 'var(--out)' };
 			case 'grant_soon':

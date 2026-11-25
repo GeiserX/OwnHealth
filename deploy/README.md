@@ -65,7 +65,7 @@ A person can share a scoped summary with a doctor through a SMART Health Link: a
 3. Set `OWNHEALTH_SHARE_URL` in `.env` to the https address the tunnel gives, such as `https://share.example.org`. The app refuses to start with an http address, except one on localhost, with a user name or password in it, and with anything after the host and port.
 4. `docker compose up -d`.
 
-What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES` (the compose network).
+What goes public: `POST /api/shl/<id>` (and its CORS preflight) and `GET /api/shl/<id>/file/<ticket>`, each rewritten to its canonical path. Every other path on the tunnel gets 404 from Caddy, including `/`, `/login`, `/api`, `/mcp` and `/dicom-web`. A link answers only while it is live and its creator may still share what it carries, and at most 60 times an hour. Locking a category, or narrowing a grant below it, revokes every link that carries it for good: lifting the lock brings none back. The access log the person reads names each recipient's address: Caddy keeps the address the tunnel forwards, and the app trusts that header only from the proxies in `OWNHEALTH_TRUSTED_PROXIES`. The homelab stack sets it to Caddy's own address on the `front` network (`OWNHEALTH_CADDY_IP`).
 
 Check it from outside: `curl -i https://share.example.org/login` answers 404, and a link the app makes opens in a SMART Health Links viewer. To turn sharing off again, remove `OWNHEALTH_SHARE_URL` and run `docker compose up -d`: every link and every file address already handed out then answers 404.
 
@@ -101,13 +101,99 @@ Then add `wearables` to the `COMPOSE_PROFILES` line in `.env`: `COMPOSE_PROFILES
 
 The one-shot `ow-db-init` creates the `openwearables` database and role, then OW migrates its tables. It starts only once the app is healthy. So if `openwearables.env` is missing, or a line in it is empty, only the sidecar stops: OwnHealth keeps running, and `docker compose logs ow-db-init ow-app` names the missing variable. Fix the file and run `docker compose up -d` again.
 
+**Register the vendors.** Each vendor needs an app in its developer portal: Oura, Polar, WHOOP or Withings. Give it the redirect URL `http://localhost:8000/api/v1/oauth/<vendor>/callback`, with `oura`, `polar`, `whoop` or `withings` as `<vendor>`. Add its client id and secret to `openwearables.env`, for example `OURA_CLIENT_ID=...` and `OURA_CLIENT_SECRET=...` (`POLAR_`, `WHOOP_` and `WITHINGS_` for the others). Then run `docker compose up -d`.
+
+**Create the user and the API key.** The Open Wearables API stays off the network, so this one-off script runs inside `ow-app`. It signs in as the admin account (`admin@admin.com`, or `ADMIN_EMAIL` if you set it in `openwearables.env`, with `OPENWEARABLES_ADMIN_PASSWORD`). It creates an API key and a user, prints the user id, and writes `ow-credentials.json`, readable by you only:
+
+```sh
+(umask 077; docker compose exec -T ow-app python - new-user > ow-credentials.json) <<'EOF'
+import json, os, sys, urllib.parse, urllib.request
+API = "http://127.0.0.1:8000/api/v1"
+def post(path, body, token=None, form=False):
+    data = urllib.parse.urlencode(body).encode() if form else json.dumps(body).encode()
+    headers = {"Content-Type": "application/x-www-form-urlencoded" if form else "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return json.load(urllib.request.urlopen(urllib.request.Request(API + path, data, headers)))
+email, password = os.environ.get("ADMIN_EMAIL", "admin@admin.com"), os.environ["OPENWEARABLES_ADMIN_PASSWORD"]
+token = post("/auth/login", {"username": email, "password": password}, form=True)["access_token"]
+out = {"admin_password": password, "api_key": post("/developer/api-keys", {"name": "OwnHealth"}, token)["key"]}
+if sys.argv[1:] == ["new-user"]:
+    out["user_id"] = post("/users", {}, token)["id"]
+    print("Open Wearables user:", out["user_id"], file=sys.stderr)
+print(json.dumps(out))
+EOF
+```
+
+Without `new-user`, the script creates only a new API key.
+
+**Connect the vendors.** The person signs in to each vendor in a browser, and the vendor sends the browser back to `localhost:8000`. On the host, open a forward to Open Wearables on the loopback address only. The network is `<project>_ow-egress`, `ownhealth_ow-egress` for this stack (`docker network ls` lists it):
+
+```sh
+docker run -d --rm --name ow-forward --network ownhealth_ow-egress \
+  -p 127.0.0.1:8000:8000 alpine/socat:1.8.0.3 TCP-LISTEN:8000,fork,reuseaddr TCP:ow-app:8000
+```
+
+If the browser runs on another computer, forward the port over ssh there: `ssh -N -L 8000:127.0.0.1:8000 <host>`. Print the sign-in link of each vendor, and open it in that browser:
+
+```sh
+docker compose exec -T ow-app python -c 'import json, sys, urllib.request; print(json.load(urllib.request.urlopen(f"http://127.0.0.1:8000/api/v1/oauth/{sys.argv[1]}/authorize?user_id={sys.argv[2]}"))["authorization_url"])' oura "OPEN_WEARABLES_USER_UUID"
+```
+
+When the last vendor is connected, close the forward with `docker stop ow-forward`.
+
+**Link a profile.** Pass `ow-credentials.json` on standard input:
+
+```sh
+docker compose exec -T app ownhealth openwearables-connect \
+  --profile alex --user "OPEN_WEARABLES_USER_UUID" \
+  --admin-email admin@admin.com < ow-credentials.json
+```
+
+`--profile` takes the profile's short name, the one its inbox folders use (`alex`), or its id. On success the command prints the user, the profile and the new source. If a step fails, the error names it: the user check with the API key, or the developer sign-in.
+
+Setup turns off providers outside OwnHealth's allowlist. OwnHealth pulls each allowed vendor on its own, one day at a time. The first pull asks for 30 days. Later pulls re-read the seven days before that vendor's last stored day for late uploads and corrections. OwnHealth updates stored readings when they change and archives each distinct payload once. If one vendor's connection ends in Open Wearables, the other vendors keep syncing. The Connections screen names that vendor; reconnect it in Open Wearables. If one vendor's answers cannot be read, that vendor stops at its last stored day and the run names it, while the other vendors keep syncing. If only the re-read of those seven days fails, the run names the vendor, and the vendor still syncs its newer days. The next pull tries those seven days again. A single row that cannot be read is skipped and counted. If you delete the profile, OwnHealth removes its linked Open Wearables user on the next scheduler cycle. It retries if the sidecar is down.
+
+**A cleanup Open Wearables refuses.** If Open Wearables refuses the stored key when OwnHealth deletes the user of a deleted profile, OwnHealth stops trying. This happens when the key was revoked, or after a restore. A failed-job item names the user. Make a new key with the script above, without `new-user`, and delete the user with it:
+
+```sh
+docker compose exec -T app ownhealth openwearables-delete --user "OPEN_WEARABLES_USER_UUID" < ow-credentials.json
+```
+
+If you already deleted that user in Open Wearables, the same command clears it: Open Wearables answers that the user does not exist.
+
+**Registrar los proveedores.** Cada proveedor necesita una aplicación en su portal de desarrolladores: Oura, Polar, WHOOP o Withings. Dale la URL de redirección `http://localhost:8000/api/v1/oauth/<proveedor>/callback`, con `oura`, `polar`, `whoop` o `withings` como `<proveedor>`. Añade su id de cliente y su secreto a `openwearables.env`, por ejemplo `OURA_CLIENT_ID=...` y `OURA_CLIENT_SECRET=...` (`POLAR_`, `WHOOP_` y `WITHINGS_` para los demás). Después ejecuta `docker compose up -d`.
+
+**Crear el usuario y la clave de API.** La API de Open Wearables no está en la red, así que el script de arriba se ejecuta una vez dentro de `ow-app`. Inicia sesión con la cuenta de administración (`admin@admin.com`, o `ADMIN_EMAIL` si lo pusiste en `openwearables.env`, con `OPENWEARABLES_ADMIN_PASSWORD`). Crea una clave de API y un usuario, muestra el id del usuario y escribe `ow-credentials.json`, que solo tú puedes leer. Sin `new-user`, el script solo crea una clave de API nueva.
+
+**Conectar los proveedores.** La persona inicia sesión en cada proveedor desde un navegador, y el proveedor devuelve el navegador a `localhost:8000`. En el servidor, abre con el comando `docker run` de arriba un reenvío a Open Wearables solo en la dirección local. La red es `<proyecto>_ow-egress`, `ownhealth_ow-egress` en esta instalación (`docker network ls` la muestra). Si el navegador está en otro ordenador, reenvía el puerto por ssh desde ese ordenador: `ssh -N -L 8000:127.0.0.1:8000 <servidor>`. Muestra el enlace de inicio de sesión de cada proveedor con el comando `python -c` de arriba y ábrelo en ese navegador. Cuando el último proveedor esté conectado, cierra el reenvío con `docker stop ow-forward`.
+
+**Vincular un perfil.** Pasa `ow-credentials.json` por la entrada estándar del comando `openwearables-connect` de arriba.
+
+`--profile` acepta el nombre corto del perfil, el que usan sus carpetas de entrada (`alex`), o su id. Al terminar, el comando muestra el usuario, el perfil y la fuente nueva. Si un paso falla, el error lo nombra: la comprobación del usuario con la clave de API o el inicio de sesión de desarrollador.
+
+La configuración desactiva los proveedores que no admite OwnHealth. OwnHealth sincroniza cada proveedor permitido por separado, día a día. La primera sincronización solicita 30 días. Las siguientes vuelven a leer los siete días anteriores al último día guardado de ese proveedor y solo guardan las filas nuevas. Si la conexión de un proveedor termina en Open Wearables, los demás se siguen sincronizando. La pantalla Conexiones nombra ese proveedor; vuelve a conectarlo en Open Wearables. Si las respuestas de un proveedor no se pueden leer, ese proveedor se queda en su último día guardado y la sincronización lo nombra, mientras los demás se siguen sincronizando. Si solo falla la nueva lectura de esos siete días, la sincronización nombra el proveedor y este sigue sincronizando sus días más nuevos. La siguiente sincronización vuelve a intentar esos siete días. Si borras el perfil, OwnHealth elimina su usuario de Open Wearables en el siguiente ciclo. Si el servicio no responde, vuelve a intentarlo.
+
+**Una limpieza que Open Wearables rechaza.** Si Open Wearables rechaza la clave guardada cuando OwnHealth borra el usuario de un perfil borrado, OwnHealth deja de intentarlo. Pasa cuando la clave se revocó, o tras una restauración. Un elemento de tarea fallida nombra el usuario. Crea una clave nueva con el script de arriba, sin `new-user`, y borra el usuario con el comando `openwearables-delete` de arriba. Si ya borraste ese usuario en Open Wearables, el mismo comando lo resuelve: Open Wearables responde que el usuario no existe.
+
+The homelab stack trusts forwarded addresses from Caddy's IP on the `front` network. Docker gives the other containers addresses from `OWNHEALTH_CADDY_RANGE` only, so Caddy's fixed address stays free. If that network overlaps with another network, set all three in `.env`: `OWNHEALTH_CADDY_SUBNET` to a free subnet, `OWNHEALTH_CADDY_RANGE` to a part of it (its upper half, for example), and `OWNHEALTH_CADDY_IP` to an address of the subnet outside that range. That address must not be the network address, the broadcast address or the first usable address.
+
+Si la red `front` coincide con otra red, configura las tres variables en `.env`: `OWNHEALTH_CADDY_SUBNET` con una subred libre, `OWNHEALTH_CADDY_RANGE` con una parte de ella (por ejemplo, su mitad superior) y `OWNHEALTH_CADDY_IP` con una dirección de la subred fuera de ese rango. Docker da a los demás contenedores direcciones de `OWNHEALTH_CADDY_RANGE` solamente, así que la dirección fija de Caddy queda libre. Esa dirección no puede ser la dirección de red, la de difusión ni la primera dirección utilizable. La aplicación solo confía en las direcciones que reenvía Caddy desde esa IP.
+
 **Change its database password.** Write the new `OPENWEARABLES_DB_PASSWORD` in `openwearables.env` and run `docker compose up -d`. It sets the new password on the role and recreates the sidecar with it.
 
 **Turn it off.** Take `wearables` out of `COMPOSE_PROFILES`, then `docker compose stop ow-app ow-worker ow-beat ow-redis`. An `up -d` without the profile leaves the running sidecar alone. Its database stays in the `ownhealth-pg` volume, so turning the profile on again keeps the vendor connections.
 
 **Time zone of CGM exports.** A LibreView or Dexcom Clarity CSV export prints local times without an offset. Set `OWNHEALTH_TIMEZONE` in `.env` to the household's IANA zone, such as `OWNHEALTH_TIMEZONE=Europe/Madrid`, and every export is read in it. Unset, each export is read in the zone of the browser it was uploaded from, and the upload result names that zone. An old zone name that some browsers still send, such as `Asia/Calcutta`, is read as its current name, `Asia/Kolkata`, when the server does not know the old name. A zone the server knows keeps its name, such as `Europe/Oslo`. A zone the server does not know never stops an upload. An unknown `OWNHEALTH_TIMEZONE` is left out, so the browser's zone reads the export. Only when neither zone is known is an export read as UTC on its first import, and the upload result says so. The upload result, with its zone and this notice, shows only to members who may read wearables (`read:wearables`) on that profile. Each export keeps the zone it was read in, so changing or unsetting `OWNHEALTH_TIMEZONE` changes no export already stored, and the same file uploaded again with no known zone keeps its zone. Importing it again, for example after another export is retracted or after it moves to another profile, uses that zone. Uploading the same file in another zone replaces its readings, so they are never stored twice. Two names of one zone, such as `Asia/Calcutta` and `Asia/Kolkata`, are the same zone, and nothing is replaced.
 
-**Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database.
+**Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database. The restored links still name the old users and keys, so their syncs fail. First note the old user ids, with the first command below. For each linked profile, create a new user and key, connect the vendors, and link the profile again, as above. Then retire each old link with the new key, with the second command. The new Open Wearables does not know the old user, so the command removes the old source from OwnHealth. The readings it brought stay.
+
+```sh
+docker compose exec -T db psql -U ownhealth -d ownhealth -Atc 'select user_id from openwearables_user'
+docker compose exec -T app ownhealth openwearables-delete --user "OLD_USER_UUID" < ow-credentials.json
+```
+
+**Restaurar.** `ownhealth backup` no copia la base de datos de Open Wearables, porque es una caché de los datos de los proveedores. Tras restaurar en volúmenes nuevos, `docker compose up -d` con el perfil activo crea una vacía, y hay que volver a conectar cada proveedor. Los vínculos restaurados siguen nombrando los usuarios y las claves antiguos, así que sus sincronizaciones fallan. Primero anota los ids de los usuarios antiguos, con el primer comando de arriba. Para cada perfil vinculado, crea un usuario y una clave nuevos, conecta los proveedores y vuelve a vincular el perfil, como arriba. Después retira cada vínculo antiguo con la clave nueva, con el segundo comando. El Open Wearables nuevo no conoce el usuario antiguo, así que el comando quita de OwnHealth la fuente antigua. Las lecturas que trajo se quedan.
 
 ## Large wearable histories
 
