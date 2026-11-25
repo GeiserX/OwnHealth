@@ -1501,6 +1501,35 @@ fn a_restricted_parent_section_or_body_labels_every_record_inside_it() -> R {
     Ok(())
 }
 
+#[test]
+fn round_6_referenced_original_text_carries_its_source_entry_labels() -> R {
+    let c = convert(&document(&format!(
+        r##"<component><section>{VITALS_HEAD}
+          <entry><observation classCode="OBS" moodCode="EVN">
+            <code code="8867-4" codeSystem="2.16.840.1.113883.6.1">
+              <originalText ID="pulse-name">Pulse at rest</originalText>
+            </code>
+            {RESTRICTED}
+          </observation></entry>
+          <entry><observation classCode="OBS" moodCode="EVN">
+            <code code="8867-4" codeSystem="2.16.840.1.113883.6.1">
+              <originalText><reference value="#pulse-name"/></originalText>
+            </code>
+          </observation></entry>
+          {}
+        </section></component>"##,
+        vital_entry("unrelated")
+    )))?;
+    let observations = resources(&c, "Observation");
+    assert_eq!(observations.len(), 3);
+    assert_eq!(observations[1]["code"]["text"], "Pulse at rest");
+    assert_eq!(
+        label_codes(&c, "Observation"),
+        vec![vec!["R".to_string()], vec!["R".to_string()], vec![]]
+    );
+    Ok(())
+}
+
 /// An Immunization Activity in `mood` with `status`.
 fn immunization_section(mood: &str, status: &str) -> String {
     format!(

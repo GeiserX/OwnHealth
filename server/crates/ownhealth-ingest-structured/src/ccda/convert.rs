@@ -29,11 +29,11 @@
 //!   `id`, else from the name, birth date and gender.
 //! - DS4P labels (a Security Observation, templateId `2.16.840.1.113883.3.3445.*`, in an entry or as
 //!   an entry of its section) and a confidentialityCode other than `N` (of the document, the section or
-//!   inside the entry) go to every resource made there as `meta.security`, so the FHIR importer marks
-//!   the record sensitive as it does for a labelled FHIR file. A section's labels reach its
-//!   subsections at any depth and go with narrative copied by reference. The labels in a Privacy
-//!   Markings Section (templateId
-//!   `2.16.840.1.113883.3.3445.4`) and a confidentialityCode on the structuredBody go to every
+//!   inside the entry) go to every resource made there as `meta.security`. The FHIR importer applies
+//!   the same sensitivity rules as for a labelled FHIR file. A section's labels reach its subsections
+//!   at any depth. Narrative copied by reference carries the labels of its source entry and sections.
+//!   The labels in a Privacy Markings Section (templateId `2.16.840.1.113883.3.3445.4`) and a
+//!   confidentialityCode on the structuredBody go to every
 //!   resource of the document. A Security Observation is never a record of its own. Each resource
 //!   holds its own copy of its labels, so a file is refused when it carries more than 64 different
 //!   labels, a label whose code is over 64 characters or whose codeSystem is over 128, or more than
@@ -204,7 +204,7 @@ pub fn convert(bytes: &[u8]) -> Result<Converted> {
         text: &text,
         narrative: xml::narrative_ids(&doc),
         read: HashMap::new(),
-        source_section_labels: HashMap::new(),
+        source_labels: HashMap::new(),
         narrative_labels: Vec::new(),
         ids: HashMap::new(),
         patient: None,
@@ -555,8 +555,8 @@ struct Conv<'a, 'i> {
     /// The text of each narrative element a reference read, so a narrative many entries point at is
     /// read once.
     read: HashMap<NodeId, Option<String>>,
-    /// Cache only each source section's own labels. Its ancestors are shared by all its targets.
-    source_section_labels: HashMap<NodeId, Vec<Value>>,
+    /// Each referenced section or entry's own labels, shared by all targets inside it.
+    source_labels: HashMap<NodeId, Vec<Value>>,
     /// Labels of the narrative used to build the current resource.
     narrative_labels: Vec<Value>,
     /// `<type>/<id>` given so far, to tell apart entries of one file that share an `id`.
@@ -674,10 +674,15 @@ impl<'a, 'i> Conv<'a, 'i> {
             for sec in std::iter::successors(Some(target), Node::parent_element)
                 .filter(|n| n.has_tag_name((xml::NS, "section")))
             {
-                let labels = self
-                    .source_section_labels
-                    .entry(sec.id())
-                    .or_insert_with(|| section_labels(sec));
+                let labels = self.source_labels.entry(sec.id()).or_insert_with(|| section_labels(sec));
+                if !labels.is_empty() {
+                    add_labels(&mut self.narrative_labels, labels.iter().cloned());
+                }
+            }
+            if let Some(entry) = std::iter::successors(Some(target), Node::parent_element)
+                .find(|n| n.has_tag_name((xml::NS, "entry")))
+            {
+                let labels = self.source_labels.entry(entry.id()).or_insert_with(|| entry_labels(entry));
                 if !labels.is_empty() {
                     add_labels(&mut self.narrative_labels, labels.iter().cloned());
                 }
