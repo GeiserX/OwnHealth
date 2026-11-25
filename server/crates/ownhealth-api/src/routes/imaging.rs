@@ -97,11 +97,18 @@ async fn remove_upload(State(rt): State<Runtime>, caller: Caller, Path(import_id
                 "A study from this upload is on the record, so the upload stays.",
             )));
         }
-        Removal::Importing | Removal::Waiting => {
+        Removal::Importing => {
             return Err(Fail::Api(ApiError::new(
                 StatusCode::CONFLICT,
                 "upload_importing",
                 "This upload is still being imported. Try again when the import ends.",
+            )));
+        }
+        Removal::Waiting => {
+            return Err(Fail::Api(ApiError::new(
+                StatusCode::CONFLICT,
+                "upload_changed",
+                "This upload has a new held study since you asked. Look at its held studies, then try again.",
             )));
         }
     };

@@ -805,3 +805,60 @@ async fn a_failed_dicom_import_in_review_shows_only_to_those_who_may_read_record
     assert_eq!(s, StatusCode::NOT_FOUND, "{one}");
     Ok(())
 }
+
+/// Waits until a session of this test's database waits on a lock.
+async fn until_a_lock_wait(a: &App) -> anyhow::Result<()> {
+    for _ in 0..400 {
+        let waiting = a
+            .count(
+                "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+            )
+            .await?;
+        if waiting > 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("nothing waited on a lock")
+}
+
+#[tokio::test]
+async fn a_removal_that_finds_a_new_held_study_says_the_upload_changed() -> R {
+    let a = imaging_app().await?;
+    let (import_id, _) = uploaded(&a).await?;
+    held_study(&a, "alex", import_id, "1.2.826.0.1.3680043.10.999.43.7").await?;
+    // an accept in flight reads the upload with a shared lock: the removal waits on it
+    let mut reading = a.rt.pool.begin().await?;
+    sqlx::query("select id from imaging_import where id = $1 for share")
+        .bind(import_id)
+        .execute(&mut *reading)
+        .await?;
+    let uri = format!("/imaging/imports/{import_id}");
+    let (answer, added) = tokio::join!(delete(&a, "alex", &uri), async {
+        until_a_lock_wait(&a).await?;
+        // meanwhile a replay of the import holds one more study and ends
+        ownhealth_core::review::create_item(
+            &mut reading,
+            &ownhealth_core::review::ReviewItemIn {
+                kind: "imaging_study".into(),
+                household_id: Some(a.family.household_id),
+                profile_id: Some(a.family.profile("alex")),
+                payload: json!({"import_id": import_id, "study_uid": "1.2.826.0.1.3680043.10.999.43.8",
+                    "reason": "identity_mismatch"}),
+                reasons: vec!["identity_mismatch".into()],
+                ref_table: Some("imaging_import".into()),
+                ref_id: Some(import_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+        reading.commit().await?;
+        anyhow::Ok(())
+    });
+    added?;
+    let (s, v) = answer?;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["detail"]["code"], "upload_changed", "{v}");
+    assert_eq!(imports(&a, a.family.profile("alex")).await?.len(), 1);
+    Ok(())
+}
