@@ -16,6 +16,7 @@
 	import { copyText } from '#lib/logic/inbox';
 	import { auditActionKey, auditActor, auditDetail, auditOut, auditResult, auditRows, auditWhat, chainLines, liveConsents } from '#lib/logic/people';
 	import { app } from '#lib/state/app.svelte';
+	import SessionReport from './SessionReport.svelte';
 
 	// Each tool and the scopes it needs (docs/design/mcp.md 2.3). `any` lists alternatives, `note` adds
 	// a dict key or a daily cap after them.
@@ -376,11 +377,18 @@
 			</table>
 		</section>
 	</div>
+	{#if app.me}
+		<!-- Full width: the eight report columns do not fit the left column of a desktop screen. -->
+		<div class="wide">{#key app.me.user.id}<SessionReport />{/key}</div>
+	{/if}
 </div>
 
 <StepUpDialog />
 
 <style>
+	.wide {
+		grid-column: 1 / -1;
+	}
 	.chip.w {
 		color: var(--watch);
 		border-color: rgba(224, 168, 74, 0.5);

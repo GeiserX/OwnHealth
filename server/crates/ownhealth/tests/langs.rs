@@ -202,6 +202,10 @@ const ALLOWED: &[(&str, &str)] = &[
         "ownhealth-ingest-structured/src/shc.rs",
         r#"json!({ "en": all.iter().map(ToString::to_string).collect::<Vec<_>>() })"#,
     ),
+    (
+        "ownhealth-ingest-structured/src/shl_receive.rs",
+        r#"json!({ "en": samples().iter().map(ToString::to_string).collect::<Vec<_>>() })"#,
+    ),
     // an absent `lang` on the timeline and the couple view reads English, their REST default since
     // 0.4.0
     (

@@ -1,5 +1,6 @@
 // Family history and the pedigree (v0.3 Insight): server/crates/ownhealth-api/src/routes/family_history.rs.
-import { del, get, p, post, put } from './core';
+import { ApiError, del, get, p, post, put } from './core';
+import { app } from '#lib/state/app.svelte';
 import type { Uuid } from './types';
 import type { Localized, Suffixed } from '../i18n/langs';
 
@@ -179,3 +180,52 @@ export const listFamilyShares = (profile: string) => get<FamilyShares>(`${p(prof
 /** The whole set shared with `target`; an empty set revokes. Adding a category needs step-up. */
 export const putFamilyShare = (profile: string, target: string, categories: ShareCategory[]) =>
 	put<{ profile: string; target: string; categories: ShareCategory[] }>(`${p(profile)}/family-shares`, { target, categories });
+
+// GEDCOM import (slice 24): the tree file is read by the server in memory and never stored.
+export interface GedcomPerson {
+	/** The position in the file, which the import's `self` names. */
+	i: number;
+	sex: Sex;
+	born_year: number | null;
+	deceased: boolean;
+	death_age: number | null;
+	parents: number[];
+	partners: number[];
+	children: number[];
+}
+export interface GedcomPreview {
+	version: string | null;
+	people: GedcomPerson[];
+}
+export interface GedcomImported {
+	proposed: Uuid[];
+	already: number;
+	left_out: number;
+	outside: number;
+}
+/** A file the server refused: `reason` is a code the card words in each language, `line` a line number. */
+export interface GedcomRefusal {
+	refused: true;
+	reason: string;
+	line: number | null;
+}
+
+async function gedcomSend<T>(path: string, file: File, me?: number): Promise<T | GedcomRefusal> {
+	const form = new FormData();
+	if (me !== undefined) form.set('self', String(me));
+	// the file goes without its name: the server never reads it, and nothing names it on the way
+	form.set('file', file, 'tree.ged');
+	const res = await fetch(`/api${path}`, { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json' }, body: form });
+	const body = await res.json().catch(() => null);
+	const d = body?.detail;
+	if (res.status === 422 && d?.code === 'bad_gedcom') return { refused: true, reason: String(d.reason), line: typeof d.line === 'number' ? d.line : null };
+	if (res.status === 413) return { refused: true, reason: 'too_large', line: null };
+	if (!res.ok) {
+		if (res.status === 401) app.unauthenticated = true;
+		throw new ApiError(res.status, d?.code ?? 'http_' + res.status, d?.message ?? res.statusText, d?.allowed ?? []);
+	}
+	return body as T;
+}
+
+export const previewGedcom = (profile: string, file: File) => gedcomSend<GedcomPreview>(`${p(profile)}/family/gedcom/preview`, file);
+export const importGedcom = (profile: string, file: File, me: number) => gedcomSend<GedcomImported>(`${p(profile)}/family/gedcom`, file, me);

@@ -2,7 +2,12 @@
   "items": {
     "[]": {
       "<src>": "string",
-      "accepted_by": "=auto",
+      "accepted_by": {
+        "|": [
+          "=auto",
+          "=person"
+        ]
+      },
       "alias_group": "string",
       "date": "date",
       "id": "uuid",
@@ -10,10 +15,16 @@
         "|": [
           "=H",
           "=L",
-          "=N"
+          "=N",
+          "null"
         ]
       },
-      "lab": "string",
+      "lab": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
       "loinc": "string",
       "method": {
         "|": [
@@ -32,14 +43,34 @@
           ]
         },
         "name": "string",
-        "range": "string",
-        "unit": "string",
+        "range": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
+        "unit": {
+          "|": [
+            "null",
+            "string"
+          ]
+        },
         "value": "string"
       },
       "src": "src_id",
       "status": "=current",
-      "unit": "string",
-      "value": "float"
+      "unit": {
+        "|": [
+          "null",
+          "string"
+        ]
+      },
+      "value": {
+        "|": [
+          "float",
+          "null"
+        ]
+      }
     }
   }
 }
