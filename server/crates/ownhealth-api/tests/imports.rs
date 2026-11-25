@@ -1295,7 +1295,25 @@ async fn assert_export_moves(kind: &str, bytes: &[u8]) -> R {
 }
 
 #[tokio::test]
-async fn garmin_retract_replay_and_move_wait_for_the_profile_export_lock() -> R {
+async fn export_retract_replay_and_move_wait_for_the_profile_export_lock() -> R {
+    for (kind, flag, bytes) in [
+        (
+            "import.garmin_zip",
+            "garmin",
+            include_bytes!("../../../../fixtures/garmin/lucia-history.zip").as_slice(),
+        ),
+        (
+            "import.strava_zip",
+            "strava",
+            include_bytes!("../../../../fixtures/strava/lucia-history.zip").as_slice(),
+        ),
+    ] {
+        assert_export_operations_wait_for_the_lock(kind, flag, bytes).await?;
+    }
+    Ok(())
+}
+
+async fn assert_export_operations_wait_for_the_lock(kind: &str, flag: &str, bytes: &[u8]) -> R {
     use ownhealth_core::jobs::{Job, handler_for};
     use ownhealth_ingest_structured::retract::lock_exports;
     use std::time::Duration;
@@ -1303,18 +1321,17 @@ async fn garmin_retract_replay_and_move_wait_for_the_profile_export_lock() -> R 
     let a = app().await?;
     ownhealth_devices::register();
     let alex = a.family.profile("alex");
-    let bytes = include_bytes!("../../../../fixtures/garmin/lucia-history.zip");
     let (status, out) = a
         .upload("alex", &[("profile", "alex")], &[("history.zip", bytes)])
         .await?;
     assert_eq!(status, StatusCode::OK, "{out}");
     let ctx = a.rt.job_context();
-    ownhealth_core::jobs::drain(&ctx, "core", 10, Some(&["import.garmin_zip".into()])).await?;
+    ownhealth_core::jobs::drain(&ctx, "core", 10, Some(&[kind.into()])).await?;
     let doc: uuid::Uuid = sqlx::query_scalar("select id from document where filename = 'history.jsonl'")
         .fetch_one(&ctx.pool)
         .await?;
     let mut barrier = ctx.pool.begin().await?;
-    lock_exports(&mut barrier, alex, "garmin").await?;
+    lock_exports(&mut barrier, alex, flag).await?;
     let probe = async {
         for _ in 0..100 {
             let waiting: i64 = sqlx::query_scalar(
@@ -1325,20 +1342,20 @@ async fn garmin_retract_replay_and_move_wait_for_the_profile_export_lock() -> R 
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        anyhow::bail!("retract, replay and move did not all wait for the Garmin lock")
+        anyhow::bail!("retract, replay and move did not all wait for the {flag} lock")
     };
     let retract = format!("/documents/{doc}/retract");
     let assign = format!("/documents/{doc}/assign");
     let job = Job {
         id: 0,
         queue: "core".into(),
-        kind: "import.garmin_zip".into(),
+        kind: kind.into(),
         payload: json!({"document_id": doc, "profile_id": alex}),
         attempts: 1,
         max_attempts: 1,
         dedupe_key: None,
     };
-    let handler = handler_for("import.garmin_zip").expect("Garmin handler");
+    let handler = handler_for(kind).expect("export handler");
     let work = async {
         tokio::join!(
             a.post("alex", &retract, Some(json!({"reason": "old export"}))),
@@ -1348,7 +1365,7 @@ async fn garmin_retract_replay_and_move_wait_for_the_profile_export_lock() -> R 
     };
     tokio::pin!(work);
     tokio::select! {
-        settled = &mut work => anyhow::bail!("Garmin operations finished while the lock was held: {settled:?}"),
+        settled = &mut work => anyhow::bail!("{kind} operations finished while the lock was held: {settled:?}"),
         waited = probe => waited?,
     }
     sqlx::query("select 1 from document where id = $1 for update nowait")

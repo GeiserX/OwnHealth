@@ -214,6 +214,128 @@ async fn an_inbox_drops_the_raw_strava_archive_and_links_a_second_arrival() -> R
     Ok(())
 }
 
+fn inbox_arrival<'a>(
+    env: &Env,
+    source: Uuid,
+    external_id: &'a str,
+    sha: &'a str,
+    size: usize,
+) -> ownhealth_core::arrive::Arrival<'a> {
+    let profile = env.fam.profile("lucia");
+    ownhealth_core::arrive::Arrival {
+        source_id: Some(source),
+        external_id: Some(external_id),
+        filename: Some("history.zip"),
+        ..ownhealth_core::arrive::Arrival::new(env.fam.household_id, profile, "folder", sha, size as i64)
+    }
+}
+
+/// A refused export gives up the inbox's hold on its raw archive, so the routes in it go too.
+#[tokio::test]
+async fn an_inbox_releases_a_refused_strava_archive() -> R {
+    use ownhealth_core::arrive::{Arrived, arrive};
+
+    let env = Env::new().await?;
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    writer.add_symlink("activities.csv", "../profile.csv", SimpleFileOptions::default())?;
+    writer.start_file("activities/1.gpx", SimpleFileOptions::default())?;
+    writer.write_all(GPX)?;
+    let archive = writer.finish()?.into_inner();
+    let owner = BlobOwner::Profile(env.fam.profile("lucia"));
+    let inbox = env.source("folder", Some("lucia"), serde_json::json!({}), None).await?;
+    let sha = env.blobs.put_bytes(owner, &archive)?;
+    let mut tx = env.db.pool.begin().await?;
+    let job = match arrive(&mut tx, &env.blobs, &inbox_arrival(&env, inbox.id, "refused", &sha, archive.len())).await? {
+        Arrived::Queued {
+            kind: "strava_zip",
+            job_id: Some(job),
+            ..
+        } => job,
+        other => anyhow::bail!("not queued as a Strava export: {other:?}"),
+    };
+    tx.commit().await?;
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let (state, error): (String, Option<String>) = sqlx::query_as("select state, last_error from job where id = $1")
+        .bind(job)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(state, "dead");
+    assert!(error.is_some_and(|e| e.contains("strava_zip_unreadable")));
+    let released: bool = sqlx::query_scalar("select raw_released_at is not null from source_item where source_id = $1")
+        .bind(inbox.id)
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert!(released, "the inbox item still holds the refused archive");
+    assert!(!env.blobs.exists(owner, &sha), "the refused archive still exists");
+    Ok(())
+}
+
+/// An item seen before releases its new copy only under the profile's Strava export lock.
+#[tokio::test]
+async fn an_already_seen_strava_arrival_waits_for_the_export_lock() -> R {
+    use ownhealth_core::arrive::{Arrived, arrive};
+    use ownhealth_ingest_structured::retract::lock_exports;
+    use std::time::Duration;
+
+    let env = Env::new().await?;
+    let archive = zip(&[
+        ("activities.csv", b"File\nactivities/1.gpx\n"),
+        ("activities/1.gpx", GPX),
+    ])?;
+    let profile = env.fam.profile("lucia");
+    let owner = BlobOwner::Profile(profile);
+    let inbox = env.source("folder", Some("lucia"), serde_json::json!({}), None).await?;
+    let sha = env.blobs.put_bytes(owner, &archive)?;
+    let arrival = inbox_arrival(&env, inbox.id, "first", &sha, archive.len());
+    let mut tx = env.db.pool.begin().await?;
+    arrive(&mut tx, &env.blobs, &arrival).await?;
+    tx.commit().await?;
+    jobs::drain(&env.ctx, "core", 5, None).await?;
+    let document_id = sqlx::query_scalar("select document_id from source_item where source_id = $1")
+        .bind(inbox.id)
+        .fetch_one(&env.db.pool)
+        .await?;
+
+    env.blobs.put_bytes(owner, &archive)?;
+    let mut barrier = env.db.pool.begin().await?;
+    lock_exports(&mut barrier, profile, "strava").await?;
+    let again = async {
+        let mut tx = env.db.pool.begin().await?;
+        let arrived = arrive(&mut tx, &env.blobs, &arrival).await?;
+        tx.commit().await?;
+        anyhow::Ok(arrived)
+    };
+    let probe = async {
+        for _ in 0..100 {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where datname = current_database() \
+                 and wait_event_type = 'Lock' and wait_event = 'advisory'",
+            )
+            .fetch_one(&env.db.pool)
+            .await?;
+            if waiting == 1 {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        anyhow::bail!("the second arrival did not wait for the Strava export lock")
+    };
+    tokio::pin!(again);
+    tokio::select! {
+        settled = &mut again => anyhow::bail!("the arrival finished while the lock was held: {settled:?}"),
+        waited = probe => waited?,
+    }
+    barrier.rollback().await?;
+    assert_eq!(
+        again.await?,
+        Arrived::AlreadySeen {
+            document_id: Some(document_id)
+        }
+    );
+    assert!(!env.blobs.exists(owner, &sha));
+    Ok(())
+}
+
 /// An export of manual activities only holds the CSV and an empty activities folder. It is still a
 /// Strava export: nothing imports, and every row is counted as a row without a file.
 #[tokio::test]
