@@ -1122,7 +1122,12 @@ async fn record_reports(
             .map_err(retry)?;
         let blobs = ctx.blobs.clone();
         let stored = tokio::task::spawn_blocking(move || {
-            let pdf = encapsulated_file(file).ok().flatten();
+            let pdf = match encapsulated_file(file) {
+                Ok(pdf) => pdf,
+                // a read that failed says nothing about the report: the job tries again, unmarked
+                Err(Part10Error::Io(e)) => return Err(JobError::retry(format!("reading a report failed: {e}"))),
+                Err(_) => None,
+            };
             pdf.map(|p| blobs.put_reader(owner, p))
                 .transpose()
                 .map_err(|e| JobError::from(Error::from(e)))
@@ -1134,7 +1139,7 @@ async fn record_reports(
             first.get_or_insert(id);
             reports += 1;
         }
-        // Filed or not (a report whose PDF does not extract stays unfiled), the SOP is handled: a
+        // Filed or not (a report whose content holds no PDF stays unfiled), the SOP is handled: a
         // replay does not download it again.
         sqlx::query("insert into imaging_import_report (study_instance_uid, sop_instance_uid) values ($1, $2)")
             .bind(uid)
