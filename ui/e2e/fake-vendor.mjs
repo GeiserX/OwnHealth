@@ -4,8 +4,10 @@
 // loopback over plain http. The server reaches it because serve.sh runs the debug binary with
 // OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1. Every token is synthetic.
 //
-// The first grant lasts 3 days, so the Connections screen shows a sign-in that ends soon; every later
-// grant lasts 90 days. GET /__book says what the fake saw.
+// The first grant of each client id lasts 3 days, so the Connections screen shows a sign-in that ends
+// soon; every later grant lasts 90 days. GET /__book says what the fake saw, and
+// GET /__book?client=<id> what it saw for one client id, so specs that share the fake do not count
+// each other's grants.
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -21,7 +23,23 @@ const cmsAccess = new Set();
 const port = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? 9190);
 const base = `http://127.0.0.1:${port}`;
 const book = { grants: 0, revoked: 0, refused: 0, fhir: 0 };
+const books = new Map();
 let n = 0;
+
+/** The client id of a token or revocation request: the form's, else the user of Basic auth. */
+function clientOf(req, f) {
+	const basic = (req.headers.authorization ?? '').split(' ');
+	const user = basic[0] === 'Basic' ? Buffer.from(basic[1] ?? '', 'base64').toString().split(':')[0] : '';
+	return f.get('client_id') || decodeURIComponent(user);
+}
+
+/** Count one event for the whole fake and for one client id; the client's new count. */
+function count(event, client) {
+	book[event]++;
+	const mine = books.get(client) ?? { grants: 0, revoked: 0, refused: 0 };
+	books.set(client, mine);
+	return ++mine[event];
+}
 
 function json(res, status, body) {
 	res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -99,24 +117,24 @@ createServer(async (req, res) => {
 	}
 	if (req.method === 'POST' && url.pathname === '/token') {
 		const f = await form(req);
+		const client = clientOf(req, f);
 		if (f.get('grant_type') !== 'authorization_code' || !f.get('code_verifier')) {
-			book.refused++;
+			count('refused', client);
 			return json(res, 400, { error: 'invalid_grant' });
 		}
-		book.grants++;
+		const first = count('grants', client) === 1;
 		return json(res, 200, {
 			access_token: `fake-access-${book.grants}`,
 			token_type: 'Bearer',
 			expires_in: 3600,
 			refresh_token: `fake-refresh-${book.grants}`,
-			refresh_token_expires_in: (book.grants === 1 ? 3 : 90) * 86_400,
+			refresh_token_expires_in: (first ? 3 : 90) * 86_400,
 			scope: 'openid fhirUser launch/patient offline_access patient/*.rs',
 			patient: 'fake-patient-alex-rivera'
 		});
 	}
 	if (req.method === 'POST' && url.pathname === '/revoke') {
-		await form(req);
-		book.revoked++;
+		count('revoked', clientOf(req, await form(req)));
 		res.writeHead(200);
 		return res.end();
 	}
@@ -134,6 +152,9 @@ createServer(async (req, res) => {
 		book.fhir++;
 		return json(res, 200, { resourceType: 'Bundle', type: 'searchset', total: 0, entry: [] });
 	}
-	if (req.method === 'GET' && url.pathname === '/__book') return json(res, 200, book);
+	if (req.method === 'GET' && url.pathname === '/__book') {
+		const client = url.searchParams.get('client');
+		return json(res, 200, client == null ? book : (books.get(client) ?? { grants: 0, revoked: 0, refused: 0 }));
+	}
 	json(res, 404, { error: 'not_found' });
 }).listen(port, '127.0.0.1');

@@ -14,21 +14,20 @@
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::io::Read;
+use std::io::{Read, Seek};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
-use ownhealth_core::blobs::BlobOwner;
 use ownhealth_core::documents::{FITBIT_READINGS_MIME, fitbit_takeout_path};
-use ownhealth_core::jobs::{self, JobContext};
+use ownhealth_core::jobs;
 use ownhealth_core::zip_directory::{GARMIN_MAX_FILES, GARMIN_MAX_NAME_BYTES};
 use ownhealth_core::{Error, Result};
 use serde_json::Value;
+use zip::ZipArchive;
 use zip::read::ZipFile;
 
 use crate::garmin_zip::{
-    self, ArchiveImport, MAX_EXPANDED, MAX_JSON, MAX_READINGS, Report, archive_error, hide_email, open_archive,
-    read_member, unsafe_name,
+    self, ExportSettings, MAX_EXPANDED, MAX_JSON, MAX_READINGS, Report, hide_email, read_member, unsafe_name, zip_error,
 };
 use crate::store::Sample;
 
@@ -50,19 +49,19 @@ const DAMAGED: &str = "invalid_member";
 const MAX_HEART_RATE_CSV: u64 = 64 * 1024 * 1024;
 const MAX_INPUT_ROWS: usize = 12_000_000;
 
-const IMPORT: ArchiveImport = ArchiveImport {
+pub(crate) const EXPORT: ExportSettings = ExportSettings {
     flag: PROVIDER,
+    provider: PROVIDER,
     format: "ownhealth.fitbit-readings/1",
     mime: FITBIT_READINGS_MIME,
-    provider: PROVIDER,
-    label: "Fitbit",
     unreadable: UNREADABLE,
-    scan: scan_archive,
-    details: Report::archive_details,
+    limit: LIMIT,
+    label: "Fitbit",
+    fit_label: None,
 };
 
 pub fn register() {
-    jobs::register_handler(JOB, |ctx, job| Box::pin(garmin_zip::run(ctx, job, &IMPORT)));
+    jobs::register_handler(JOB, |ctx, job| Box::pin(garmin_zip::run(ctx, job, EXPORT)));
 }
 
 fn refuse(code: &str) -> Error {
@@ -330,7 +329,7 @@ fn json_rows(
 
 fn csv_error(error: csv::Error) -> Error {
     match error.into_kind() {
-        csv::ErrorKind::Io(error) => archive_error(error.into(), UNREADABLE, LIMIT),
+        csv::ErrorKind::Io(error) => zip_error(error.into(), &EXPORT),
         _ => refuse(INVALID_CSV),
     }
 }
@@ -449,17 +448,15 @@ struct ReadingFile {
     kind: Member,
 }
 
-fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report> {
-    let mut zip = open_archive(ctx.blobs.open_seek(owner, sha)?, UNREADABLE, LIMIT)?;
-    let mut report = Report::default();
+/// Read the Fitbit and Google Health members of an archive `garmin_zip` opened with [`EXPORT`]'s codes
+/// into `report`.
+pub(crate) fn scan<R: Read + Seek>(zip: &mut ZipArchive<R>, report: &mut Report) -> Result<()> {
     let mut profiles = Vec::new();
     let mut members = Vec::new();
     let mut names = 0;
     let mut files = 0;
     for index in 0..zip.len() {
-        let header = zip
-            .by_index_data(index)
-            .map_err(|e| archive_error(e, UNREADABLE, LIMIT))?;
+        let header = zip.by_index_data(index).map_err(|e| zip_error(e, &EXPORT))?;
         names += header.name_raw().len();
         files += usize::from(!header.is_dir());
         if names > GARMIN_MAX_NAME_BYTES || files > GARMIN_MAX_FILES {
@@ -505,7 +502,7 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
     for (index, root, name) in profiles {
         let zone = zip
             .by_index(index)
-            .map_err(|e| archive_error(e, UNREADABLE, LIMIT))
+            .map_err(|e| zip_error(e, &EXPORT))
             .and_then(|file| read_zone(file, &mut expanded));
         let zone = match zone {
             Ok(zone) => zone,
@@ -529,7 +526,7 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
     let shared_zone = available.next().copied().filter(|first| available.all(|z| z == first));
 
     // The first path in lexicographic order wins when heart-rate values at the same instant
-    // disagree. Duplicate ZIP paths are refused by open_archive.
+    // disagree. Duplicate ZIP paths are refused when garmin_zip opens the archive.
     members.sort_unstable_by(|first, second| first.path.cmp(&second.path));
     let latest = Utc::now() + Duration::days(1);
     let mut input_rows = 0;
@@ -546,7 +543,7 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
         let name = hide_email(&path);
         let zone = zones.get(&root).copied().unwrap_or(shared_zone);
         let heart_rate = matches!(kind.metric, Metric::HeartRate);
-        let file = match zip.by_index(index).map_err(|e| archive_error(e, UNREADABLE, LIMIT)) {
+        let file = match zip.by_index(index).map_err(|e| zip_error(e, &EXPORT)) {
             Ok(file) => file,
             Err(Error::Upload(code)) if code == UNREADABLE => {
                 report.omit(name, DAMAGED);
@@ -657,5 +654,5 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
     for (name, samples) in imported {
         report.add_member(name, samples);
     }
-    Ok(report)
+    Ok(())
 }

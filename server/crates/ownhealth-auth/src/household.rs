@@ -709,8 +709,9 @@ pub async fn drop_moved_copies(conn: &mut PgConnection, blobs: &BlobStore, moved
     Ok(gone)
 }
 
-/// Whether a row of `profile_id` names the bytes `sha` (any blob column of [`BLOB_COLUMNS`]).
-async fn held_by(conn: &mut PgConnection, profile_id: Uuid, sha: &str) -> Result<bool> {
+/// Whether a row of `profile_id` names the bytes `sha` (any blob column of [`BLOB_COLUMNS`]). Every
+/// removal of a profile's copy of some bytes asks this (the imaging upload release too).
+pub async fn held_by(conn: &mut PgConnection, profile_id: Uuid, sha: &str) -> Result<bool> {
     let bytes = sha256_hex_to_bytes(sha)?;
     for (table, cols, owned) in BLOB_COLUMNS {
         let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $2")).collect();
@@ -730,7 +731,8 @@ async fn held_by(conn: &mut PgConnection, profile_id: Uuid, sha: &str) -> Result
     Ok(false)
 }
 
-async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
+/// Whether any row names the bytes `sha` (any blob column of [`BLOB_COLUMNS`], any owner).
+pub async fn still_referenced(conn: &mut PgConnection, sha: &[u8]) -> Result<bool> {
     for (table, cols, _) in BLOB_COLUMNS {
         let cond: Vec<String> = cols.iter().map(|c| format!("{c} = $1")).collect();
         let sql = format!("select 1 from {table} where {} limit 1", cond.join(" or "));

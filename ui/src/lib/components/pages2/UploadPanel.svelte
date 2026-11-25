@@ -12,7 +12,7 @@
 	import { fitDocId, fitHidden, fitLines } from '#lib/logic/fit_import';
 	import FitResult from './FitResult.svelte';
 	import GarminResult from './GarminResult.svelte';
-	import { garminNothing, garminReadings as archiveReadings, garminSummary, rowsLeftOut } from '#lib/logic/garmin_import';
+	import { exportNothing, garminReadings, exportSummary, isActivityExportJob } from '#lib/logic/garmin_import';
 
 	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
 	let {
@@ -82,10 +82,10 @@
 	// The document each upload made, from the upload answer or its finished job (a FIT or CGM export's
 	// job names it in its result, which reaches only those who may read wearables).
 	const docOf = (i: ImportItem) =>
-		i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? fitDocId(jobs[i.job_id]) ?? cgmDocument(jobs[i.job_id]?.result) ?? archiveDocument(jobs[i.job_id])) : undefined);
+		i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? fitDocId(jobs[i.job_id]) ?? cgmDocument(jobs[i.job_id]?.result) ?? exportDocument(jobs[i.job_id])) : undefined);
 	const cgmDocument = (r: unknown) => (cgmLines(r) && typeof (r as { document_id?: unknown }).document_id === 'string' ? (r as { document_id: string }).document_id : undefined);
-	const archiveDocument = (job: JobInfo | undefined) =>
-		(job?.kind === 'import.garmin_zip' || job?.kind === 'import.fitbit_takeout') && job.state === 'done' && typeof job.result?.document_id === 'string'
+	const exportDocument = (job: JobInfo | undefined) =>
+		job && isActivityExportJob(job.kind) && job.state === 'done' && typeof job.result?.document_id === 'string'
 			? job.result.document_id : undefined;
 	const docIds = () => items.filter((i) => (i.job_id == null || jobs[i.job_id]?.state === 'done')).map(docOf).filter((x): x is string => !!x);
 	let gone = false;
@@ -101,7 +101,7 @@
 		if (i.attached_to) return { word: t('i2_up_attached'), cls: 'p-stale' };
 		const j = i.job_id != null ? jobs[i.job_id] : undefined;
 		if (!j) return { word: t('i2_job_queued'), cls: 'p-info' };
-		if (garminNothing(j)) return { word: t('i2_garmin_nothing'), cls: 'p-stale' };
+		if (exportNothing(j)) return { word: t('i2_garmin_nothing'), cls: 'p-stale' };
 		return { word: t('i2_job_' + j.state), cls: j.state === 'done' ? 'p-ok' : j.state === 'failed' || j.state === 'dead' ? 'p-out' : 'p-info' };
 	}
 	// the picked files, then an empty picker, so picking the same file again is a new pick
@@ -154,8 +154,7 @@
 					{@const n = d && j?.state === 'done' ? rowsOf(d) : 0}
 					{@const cgm = j?.state === 'done' ? cgmLines(j.result) : null}
 					{@const fit = j?.state === 'done' ? fitLines(j.result) : null}
-					{@const garmin = j?.state === 'done' ? garminSummary(j.result?.garmin) : null}
-					{@const fitbit = j?.kind === 'import.fitbit_takeout' && j.state === 'done' ? garminSummary(j.result?.fitbit_takeout) : null}
+					{@const archive = j?.state === 'done' ? exportSummary(j.result) : null}
 					<tr>
 						<td class="fname">{#if d && (j?.state === 'done' || i.duplicate)}<a href="?doc={d}">{i.filename}</a>{:else}{i.filename}{/if}</td>
 						<td class="dim" title={i.kind}>{t('i2_ik_' + i.kind) !== 'i2_ik_' + i.kind ? t('i2_ik_' + i.kind) : i.kind}</td>
@@ -164,8 +163,7 @@
 					</tr>
 					{#if fit}<tr><td colspan="4"><FitResult lines={fit} label={i.filename} /></td></tr>
 					{:else if fitHidden(j)}<tr><td colspan="4" class="dim" style="font-size:12px">{t('i2_fit_hidden')}</td></tr>{/if}
-					{#if garmin}<tr><td colspan="4"><GarminResult summary={garmin} readings={archiveReadings(j?.result)} /></td></tr>{/if}
-					{#if fitbit}<tr><td colspan="4"><GarminResult summary={fitbit} readings={archiveReadings(j?.result)} leftOut={rowsLeftOut(j?.result?.fitbit_takeout)} /></td></tr>{/if}
+					{#if archive}<tr><td colspan="4"><GarminResult summary={archive} readings={garminReadings(j?.result)} /></td></tr>{/if}
 					{#if cgm}
 						<tr>
 							<td colspan="4">

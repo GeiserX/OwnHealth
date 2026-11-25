@@ -15,8 +15,6 @@
 //! observation match (level 3) when rows are routed. Quarantined mail never comes here until a person
 //! releases it.
 
-use std::io::Read;
-
 use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
@@ -24,7 +22,9 @@ use uuid::Uuid;
 
 use crate::blobs::{BlobOwner, BlobStore, remove_unheld_upload, sha256_hex_to_bytes};
 use crate::dedup::{record_item, seen_item};
-use crate::documents::{NewDocument, UploadKind, create_document, job_kind, lock_exports, mime, sniff};
+use crate::documents::{
+    NewDocument, UploadKind, create_document, job_kind, lock_exports, mime, projected_export, sniff_reader,
+};
 use crate::error::{Error, Result};
 use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
@@ -103,13 +103,7 @@ pub async fn store_bytes(blobs: &BlobStore, owner: BlobOwner, data: Vec<u8>) -> 
 async fn sniff_blob(blobs: &BlobStore, owner: BlobOwner, sha256: &str, filename: String) -> Result<UploadKind> {
     let (blobs, sha256) = (blobs.clone(), sha256.to_string());
     tokio::task::spawn_blocking(move || -> Result<UploadKind> {
-        let mut head = Vec::with_capacity(4096);
-        blobs.open_seek(owner, &sha256)?.take(4096).read_to_end(&mut head)?;
-        // only a zip's member list needs the whole file on disk: a sealed blob is not decrypted for the rest
-        let copy = crate::documents::is_zip(&head)
-            .then(|| blobs.with_local_copy(owner, &sha256))
-            .transpose()?;
-        Ok(sniff(&filename, &head, copy.as_ref().map(|c| c.path())))
+        sniff_reader(&filename, blobs.open_seek(owner, &sha256)?)
     })
     .await
     .map_err(|e| Error::Other(anyhow::anyhow!("sniff task failed: {e}")))?
@@ -131,9 +125,9 @@ async fn remember(conn: &mut PgConnection, a: &Arrival<'_>, document_id: Option<
     Ok(())
 }
 
-/// A previously imported wearable archive can match the next arrival by its raw hash, even when its
+/// A previously imported account export can match the next arrival by its raw hash, even when its
 /// new inbox ID differs. The original archive has already been released, so release this copy too.
-async fn archive_duplicate(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>) -> Result<Option<Arrived>> {
+async fn export_duplicate(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>) -> Result<Option<Arrived>> {
     let (Some(source), Some(ext)) = (a.source_id, a.external_id) else {
         return Ok(None);
     };
@@ -182,17 +176,23 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
             && item.profile_id == Some(a.profile_id)
             && item.blob_sha256.as_deref() == Some(sha256_hex_to_bytes(a.sha256)?.as_slice())
         {
-            let mime: Option<String> = sqlx::query_scalar("select mime from document where id = $1")
-                .bind(item.document_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-            let flag = if mime.as_deref() == Some(crate::documents::FITBIT_READINGS_MIME) {
-                "fitbit_takeout"
-            } else {
-                "garmin"
-            };
-            lock_exports(&mut *conn, a.profile_id, flag).await?;
-            remove_unheld_upload(&mut *conn, blobs, a.profile_id, a.sha256).await?;
+            let kind = sniff_blob(
+                blobs,
+                BlobOwner::Profile(a.profile_id),
+                a.sha256,
+                a.filename.unwrap_or("").into(),
+            )
+            .await;
+            match kind {
+                Ok(kind) => {
+                    if let Some(flag) = projected_export(kind) {
+                        lock_exports(&mut *conn, a.profile_id, flag).await?;
+                    }
+                    remove_unheld_upload(&mut *conn, blobs, a.profile_id, a.sha256).await?;
+                }
+                Err(Error::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         return Ok(Arrived::AlreadySeen {
             document_id: item.document_id,
@@ -200,15 +200,11 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
     }
     let filename = a.filename.unwrap_or("").to_string();
     let kind = sniff_blob(blobs, BlobOwner::Profile(a.profile_id), a.sha256, filename.clone()).await?;
-    if let Some(flag) = match kind {
-        "garmin_zip" => Some("garmin"),
-        "fitbit_takeout" => Some("fitbit_takeout"),
-        _ => None,
-    } {
+    if let Some(flag) = projected_export(kind) {
         // Hold the import's lock while registering the raw hash, so a duplicate arrival that
         // shares the running job cannot register a new holder after that job releases the hash.
         lock_exports(&mut *conn, a.profile_id, flag).await?;
-        if let Some(duplicate) = archive_duplicate(&mut *conn, blobs, a).await? {
+        if let Some(duplicate) = export_duplicate(&mut *conn, blobs, a).await? {
             return Ok(duplicate);
         }
     }

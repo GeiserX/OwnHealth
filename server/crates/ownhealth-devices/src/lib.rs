@@ -5,6 +5,7 @@
 //! | `hae` | Health Auto Export (iOS) JSON v2 push to `POST /api/ingest/health-auto-export` with a push token of a `health_auto_export` source; scheduled every 15 min by the app; 0 duplicate samples on re-push |
 //! | `gadgetbridge` | the Gadgetbridge SQLite export (`import.gadgetbridge`, sniffed as `gadgetbridge_db` on upload): device tables by name suffix |
 //! | `nightscout` | pull `/api/v1/entries/sgv.json` (and the v3 API) from the person's own Nightscout with a read token; FreeStyle Libre arrives the same way through nightscout-connect |
+//! | `openwearables` | pulls allowlisted providers from the Compose sidecar and removes unlinked users |
 //! | `cgm_csv` | LibreView and Dexcom Clarity CSV exports (`import.cgm_csv`, sniffed as `libreview_csv` or `dexcom_clarity_csv` on upload): CGM readings by header text in en, de and es, stored in mg/dL |
 //! | `cgm` | CGM readings as LOINC 99504-3; the HL7 CGM IG summary (mean glucose 97507-8, GMI, times in ranges 106793-3); valid only with >= 70% sensor wear over 14 days |
 //! | `store` | the one write path into `wearable_sample`, idempotent, then the rollups |
@@ -24,8 +25,10 @@ pub mod gadgetbridge;
 pub mod garmin_zip;
 pub mod hae;
 pub mod nightscout;
+pub mod openwearables;
 pub mod scores;
 pub mod store;
+pub mod strava_zip;
 pub mod synthetic;
 pub mod takeout_fitbit;
 
@@ -37,8 +40,10 @@ pub fn register() {
     gadgetbridge::register();
     cgm_csv::register();
     nightscout::register();
+    openwearables::register();
     fit::register();
     garmin_zip::register();
+    strava_zip::register();
     takeout_fitbit::register();
     ownhealth_core::demo::register_demo_hook("devices_cgm", demo::ORDER, demo::seed_boxed);
 }

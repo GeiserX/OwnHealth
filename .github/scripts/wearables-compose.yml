@@ -1,0 +1,74 @@
+# The API uses the upstream 0.11.0 startup command. The seed endpoint queues work on Redis.
+services:
+  db:
+    image: postgres:18.6-alpine3.23
+    environment:
+      POSTGRES_DB: wearables
+      POSTGRES_USER: wearables
+      POSTGRES_PASSWORD: ${OW_DB_PASSWORD:?}
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U wearables -d wearables -h 127.0.0.1']
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8.10.3
+    command: [redis-server, --save, '', --appendonly, 'no']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  ow-app:
+    image: &ow-image themomentum/open-wearables-backend:0.11.0@sha256:aaa0ccc7e6dcfbb3a36db6e0f63ec2782cf31a5bbd7cb466d11cd8d4657bc6dd
+    command: [scripts/start/app.sh]
+    environment:
+      <<: &ow-env
+        ENVIRONMENT: production
+        DB_HOST: db
+        DB_NAME: wearables
+        DB_USER: wearables
+        DB_PASSWORD: ${OW_DB_PASSWORD:?}
+        REDIS_HOST: redis
+        SECRET_KEY: ${OW_SECRET_KEY:?}
+        TELEMETRY_ENABLED: 'false'
+        DO_NOT_TRACK: '1'
+        SENTRY_ENABLED: 'false'
+        OTEL_ENABLED: 'false'
+        OUTGOING_WEBHOOKS_ENABLED: 'false'
+      ADMIN_EMAIL: ${OW_ADMIN_EMAIL:?}
+      ADMIN_PASSWORD: ${OW_ADMIN_PASSWORD:?}
+    ports: ['127.0.0.1:8000:8000']
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=3)"]
+      interval: 2s
+      timeout: 4s
+      retries: 75
+
+  worker:
+    image: *ow-image
+    environment: *ow-env
+    depends_on:
+      ow-app:
+        condition: service_healthy
+    # The 0.11.0 generator indexes PROVIDER_CONFIGS even for a connections-only seed.
+    # Withings and Strava are missing there. Supply display metadata in this worker only.
+    command:
+      - python
+      - -c
+      - |
+        from app.main import celery_app
+        from app.schemas.enums import ProviderName
+        from app.services.seed_data.constants import PROVIDER_CONFIGS
+
+        for provider, device in [(ProviderName.WITHINGS, "Withings scale"), (ProviderName.STRAVA, "Strava")]:
+            PROVIDER_CONFIGS.setdefault(provider, {"devices": [device], "os_versions": ["1.0"]})
+
+        celery_app.worker_main(["worker", "--pool=solo", "-Q", "default", "--loglevel=INFO"])

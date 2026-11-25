@@ -28,7 +28,8 @@ providers:
   strava_export: {ingest: allow, mcp: served, path: "Strava bulk account export"}
   libreview: {ingest: allow, mcp: served, path: "LibreView CSV export"}
   dexcom_clarity: {ingest: allow, mcp: served, path: "Dexcom Clarity CSV export"}
-  # Vendor APIs through Open Wearables: the sidecar's allowlist
+  # Vendor APIs through Open Wearables: the sidecar's allowlist. The poller's list is
+  # ownhealth-devices openwearables.rs PROVIDERS; a test checks that it names exactly these lines.
   oura: {ingest: allow, mcp: withheld, path: "Open Wearables"}
   whoop: {ingest: allow, mcp: withheld, path: "Open Wearables"}
   polar: {ingest: allow, mcp: withheld, path: "Open Wearables"}

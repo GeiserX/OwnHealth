@@ -3,7 +3,7 @@
 // member who may not see Wearables. A cut-short ZIP reads as its own sentence, not as an unknown file.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { garminNothing, garminReadings, garminSummary, rowsLeftOut } from '../src/lib/logic/garmin_import.ts';
+import { exportNothing, garminReadings, exportSummary, rowsLeftOut } from '../src/lib/logic/garmin_import.ts';
 import { fitHidden } from '../src/lib/logic/fit_import.ts';
 import { errKey } from '../src/lib/logic/errors.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
@@ -24,13 +24,13 @@ test('the readings line says what came in, or that every reading was already her
 
 test('an import that read no file says nothing was imported', () => {
 	const done = (files_imported: number) => ({ kind: 'import.garmin_zip', state: 'done', result: { accepted: 0, garmin: { ...garmin, files_imported } } });
-	assert.equal(garminNothing(done(0)), true);
-	assert.equal(garminNothing(done(2)), false);
-	assert.equal(garminNothing({ kind: 'import.garmin_zip', state: 'done', result: null }), false);
-	assert.equal(garminNothing({ kind: 'import.fit', state: 'done', result: { garmin: { ...garmin, files_imported: 0 } } }), false);
-	assert.equal(garminNothing(undefined), false);
-	assert.deepEqual(garminSummary({ ...garmin, gps_left_out: 'yes' }), { ...garmin, gps_left_out: false });
-	assert.equal(garminSummary({ files_imported: '2', not_imported: [] }), null);
+	assert.equal(exportNothing(done(0)), true);
+	assert.equal(exportNothing(done(2)), false);
+	assert.equal(exportNothing({ kind: 'import.garmin_zip', state: 'done', result: null }), false);
+	assert.equal(exportNothing({ kind: 'import.fit', state: 'done', result: { garmin: { ...garmin, files_imported: 0 } } }), false);
+	assert.equal(exportNothing(undefined), false);
+	assert.deepEqual(exportSummary({ garmin: { ...garmin, gps_left_out: 'yes' } }), { ...garmin, gps_left_out: false });
+	assert.equal(exportSummary({ garmin: { files_imported: '2', not_imported: [] } }), null);
 });
 
 test('a hidden Garmin result gets the Wearables line, as a FIT one does', () => {
@@ -48,13 +48,26 @@ test('a ZIP whose member list cannot be read is no unknown file', () => {
 
 test('a Fitbit Takeout result reads as an archive summary and counts the rows it left out', () => {
 	const fitbit = { files_imported: 2, not_imported: [{ member: 'Takeout/Fitbit/Oxygen Saturation (SpO2)/Minute SpO2 - 2024-07-04.csv', reason: 'unsupported' }], rows_left_out: 3 };
-	assert.deepEqual(garminSummary(fitbit), { files_imported: 2, gps_left_out: false, not_imported: fitbit.not_imported });
+	assert.deepEqual(exportSummary({ fitbit_takeout: fitbit }), { files_imported: 2, gps_left_out: false, not_imported: fitbit.not_imported, rows_left_out: 3 });
+	assert.deepEqual(exportSummary({ fitbit_takeout: { ...fitbit, rows_left_out: 0 } }), { files_imported: 2, gps_left_out: false, not_imported: fitbit.not_imported });
 	assert.equal(rowsLeftOut(fitbit), 3);
 	for (const v of [null, undefined, {}, { rows_left_out: 'x' }, { rows_left_out: Number.NaN }]) assert.equal(rowsLeftOut(v), 0, JSON.stringify(v));
+	assert.equal(fitHidden({ kind: 'import.fitbit_takeout', state: 'done', result: null }), true);
 	for (const lang of ['en', 'es'] as const) {
 		for (const key of ['i2_fitbit_rows_left_out', 'i2_fitbit_rows_left_out_one', 'i2_garmin_reason_invalid_csv', 'fu_k_fitbit_takeout']) {
 			assert.ok(key in dict[lang], `${lang} ${key}`);
 		}
 		assert.match(dict[lang].err_unsupported_file, /Fitbit Takeout/);
+		assert.match(dict[lang].err_unsupported_file, /Strava/);
 	}
+});
+
+test('a Strava result carries both unmatched counts and keeps the Wearables permission', () => {
+	const strava = { ...garmin, rows_without_file: 2, files_without_row: 1 };
+	assert.deepEqual(exportSummary({ strava }), strava);
+	assert.equal(exportNothing({ kind: 'import.strava_zip', state: 'done', result: { strava: { ...strava, files_imported: 0 } } }), true);
+	assert.equal(fitHidden({ kind: 'import.strava_zip', state: 'done', result: null }), true);
+	const has = (key: string) => key in dict.en;
+	assert.equal(errKey(null, 'strava_zip_unreadable', has), 'err_strava_zip_unreadable');
+	assert.equal(errKey(null, 'strava_zip_limit', has), 'err_strava_zip_limit');
 });

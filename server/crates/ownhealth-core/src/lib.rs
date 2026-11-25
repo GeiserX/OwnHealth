@@ -11,6 +11,7 @@ pub mod break_glass;
 pub mod canonical;
 pub mod config;
 pub mod connector_oauth;
+pub mod connector_profiles;
 pub mod dedup;
 pub mod demo;
 pub mod demo_pdf;

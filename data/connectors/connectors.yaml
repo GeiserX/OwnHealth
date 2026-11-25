@@ -1,0 +1,138 @@
+# The US connections a self-hoster registers for themselves (docs/design/connectors.md section 7, the
+# bring-your-own client wizard): one profile per vendor, with what to register and how the vendor's
+# tokens behave. server/crates/ownhealth-core/src/connector_profiles.rs reads this file. It is compiled
+# in and checked when the server starts: a bad file stops the start and names its line.
+#
+# The refresh fields drive the token code (connector_oauth.rs), they are not only shown:
+#   rotation             none: the refresh token stays the same. rotating: each refresh answer brings a
+#                        new one and retires the old one, so an answer without a new one leaves nothing
+#                        to refresh with, and the retired token is never sent again. single_use: rotating,
+#                        and a token sent once is spent even when no answer comes back (Blue Button).
+#                        unknown: not documented; a new token in an answer replaces the old one.
+#   unused_expiry_days   the refresh token ends after this many days without a refresh; each refresh
+#                        starts the count again. Sets when the sign-in ends unless the vendor's own
+#                        answer names refresh_token_expires_in. null when not documented.
+#   access_token_seconds how long an access token lasts when the vendor's answer leaves out expires_in.
+#                        null when not documented (then 5 minutes).
+#
+# Other fields:
+#   key (the map key)    the vendor of a household's client (connector_client.vendor); for a vendor in
+#                        the US provider directory, also its fhir_brand.vendor.
+#   name                 the vendor's own name, the same in every language.
+#   kind                 the source kind a connection makes: smart or bluebutton.
+#   client_type          confidential: a client id and a client secret, and the secret serves only the
+#                        one server it is saved for. public: a client id alone, for every server of the
+#                        vendor.
+#   servers              the vendor's fixed FHIR servers (one shared server; production and sandbox).
+#   directory            true when the US provider directory lists the vendor's servers, so the wizard
+#                        searches it by organisation name.
+#   registration         the vendor's page where the app is registered.
+#   scopes               exactly what to tick at the vendor: read and search only, never a write scope.
+#                        The launch asks for .rs scopes only from a server whose discovery document
+#                        lists permission-v2, and for .read otherwise (a SMART 1.0 server such as the
+#                        VA's). A test checks these scopes against what the launch asks for under the
+#                        vendor's recorded discovery document (fixtures/connectors/<vendor>/).
+#   verified_live        false until a real account has connected with these steps.
+#   sources              where the token values come from. A vendor with no source has no values.
+#
+# The redirect URI is the instance's address followed by redirect_path.
+version: 1
+redirect_path: /api/connectors/callback
+vendors:
+  epic:
+    name: Epic
+    kind: smart
+    client_type: confidential
+    directory: true
+    registration: https://fhir.epic.com/Developer/Apps
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.rs, patient/AllergyIntolerance.rs, patient/Condition.rs, patient/DiagnosticReport.rs, patient/DocumentReference.rs, patient/Encounter.rs, patient/Immunization.rs, patient/Medication.rs, patient/MedicationRequest.rs, patient/Observation.rs, patient/Procedure.rs]
+    refresh: {rotation: unknown, unused_expiry_days: null}
+    access_token_seconds: null
+    verified_live: false
+  oracle:
+    name: Oracle Health
+    kind: smart
+    client_type: public
+    directory: true
+    registration: https://code-console.cerner.com/
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.rs, patient/AllergyIntolerance.rs, patient/Condition.rs, patient/DiagnosticReport.rs, patient/DocumentReference.rs, patient/Encounter.rs, patient/Immunization.rs, patient/Medication.rs, patient/MedicationRequest.rs, patient/Observation.rs, patient/Procedure.rs]
+    refresh: {rotation: none, unused_expiry_days: 90}
+    access_token_seconds: 570
+    verified_live: false
+    sources:
+      - https://docs.oracle.com/en/industries/health/millennium-platform-apis/fhir-authorization-framework/
+      - https://github.com/cerner/fhir.cerner.com/blob/main/content/authorization.md
+  athena:
+    name: athenahealth
+    kind: smart
+    client_type: confidential
+    servers: [https://api.platform.athenahealth.com/fhir/r4]
+    directory: false
+    registration: https://mydata.athenahealth.com/access-the-apis
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.rs, patient/AllergyIntolerance.rs, patient/Condition.rs, patient/DiagnosticReport.rs, patient/DocumentReference.rs, patient/Encounter.rs, patient/Immunization.rs, patient/Medication.rs, patient/MedicationRequest.rs, patient/Observation.rs, patient/Procedure.rs]
+    refresh: {rotation: unknown, unused_expiry_days: 90}
+    access_token_seconds: null
+    verified_live: false
+    sources:
+      - https://github.com/athenahealth/apiserver-athenaFlex/issues/211
+  healow:
+    name: eClinicalWorks (healow)
+    kind: smart
+    client_type: confidential
+    directory: true
+    registration: https://connect4.healow.com/
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.rs, patient/AllergyIntolerance.rs, patient/Condition.rs, patient/DiagnosticReport.rs, patient/DocumentReference.rs, patient/Encounter.rs, patient/Immunization.rs, patient/Medication.rs, patient/MedicationRequest.rs, patient/Observation.rs, patient/Procedure.rs]
+    refresh: {rotation: rotating, unused_expiry_days: null}
+    access_token_seconds: null
+    verified_live: false
+    sources:
+      - https://meremedical.co/docs/getting-started/healow-setup/
+  nextgen:
+    name: NextGen Enterprise
+    kind: smart
+    client_type: confidential
+    servers: [https://fhir.nextgen.com/nge/prod/fhir-api-r4/fhir/r4]
+    directory: false
+    registration: https://developer.nextgen.com/
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.rs, patient/AllergyIntolerance.rs, patient/Condition.rs, patient/DiagnosticReport.rs, patient/DocumentReference.rs, patient/Encounter.rs, patient/Immunization.rs, patient/Medication.rs, patient/MedicationRequest.rs, patient/Observation.rs, patient/Procedure.rs]
+    refresh: {rotation: unknown, unused_expiry_days: null}
+    access_token_seconds: null
+    verified_live: false
+  meditech:
+    name: MEDITECH Expanse
+    kind: smart
+    client_type: confidential
+    directory: true
+    registration: https://ehr.meditech.com/ehr-solutions/how-to-work-in-the-greenfield-workspace
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.rs, patient/AllergyIntolerance.rs, patient/Condition.rs, patient/DiagnosticReport.rs, patient/DocumentReference.rs, patient/Encounter.rs, patient/Immunization.rs, patient/Medication.rs, patient/MedicationRequest.rs, patient/Observation.rs, patient/Procedure.rs]
+    refresh: {rotation: unknown, unused_expiry_days: null}
+    access_token_seconds: null
+    verified_live: false
+  va:
+    name: VA Lighthouse
+    kind: smart
+    client_type: confidential
+    servers: [https://api.va.gov/services/fhir/v0/r4]
+    directory: false
+    registration: https://developer.va.gov/explore/api/patient-health/authorization-code
+    # a SMART 1.0 server: read scopes, not read and search
+    scopes: [openid, fhirUser, launch/patient, offline_access, patient/Patient.read, patient/AllergyIntolerance.read, patient/Condition.read, patient/DiagnosticReport.read, patient/DocumentReference.read, patient/Encounter.read, patient/Immunization.read, patient/Medication.read, patient/MedicationRequest.read, patient/Observation.read, patient/Procedure.read]
+    # production; the sandbox's refresh tokens end after 7 days unused
+    refresh: {rotation: unknown, unused_expiry_days: 42}
+    access_token_seconds: null
+    verified_live: false
+    sources:
+      - https://developer.va.gov/explore/api/patient-health/authorization-code
+  bluebutton:
+    name: CMS Blue Button 2.0
+    kind: bluebutton
+    client_type: confidential
+    servers: [https://api.bluebutton.cms.gov/v3/fhir, https://sandbox.bluebutton.cms.gov/v3/fhir]
+    directory: false
+    registration: https://sandbox.bluebutton.cms.gov/
+    scopes: [launch/patient, patient/Patient.rs, patient/Coverage.rs, patient/ExplanationOfBenefit.rs]
+    refresh: {rotation: single_use, unused_expiry_days: null}
+    access_token_seconds: null
+    verified_live: false
+    sources:
+      - https://bluebutton.cms.gov/api-documentation/

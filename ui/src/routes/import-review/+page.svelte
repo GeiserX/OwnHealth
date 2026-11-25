@@ -43,7 +43,7 @@
 	import { focusOrder } from '#lib/logic/imaging';
 	import FitResult from '#lib/components/pages2/FitResult.svelte';
 	import GarminResult from '#lib/components/pages2/GarminResult.svelte';
-	import { garminSummary, rowsLeftOut } from '#lib/logic/garmin_import';
+	import { exportSummary } from '#lib/logic/garmin_import';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
@@ -177,8 +177,7 @@
 	const cgmText = (l: CgmLine) => (l.n != null ? tp(l.key, l.n, l.vars) : tf(l.key, l.vars ?? {}));
 	// a FIT activity file: what it holds, and that its route was not stored
 	const fitDoc = $derived(fitDocLines(doc.data?.flags));
-	const garminDoc = $derived(garminSummary(doc.data?.flags?.garmin));
-	const fitbitDoc = $derived(garminSummary(doc.data?.flags?.fitbit_takeout));
+	const exportDoc = $derived(exportSummary(doc.data?.flags));
 	const boxes = $derived<Box[]>([
 		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
@@ -503,13 +502,13 @@
 				<div class="note" style="margin-top:6px">{t('i2_no_pages_image')}</div>
 			{:else if doc.data && docId && doc.data.id === docId && fitDoc}
 				<FitResult lines={fitDoc} label={plain(doc.data.filename)} />
-			{:else if doc.data && docId && doc.data.id === docId && garminDoc}
-				<GarminResult summary={garminDoc} />
-			{:else if doc.data && doc.data.id === docId && fitbitDoc}
+			{:else if doc.data && docId && doc.data.id === docId && exportDoc && doc.data.flags?.fitbit_takeout}
 				<div class="empty cgmdoc">
 					<div>{t('i2_ik_fitbit_takeout')}</div>
-					<GarminResult summary={fitbitDoc} leftOut={rowsLeftOut(doc.data.flags?.fitbit_takeout)} />
+					<GarminResult summary={exportDoc} />
 				</div>
+			{:else if doc.data && docId && doc.data.id === docId && exportDoc}
+				<GarminResult summary={exportDoc} />
 			{:else if doc.data && !doc.data.pages_info.length}
 				<div class="empty">{t('i2_no_pages')}</div>
 			{:else}

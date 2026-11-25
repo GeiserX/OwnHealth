@@ -2,7 +2,7 @@
 	// The Connections screen (v1.0, slice 55): every health record and device connection of the
 	// profiles this person manages, with its status, last sync, when its sign-in and access token end,
 	// open sync-gap alerts, and Reconnect. The connector callback lands here with ?connected=<id> or
-	// ?connector_error=<code>. The add wizard (slice 19) launches new connections.
+	// ?connector_error=<code>. Add connection opens the add wizard (slice 19, ./add), which launches new ones.
 	import '#lib/components/pages2/pages2.css';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -28,6 +28,7 @@
 		daysLeft,
 		refreshUntilFirstPull,
 		renewsItself,
+		endedVendors,
 		runWords,
 		shownConnections,
 		statusWord,
@@ -35,6 +36,7 @@
 		type ConnectionRow,
 		type ConnectionState
 	} from '#lib/logic/connections';
+	import { manageable } from '#lib/logic/inbox';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
 	// One clock for every date on the screen: it moves on each minute and on each load, so a grant that
@@ -60,6 +62,8 @@
 	const codeText = (code: string) => tf(connectorErrorKey(code, has), { code });
 	// a poller's stop or problem, kept in English by the server, in the reader's language when its code has words
 	const runText = (text: string) => runWords(text, has, tf);
+	// a vendor by its name (fu_k_oura: Oura), else by its id
+	const vendorName = (p: string) => (has('fu_k_' + p) ? t('fu_k_' + p) : p);
 
 	// What the vendor's redirect said, read once; the address is then cleaned so a reload does not repeat it.
 	let outcome = $state<{ connected: string } | { error: string } | null>(null);
@@ -174,8 +178,15 @@
 	const stateLine = (r: ConnectionRow, s: ConnectionState): { text: string; tone: string } | null => {
 		const n = daysLeft(r.grant_expires_at, now) ?? 0;
 		switch (s) {
-			case 'reconsent':
+			case 'reconsent': {
+				// Open Wearables: one vendor's connection ended there; the others keep syncing, and only
+				// the operator can reconnect it in the sidecar, so there is no Reconnect here.
+				if (r.kind === 'openwearables') {
+					const vendors = endedVendors(r).map(vendorName);
+					return { text: vendors.length ? tf('con_st_ow_ended', { vendors: vendors.join(', ') }) : t('con_st_ow_ended_any'), tone: 'var(--out)' };
+				}
 				return { text: t('con_st_reconsent'), tone: 'var(--out)' };
+			}
 			case 'expired':
 				return { text: tf('con_st_expired', { date: day(r.grant_expires_at) }), tone: 'var(--out)' };
 			case 'grant_soon':
@@ -194,6 +205,7 @@
 	{#snippet right()}
 		<PhaseChip phase="v1.0" />
 		<a class="btn" href="/inbox">{t('fu_inbox')}</a>
+		{#if manageable(app.me?.profiles ?? []).length}<a class="btn pri" href="/connections/add">{t('con_add')}</a>{/if}
 	{/snippet}
 </PageHeader>
 

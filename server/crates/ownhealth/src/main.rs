@@ -64,6 +64,31 @@ enum Cmd {
         /// The ClinVar VCF, for example clinvar_20261005.vcf.gz.
         path: PathBuf,
     },
+    /// Link an Open Wearables user to a profile. Vincula un usuario de Open Wearables a un perfil.
+    OpenwearablesConnect {
+        /// The profile's id or short name (alex). El id o el nombre corto del perfil (alex).
+        #[arg(long)]
+        profile: String,
+        /// The Open Wearables user id. El id del usuario de Open Wearables.
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        admin_email: String,
+        /// JSON file with admin_password and api_key. Archivo JSON con admin_password y api_key.
+        #[arg(long, default_value = "/dev/stdin")]
+        credentials_file: PathBuf,
+    },
+    /// Delete an Open Wearables user with an API key that works now: a cleanup the sidecar refused,
+    /// or a link left stale by a new sidecar (after a restore). Borra un usuario de Open Wearables con
+    /// una clave de API que funcione: una limpieza rechazada o un vínculo obsoleto tras restaurar.
+    OpenwearablesDelete {
+        /// The Open Wearables user id. El id del usuario de Open Wearables.
+        #[arg(long)]
+        user: String,
+        /// JSON file with api_key. Archivo JSON con api_key.
+        #[arg(long, default_value = "/dev/stdin")]
+        credentials_file: PathBuf,
+    },
     /// Encrypt what an install stored before profile keys: each older file under the key of every
     /// profile or pending item that reads it, and each older refresh token under its profile's key.
     /// The job removes a plain copy only when no ownerless reader still needs it. The JSON report
@@ -214,6 +239,67 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             } else {
                 ExitCode::SUCCESS
             })
+        }
+        Cmd::OpenwearablesConnect {
+            profile,
+            user,
+            admin_email,
+            credentials_file,
+        } => {
+            use ownhealth_core::secrets::SecretString;
+            let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
+            let contents = tokio::fs::read(credentials_file).await?;
+            let credentials: serde_json::Value = serde_json::from_slice(&contents).unwrap_or_default();
+            let (password, key) = credentials["admin_password"]
+                .as_str()
+                .zip(credentials["api_key"].as_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid credentials file. / Archivo de credenciales no válido."))?;
+            let profile = ownhealth_devices::openwearables::profile_id(&rt.pool, &profile).await?;
+            let user = user.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "--user takes the Open Wearables user id. / --user necesita el id del usuario de Open Wearables."
+                )
+            })?;
+            let source = ownhealth_devices::openwearables::connect(
+                &rt.job_context(),
+                profile,
+                user,
+                &admin_email,
+                &SecretString::new(password),
+                &SecretString::new(key),
+            )
+            .await?;
+            println!(
+                "Linked: Open Wearables user {user} syncs into profile {profile} (source {source}). Providers outside the allowlist are off, and the first pull is queued."
+            );
+            println!(
+                "Vinculado: el usuario {user} de Open Wearables se sincroniza con el perfil {profile} (fuente {source}). Los proveedores fuera de la lista permitida están desactivados y la primera sincronización está en cola."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::OpenwearablesDelete { user, credentials_file } => {
+            use ownhealth_core::secrets::SecretString;
+            let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
+            let contents = tokio::fs::read(credentials_file).await?;
+            let credentials: serde_json::Value = serde_json::from_slice(&contents).unwrap_or_default();
+            let key = credentials["api_key"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid credentials file. / Archivo de credenciales no válido."))?;
+            let user = user.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "--user takes the Open Wearables user id. / --user necesita el id del usuario de Open Wearables."
+                )
+            })?;
+            ownhealth_devices::openwearables::delete(&rt.job_context(), user, &SecretString::new(key)).await?;
+            println!(
+                "Deleted: Open Wearables user {user} and its link in OwnHealth. The readings already stored stay."
+            );
+            println!(
+                "Borrado: el usuario {user} de Open Wearables y su vínculo en OwnHealth. Las lecturas ya guardadas se quedan."
+            );
+            Ok(ExitCode::SUCCESS)
         }
         Cmd::SealLegacy { dry_run } => {
             let rt = Runtime::new(settings)?;

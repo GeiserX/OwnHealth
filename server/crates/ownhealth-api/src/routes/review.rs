@@ -107,6 +107,13 @@ fn visible(item: &ReviewItem, perm: &Permission) -> bool {
     if item.kind == ownhealth_imaging::import::REVIEW_KIND && !perm.has("read:records") {
         return false;
     }
+    // a failed DICOM import's error can name the upload and its studies, as its job details do
+    if item.kind == "job_failed"
+        && item.payload.get("kind").and_then(Value::as_str) == Some(ownhealth_imaging::import::JOB)
+        && !perm.has("read:records")
+    {
+        return false;
+    }
     // a relative from a family tree file: the family list shows relatives only with read:records
     if item.kind == ownhealth_core::gedcom::KIND && !perm.has("read:records") {
         return false;
@@ -468,8 +475,9 @@ async fn reject(
     let item = check(&mut tx, principal, found, true).await?;
     review::reject(&mut tx, item_id, principal.user_id.unwrap_or_default(), &reason).await?;
     audit(&mut tx, principal, &item, "review_reject").await?;
+    let removed = settle_upload(&mut tx, principal, &item).await?;
     tx.commit().await?;
-    Ok(Json(json!({"id": item_id, "status": "rejected"})))
+    Ok(Json(closed(item_id, "rejected", removed)))
 }
 
 async fn reopen(State(rt): State<Runtime>, caller: Caller, Path(item_id): Path<String>) -> R<Json<Value>> {
@@ -513,8 +521,38 @@ async fn dismiss(
     )
     .await?;
     audit(&mut tx, principal, &item, "review_dismiss").await?;
+    let removed = settle_upload(&mut tx, principal, &item).await?;
     tx.commit().await?;
-    Ok(Json(json!({"id": item_id, "status": "dismissed"})))
+    Ok(Json(closed(item_id, "dismissed", removed)))
+}
+
+/// After a reject or a dismiss: closing the last held study of an upload that put nothing on the
+/// record removes the upload (`ownhealth_imaging::remove::settle`), with the audit row a
+/// `DELETE /api/imaging/imports/{id}` writes. Closing needs `review` and `read:records` already
+/// (`check`, `visible`); the person closed every study of the upload, so no `import` action is asked.
+async fn settle_upload(conn: &mut PgConnection, principal: &Principal, item: &ReviewItem) -> R<bool> {
+    if !ownhealth_imaging::remove::settle(&mut *conn, item).await? {
+        return Ok(false);
+    }
+    let mut e = AuditEvent::new(principal.actor_kind(), "ui", crate::routes::imaging::REMOVE_ACTION);
+    e.actor_id = principal.user_id;
+    e.token_id = principal.token_id;
+    e.tool = Some("review".into());
+    e.profile_id = item.profile_id;
+    e.resource_type = Some("imaging_import".into());
+    e.resource_ids = item.ref_id.map(|id| vec![id.to_string()]);
+    write_audit(conn, &e).await?;
+    Ok(true)
+}
+
+/// The answer to a reject or a dismiss. Closing the last held study of an upload that put nothing on
+/// the record removes the upload (`ownhealth_imaging::remove::settle`): `upload_removed` says so.
+fn closed(item_id: Uuid, status: &str, upload_removed: bool) -> Value {
+    let mut out = json!({"id": item_id, "status": status});
+    if upload_removed {
+        out["upload_removed"] = json!(true);
+    }
+    out
 }
 
 /// pydantic's lax float: a JSON number, or a string that parses as one.

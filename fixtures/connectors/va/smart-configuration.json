@@ -1,0 +1,56 @@
+{
+  "authorizationEndpoint": "https://api.va.gov/oauth2/authorization",
+  "authorization_endpoint": "https://api.va.gov/oauth2/authorization",
+  "tokenEndpoint": "https://api.va.gov/oauth2/token",
+  "token_endpoint": "https://api.va.gov/oauth2/token",
+  "scopesSupported": [
+    "offline_access",
+    "patient/AllergyIntolerance.read",
+    "patient/Condition.read",
+    "patient/DiagnosticReport.read",
+    "patient/DocumentReference.read",
+    "patient/Encounter.read",
+    "patient/Immunization.read",
+    "patient/Medication.read",
+    "patient/MedicationRequest.read",
+    "patient/Observation.read",
+    "patient/Patient.read",
+    "patient/Procedure.read"
+  ],
+  "scopes_supported": [
+    "offline_access",
+    "patient/AllergyIntolerance.read",
+    "patient/Condition.read",
+    "patient/DiagnosticReport.read",
+    "patient/DocumentReference.read",
+    "patient/Encounter.read",
+    "patient/Immunization.read",
+    "patient/Medication.read",
+    "patient/MedicationRequest.read",
+    "patient/Observation.read",
+    "patient/Patient.read",
+    "patient/Procedure.read"
+  ],
+  "responseTypeSupported": [
+    "code",
+    "refresh_token"
+  ],
+  "response_types_supported": [
+    "code",
+    "refresh_token"
+  ],
+  "managementEndpoint": "https://api.va.gov/oauth2/manage",
+  "management_endpoint": "https://api.va.gov/oauth2/manage",
+  "revocationEndpoint": "https://api.va.gov/oauth2/revoke",
+  "revocation_endpoint": "https://api.va.gov/oauth2/revoke",
+  "capabilities": [
+    "client-confidential-symmetric",
+    "client-public",
+    "context-standalone-patient",
+    "launch-ehr",
+    "launch-standalone",
+    "permission-offline",
+    "permission-patient",
+    "sso-openid-connect"
+  ]
+}

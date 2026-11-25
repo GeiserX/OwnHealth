@@ -216,3 +216,34 @@ for (const lang of ['en', 'es'] as const) {
 		expect(errors).toEqual([]);
 	});
 }
+
+// Slice 35: one Open Wearables connection brings several vendors. When one vendor's connection ends in
+// the sidecar, the others keep syncing and only the operator reconnects it there, so the card names
+// the vendor, says where to fix it, and offers no Reconnect. The poller's run is seeded with psql.
+for (const lang of ['en', 'es'] as const) {
+	test(`an Open Wearables card names the vendor whose connection ended, in ${lang}`, async ({ page }) => {
+		const errors = collectPageErrors(page);
+		let ow = sql("select id from source where kind = 'openwearables'");
+		if (!ow) {
+			ow = sql(
+				"insert into source (household_id, kind, label, profile_id, poll_seconds, reconsent_needed_at, last_run_at, last_success_at) select household_id, 'openwearables', 'Open Wearables', id, 900, now(), now(), now() from profile where slug = 'alex' returning id"
+			);
+			sql(
+				`insert into source_run (source_id, trigger, started_at, finished_at, status, items_seen, items_new, errors) values ('${ow}', 'poll', now(), now(), 'partial', 12, 4, '[{"code": "ow_connection_ended", "message": "oura, whoop"}]')`
+			);
+		}
+		await page.goto(`/connections?lang=${lang}`);
+		const card = page.getByRole('article', { name: 'Open Wearables' });
+		await expect(card).toHaveAttribute('data-state', 'reconsent');
+		await expect(card).toContainText(
+			lang === 'en'
+				? 'Open Wearables no longer syncs Oura, WHOOP: that connection ended or was revoked there. Whoever runs this server reconnects it in Open Wearables. The other vendors keep syncing.'
+				: 'Open Wearables ya no sincroniza Oura, WHOOP: esa conexión terminó o se revocó allí. Quien administra este servidor la vuelve a conectar en Open Wearables. Los demás proveedores se siguen sincronizando.'
+		);
+		await expect(card).not.toContainText(lang === 'en' ? 'Nothing syncs' : 'No se sincroniza nada');
+		await expect(card.getByRole('button')).toHaveCount(0);
+		// the later spec files share this database
+		if (lang === 'es') sql(`delete from source where id = '${ow}'`);
+		expect(errors).toEqual([]);
+	});
+}

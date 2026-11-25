@@ -4,10 +4,13 @@
 //!
 //! | Route | What |
 //! |---|---|
-//! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie |
+//! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie; 502 `not_a_smart_server` when the address has no SMART configuration (no such name, or no document) |
 //! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>`; a connect or reconnect of a polled kind queues its first pull |
 //! | `POST /connectors/{id}/reconnect` | `{authorize_url}` for a new grant on the same source; clears the reconsent flag on return |
 //! | `DELETE /connectors/{id}` | revoke at the vendor when it offers it, then delete the tokens and the cursor: `{id, revocation, revoke_page}`; `revoke_page` is the vendor's own page when the revocation failed or is not offered, and always for Blue Button |
+//! | `GET /connectors/profiles` | the add wizard's vendors (`data/connectors/connectors.yaml`) and this instance's redirect URI: `{redirect_uri, vendors}` |
+//! | `GET /connectors/clients` | the household's registered vendor clients, never a secret: `{clients}` |
+//! | `POST /connectors/clients` | `{vendor, client_id, client_secret?, issuer?}`: save the household's client for that vendor and server, the secret sealed; 201 `{client, replaced: false}`, or 200 `{client, replaced: true}` when it replaced the one saved for the same vendor and server; 403 `client_in_use` when connections of profiles the caller does not manage use that one |
 //!
 //! An owner or guardian of the household who manages the profile. The callback counts only in the
 //! browser and the session that started the launch, for a profile that person still manages. No
@@ -28,17 +31,18 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ownhealth_auth::household::{can_manage, require_manage};
 use ownhealth_auth::{principal, sessions, token_urlsafe};
 use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::connector_oauth::{self as oauth, OAuthError, Revocation};
-use ownhealth_core::net::Egress;
-use ownhealth_core::secrets::SecretBox;
+use ownhealth_core::connector_profiles::{self as profiles, ClientType};
+use ownhealth_core::net::{Egress, NetError};
+use ownhealth_core::secrets::{self, SecretBox, SecretString};
 use ownhealth_core::sources;
 use ownhealth_core::{Error, Runtime};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -57,7 +61,7 @@ pub fn binder_cookie_name(state: &str) -> String {
     format!("{BINDER_COOKIE}_{}", &hash[..16])
 }
 /// Only the callback reads a binder.
-const BINDER_PATH: &str = "/api/connectors/callback";
+const BINDER_PATH: &str = profiles::CALLBACK_PATH;
 /// How long a profile delete waits for each vendor's revocation.
 const DELETE_REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -67,6 +71,8 @@ pub fn router() -> Router<Runtime> {
         .route("/connectors/callback", get(callback))
         .route("/connectors/{id}/reconnect", post(reconnect))
         .route("/connectors/{id}", delete(disconnect))
+        .route("/connectors/profiles", get(vendor_profiles))
+        .route("/connectors/clients", get(list_clients).post(save_client))
 }
 
 /// Tests point the connector egress at a fake vendor on loopback with this request extension.
@@ -214,7 +220,10 @@ fn binder_cookie(rt: &Runtime, state: &str, binder: &str) -> String {
 
 /// Send the browser to the vendor's sign-in: one launch, its binder in this browser.
 async fn start(rt: &Runtime, p: &Principal, l: Started<'_>, egress: &Egress) -> R {
-    let endpoints = oauth::resolve(&l.spec, l.issuer, egress).await.map_err(fail)?;
+    let first = l.source_id.is_none();
+    let endpoints = oauth::resolve(&l.spec, l.issuer, egress)
+        .await
+        .map_err(|e| if first { not_smart(e) } else { fail(e) })?;
     let binder = token_urlsafe(32);
     let mut tx = rt.pool.begin().await?;
     let begun = oauth::begin(
@@ -239,6 +248,25 @@ async fn start(rt: &Runtime, p: &Principal, l: Started<'_>, egress: &Egress) -> 
         json!({"authorize_url": begun.url}),
         &[binder_cookie(rt, &begun.state, &binder)],
     ))
+}
+
+/// A first launch at an address with no SMART configuration (no such name, or no document at
+/// `.well-known/smart-configuration`): most likely a wrong address, typed in the wizard, so it says
+/// that and not "try again later". A reconnect keeps `vendor_unreachable`: its address worked before.
+fn not_smart(e: OAuthError) -> Fail {
+    match e {
+        OAuthError::Vendor { ref code, .. } if code == "discovery_failed" => {}
+        OAuthError::Net(NetError::Resolve(_)) => {}
+        other => return fail(other),
+    }
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "not_a_smart_server",
+        format!(
+            "This address does not answer as a SMART server ({e}). Check the FHIR base address the facility gives."
+        ),
+    )
+    .into()
 }
 
 struct Started<'a> {
@@ -561,6 +589,293 @@ pub async fn revoke_before_delete(rt: &Runtime, p: &Principal, profile_id: Uuid,
         }
     }
     done.into_iter().map(|r| json!(r)).collect()
+}
+
+// ------------------------------------------------------------------ the add wizard ----
+
+/// The profiles file the server checked at start; a server that started without it cannot serve them.
+fn shipped_profiles() -> R<&'static profiles::Profiles> {
+    profiles::profiles().map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "profiles_invalid", e).into())
+}
+
+/// The wizard's vendors and the redirect URI to register at each of them.
+async fn vendor_profiles(State(rt): State<Runtime>, Caller(p): Caller) -> R {
+    let mut tx = rt.pool.begin().await?;
+    manager(&mut tx, &p).await?;
+    let file = shipped_profiles()?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("GET /api/connectors/profiles".into()),
+            ..AuditEvent::new("user", "ui", "read")
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    ok(json!({"redirect_uri": file.redirect_uri(&rt.settings.base_url), "vendors": file.vendors}))
+}
+
+/// A household's client as the wizard sees it: never the secret, only whether there is one.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct ClientOut {
+    id: Uuid,
+    vendor: String,
+    issuer: Option<String>,
+    client_id: String,
+    confidential: bool,
+    redirect_uri: String,
+    created_at: DateTime<Utc>,
+}
+
+const CLIENT_COLUMNS: &str =
+    "id, vendor, issuer, client_id, client_secret_id is not null as confidential, redirect_uri, created_at";
+
+async fn list_clients(State(rt): State<Runtime>, Caller(p): Caller) -> R {
+    let mut tx = rt.pool.begin().await?;
+    let household = manager(&mut tx, &p).await?;
+    let clients: Vec<ClientOut> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select {CLIENT_COLUMNS} from connector_client where household_id = $1 order by created_at, id"
+    )))
+    .bind(household)
+    .fetch_all(&mut *tx)
+    .await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("GET /api/connectors/clients".into()),
+            ..AuditEvent::new("user", "ui", "read")
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    ok(json!({"clients": clients}))
+}
+
+#[derive(Deserialize)]
+struct ClientIn {
+    vendor: String,
+    client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+}
+
+fn unfit(code: &str, message: &str) -> Fail {
+    ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, code, message).into()
+}
+
+/// The longest server address a client is saved for.
+const MAX_ISSUER_BYTES: usize = 2048;
+
+/// A saved client that connections of profiles the caller does not manage use is not the caller's to
+/// replace: the new id and secret would break those connections at their next refresh, and their
+/// next reconnect would consent to the caller's vendor app. The caller holds the advisory lock
+/// for this key. If a row exists, lock it until commit so no new source can reference it in between.
+async fn in_use_elsewhere(
+    conn: &mut PgConnection,
+    p: &Principal,
+    household: Uuid,
+    vendor: &str,
+    issuer: Option<&str>,
+) -> R<()> {
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "select id from connector_client where household_id = $1 and vendor = $2 \
+         and issuer is not distinct from $3 for update",
+    )
+    .bind(household)
+    .bind(vendor)
+    .bind(issuer)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(client) = existing else { return Ok(()) };
+    let mine: Vec<Uuid> = accessible_profiles(&mut *conn, p)
+        .await?
+        .iter()
+        .filter(|perm| perm.profile.household_id == household && can_manage(perm))
+        .map(|perm| perm.profile.id)
+        .collect();
+    let theirs: i64 = sqlx::query_scalar(
+        "select count(*) from source where connector_client_id = $1 \
+         and (profile_id is null or profile_id <> all($2))",
+    )
+    .bind(client)
+    .bind(&mine)
+    .fetch_one(&mut *conn)
+    .await?;
+    if theirs > 0 {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "client_in_use",
+            "Connections of profiles you do not manage use this client. Only someone who manages them can replace it.",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// A pasted value: trimmed, 1 to `max` characters, no control character.
+fn pasted(value: &str, max: usize) -> Option<&str> {
+    let v = value.trim();
+    (!v.is_empty() && v.chars().count() <= max && !v.chars().any(char::is_control)).then_some(v)
+}
+
+/// Save the household's client for a vendor of the profiles file, as the self-hoster registered it.
+/// A confidential vendor's client brings its secret and is bound to one server; a public vendor's
+/// client has no secret and, without a server, serves every server of the vendor. The secret is
+/// sealed like every connector secret (`secret`, under OWNHEALTH_SECRETS_KEY) and never comes back.
+async fn save_client(
+    State(rt): State<Runtime>,
+    SessionCaller(p): SessionCaller,
+    o: Option<Extension<EgressOverride>>,
+    Body(b): Body<ClientIn>,
+) -> R {
+    let mut tx = rt.pool.begin().await?;
+    let household = manager(&mut tx, &p).await?;
+    let file = shipped_profiles()?;
+    let vendor = file
+        .get(b.vendor.trim())
+        .ok_or_else(|| unfit("unknown_vendor", "OwnHealth has no profile for this vendor."))?;
+    let client_id = pasted(&b.client_id, 200).ok_or_else(|| {
+        unfit(
+            "bad_client_id",
+            "The client id must have 1 to 200 characters, on one line.",
+        )
+    })?;
+    let secret = match b.client_secret.as_deref().filter(|s| !s.trim().is_empty()) {
+        None => None,
+        Some(s) => Some(pasted(s, 1000).ok_or_else(|| {
+            unfit(
+                "bad_client_secret",
+                "The client secret must have 1 to 1000 characters, on one line.",
+            )
+        })?),
+    };
+    match (vendor.client_type, secret) {
+        (ClientType::Confidential, None) => {
+            return Err(unfit(
+                "client_secret_missing",
+                "This vendor gives a client secret with the client id. Paste both.",
+            ));
+        }
+        (ClientType::Public, Some(_)) => {
+            return Err(unfit(
+                "client_secret_unexpected",
+                "This vendor's app has no client secret. Paste only the client id.",
+            ));
+        }
+        _ => {}
+    }
+    let egress = egress(&rt, &o);
+    let given = b
+        .issuer
+        .as_deref()
+        .map(|i| i.trim().trim_end_matches('/'))
+        .filter(|i| !i.is_empty())
+        .map(String::from);
+    // the issuer is part of the client's unique key, and an index row has room for about 2.7 KB
+    if given.as_ref().is_some_and(|i| i.len() > MAX_ISSUER_BYTES) {
+        return Err(unfit(
+            "bad_issuer",
+            "The server address is too long: at most 2048 bytes.",
+        ));
+    }
+    let issuer = if vendor.kind == "bluebutton" {
+        // production unless the sandbox (or a test's loopback v3 base) is named
+        let spec =
+            oauth::kind_spec("bluebutton").ok_or_else(|| Error::NotFound("Blue Button is not available.".into()))?;
+        let base = given
+            .or_else(|| spec.default_issuer.map(String::from))
+            .unwrap_or_default();
+        if !oauth::bluebutton_base(&base, &egress) {
+            return Err(unfit(
+                "bad_issuer",
+                "Choose the CMS Blue Button v3 production or sandbox server.",
+            ));
+        }
+        Some(base)
+    } else {
+        match given {
+            Some(i) if oauth::authority(&i).is_none() || !oauth::safe_endpoint(&i, &egress) => {
+                return Err(unfit(
+                    "bad_issuer",
+                    "The server address is not a secure web address (https).",
+                ));
+            }
+            None if vendor.client_type == ClientType::Confidential => {
+                return Err(unfit(
+                    "issuer_required",
+                    "A client with a secret serves one server: choose the organisation or paste its server address.",
+                ));
+            }
+            other => other,
+        }
+    };
+    // Serialize saves for this key even before the client row exists.
+    let key = format!(
+        "ownhealth.connector_client:{household}:{}:{}",
+        vendor.key,
+        issuer.as_deref().unwrap_or_default()
+    );
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
+    in_use_elsewhere(&mut tx, &p, household, &vendor.key, issuer.as_deref()).await?;
+    let sb = SecretBox::from_settings(&rt.settings)?;
+    let secret_id = match secret {
+        Some(s) => Some(
+            secrets::store_secret(
+                &mut tx,
+                &sb,
+                household,
+                "connector_client_secret",
+                Some(&vendor.name),
+                &SecretString::new(s),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    // one client per vendor and server: saving again replaces the client id and the secret, and the
+    // old secret goes with it (connector_client_swap_secret)
+    let (id, inserted): (Uuid, bool) = sqlx::query_as(
+        "insert into connector_client (household_id, vendor, issuer, client_id, client_secret_id, redirect_uri) \
+         values ($1, $2, $3, $4, $5, $6) on conflict (household_id, vendor, issuer) do update set \
+         client_id = excluded.client_id, client_secret_id = excluded.client_secret_id, \
+         redirect_uri = excluded.redirect_uri returning id, xmax = 0",
+    )
+    .bind(household)
+    .bind(&vendor.key)
+    .bind(&issuer)
+    .bind(client_id)
+    .bind(secret_id)
+    .bind(file.redirect_uri(&rt.settings.base_url))
+    .fetch_one(&mut *tx)
+    .await?;
+    let client: ClientOut = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select {CLIENT_COLUMNS} from connector_client where id = $1"
+    )))
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("connectors".into()),
+            resource_type: Some("connector_client".into()),
+            resource_ids: Some(vec![id.to_string()]),
+            args_summary: Some(format!("vendor={} replaced={}", vendor.key, !inserted)),
+            ..AuditEvent::new("user", "ui", "connector.client")
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    let status = if inserted { StatusCode::CREATED } else { StatusCode::OK };
+    Ok(answer(status, json!({"client": client, "replaced": !inserted}), &[]))
 }
 
 #[cfg(test)]

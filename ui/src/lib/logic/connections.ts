@@ -98,6 +98,20 @@ export const renewsItself = (s: ConnectionState): boolean => s !== 'reconsent' &
 /** The vendor has a sign-in to send the person back to, and the person manages the profile. */
 export const canReconnect = (r: ConnectionRow): boolean => OAUTH_KINDS.includes(r.kind) && r.can_manage === true;
 
+/** The problem an Open Wearables poll records when an allowlisted vendor's connection ended or was
+ * revoked there (openwearables.rs CONNECTION_ENDED): `ow_connection_ended: oura, polar`. */
+export const OW_ENDED = 'ow_connection_ended';
+
+/** The vendors (provider ids) whose Open Wearables connection ended, as the last run named them. The
+ * other vendors of the same connection keep syncing, so the card names these and no Reconnect. */
+export function endedVendors(r: Pick<ConnectionRow, 'kind' | 'last_run_problem'>): string[] {
+	if (r.kind !== 'openwearables' || !r.last_run_problem?.startsWith(OW_ENDED + ': ')) return [];
+	return r.last_run_problem
+		.slice(OW_ENDED.length + 2)
+		.split(', ')
+		.filter((v) => /^[a-z0-9_]{1,40}$/.test(v));
+}
+
 /** A card's title. The provider directory is a source the app makes, so its title is in the reader's
  * language; every other connection keeps the label it was given. */
 export const cardTitle = (r: Pick<ConnectionRow, 'kind' | 'label'>, t: (k: string) => string): string =>

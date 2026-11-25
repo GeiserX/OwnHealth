@@ -146,6 +146,50 @@ pub fn break_glass_sweeper(rt: &Runtime, mut stop: watch::Receiver<bool>) -> Joi
     })
 }
 
+/// With imaging on: queues an `imaging.sweep` at the start (after a restore, it finds the recorded
+/// studies Orthanc lacks and queues their rebuild) and then every hour, so Orthanc holds only what the
+/// record names (slice 43). An enqueue that fails is tried again after a minute.
+pub fn imaging_sweeper(rt: &Runtime, stop: watch::Receiver<bool>) -> JoinHandle<()> {
+    imaging_sweeper_every(
+        rt,
+        stop,
+        std::time::Duration::from_secs(ownhealth_imaging::sweep::EVERY_SECONDS),
+        std::time::Duration::from_secs(SWEEP_ENQUEUE_RETRY_SECONDS),
+    )
+}
+
+/// How long the imaging sweeper waits before it tries again after it could not queue a sweep.
+pub const SWEEP_ENQUEUE_RETRY_SECONDS: u64 = 60;
+
+/// [`imaging_sweeper`], queueing a sweep every `period`, and `retry` after an enqueue that failed.
+pub fn imaging_sweeper_every(
+    rt: &Runtime,
+    mut stop: watch::Receiver<bool>,
+    period: std::time::Duration,
+    retry: std::time::Duration,
+) -> JoinHandle<()> {
+    let rt = rt.clone();
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(period);
+        loop {
+            tokio::select! {
+                _ = every.tick() => {
+                    let queued = async {
+                        let mut conn = rt.pool.acquire().await?;
+                        ownhealth_imaging::sweep::enqueue(&mut conn).await
+                    };
+                    if let Err(e) = queued.await {
+                        tracing::warn!(error = %e, "could not queue the imaging sweep; trying again soon");
+                        // the next tick comes after `retry`, then the period again
+                        every.reset_after(retry);
+                    }
+                }
+                _ = stop.changed() => return,
+            }
+        }
+    })
+}
+
 /// The wearable_sample partition job (`ownhealth_ops::partition`) an hour after the start and every
 /// hour after, until `stop`: past OWNHEALTH_PARTITION_ROWS it turns the table into monthly
 /// partitions, and then makes next month's partition ahead of time. Below the threshold a run reads
@@ -307,6 +351,9 @@ pub async fn start(rt: &Runtime) -> Result<Background, Error> {
     } else {
         Vec::new()
     };
+    if rt.settings.run_jobs && rt.settings.orthanc.is_some() {
+        workers.push(imaging_sweeper(rt, rx.clone()));
+    }
     workers.push(break_glass_sweeper(rt, rx.clone()));
     workers.push(spool_sweeper(rt, rx));
     Ok(Background { stop, workers })
@@ -337,6 +384,8 @@ pub async fn shutdown_signal() {
 
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     check_secret_key(&settings)?;
+    // the vendor profiles drive the connector token code: a bad file stops the start and names its line
+    ownhealth_core::connector_profiles::check().map_err(anyhow::Error::msg)?;
     // Imaging is on when OWNHEALTH_ORTHANC_URL is set (Settings reads it; a URL without a password
     // stops the start). The viewer proxy and the DICOM import job use the same Orthanc.
     let orthanc = settings.orthanc.clone();
