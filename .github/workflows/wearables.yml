@@ -2,10 +2,14 @@ name: Wearables
 
 on:
   pull_request:
+    # Every input of the poller: providers.yaml, the core crates, the CLI, migrations and the lock file.
     paths:
-      - 'server/crates/ownhealth-devices/**'
-      - '.github/workflows/wearables.yml'
       - '.github/scripts/wearables-*'
+      - '.github/workflows/wearables.yml'
+      - 'data/**'
+      - 'migrations/**'
+      - 'scripts/fetch-pdfium.sh'
+      - 'server/**'
   push:
     branches: [main]
   workflow_dispatch:
