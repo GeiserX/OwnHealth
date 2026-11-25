@@ -46,7 +46,7 @@ export interface ConnectionRow {
 	claim_count?: number;
 }
 
-export type ConnectionState = 'reconsent' | 'expired' | 'grant_soon' | 'off' | 'out' | 'partial' | 'stale' | 'nodata' | 'ok';
+export type ConnectionState = 'reconsent' | 'expired' | 'grant_soon' | 'off' | 'out' | 'partial' | 'stale' | 'nodata' | 'gap' | 'ok';
 export type StatusWord = 'ok' | 'watch' | 'out' | 'stale' | 'nodata' | 'off';
 
 const DAY = 86_400_000;
@@ -57,7 +57,7 @@ export function daysLeft(iso: string | null | undefined, now = new Date()): numb
 	return Math.ceil((new Date(iso).getTime() - now.getTime()) / DAY);
 }
 
-/** What one connection needs: consent again first, then the grant, then how its runs went. */
+/** What one connection needs: consent again first, then the grant, then how its runs went, then an open sync-gap alert. */
 export function connectionState(r: ConnectionRow, now = new Date()): ConnectionState {
 	if (r.reconsent_needed_at) return 'reconsent';
 	if (r.grant_expires_at) {
@@ -65,7 +65,9 @@ export function connectionState(r: ConnectionRow, now = new Date()): ConnectionS
 		if (left <= 0) return 'expired';
 		if (left <= GRANT_SOON_DAYS * DAY) return 'grant_soon';
 	}
-	return sourceStatus(r, now);
+	const s = sourceStatus(r, now);
+	// OwnHealth's own pulls work, but a device behind the connection stopped syncing (Open Wearables)
+	return s === 'ok' && (r.open_gaps ?? 0) > 0 ? 'gap' : s;
 }
 
 /** The status word each state shows (information, never advice: OK, Watch, Out, Stale, No data, Off as on the Inbox screen). */
@@ -77,6 +79,7 @@ export function statusWord(s: ConnectionState): StatusWord {
 			return 'out';
 		case 'grant_soon':
 		case 'partial':
+		case 'gap':
 			return 'watch';
 		case 'stale':
 			return 'stale';

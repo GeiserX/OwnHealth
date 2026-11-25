@@ -95,15 +95,22 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 
 	// an open sync-gap alert links to the review queue of Alex's profile, even with Sam's on screen
 	sql(
-		`insert into review_item (household_id, profile_id, kind, ref_table, ref_id, payload) select household_id, id, 'source_gap', 'source', '${source}', '{}' from profile where id = '${profile}'`
+		`insert into review_item (household_id, profile_id, kind, ref_table, ref_id, payload) select household_id, id, 'source_gap', 'source', '${source}', '{"message":{"en":"Sync has stopped for LabNorte. You can reconnect from Connections.","es":"Se ha interrumpido la sincronización de LabNorte. Puedes volver a conectar desde Conexiones."}}' from profile where id = '${profile}'`
 	);
 	await page.evaluate(() => localStorage.setItem('oh.profile', 'sam'));
 	await page.reload();
 	await expect(card).toContainText('1 sync gap alert is open.');
+	await expect(card.locator('.pill')).toHaveText('Watch'); // a sync gap is never shown as OK
 	await card.getByRole('link', { name: 'Open in review →' }).click();
 	await expect(page).toHaveURL(`${app}/import-review`);
-	await expect(page.getByText('Sync gap in a connection').first()).toBeVisible();
-	await page.goBack();
+	// the row says which connection stopped and what to do, and leads back to Connections
+	const gap = page.getByRole('row').filter({ hasText: 'Sync gap in a connection' });
+	await expect(gap).toContainText('Sync has stopped for LabNorte. You can reconnect from Connections.');
+	await expect(gap.getByRole('link', { name: 'Connections' })).toHaveAttribute('href', '/connections');
+	await page.goto('/import-review?lang=es');
+	await expect(page.getByRole('row').filter({ hasText: 'Hueco de sincronización en una conexión' })).toContainText(
+		'Se ha interrumpido la sincronización de LabNorte. Puedes volver a conectar desde Conexiones.'
+	);
 
 	// the same card in Spanish
 	await page.goto('/connections?lang=es');
@@ -112,8 +119,15 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await expect(card.getByRole('button', { name: 'Reconectar' })).toBeVisible();
 	await expect(card).toContainText('Historia clínica (SMART on FHIR)');
 
+	// a dismissed alert leaves the queue, and the card reads OK again
+	await page.goto('/import-review?lang=en');
+	await gap.getByRole('button', { name: 'Dismiss' }).click();
+	await expect(gap).toHaveCount(0);
+	expect(sql(`select status from review_item where kind = 'source_gap' and ref_id = '${source}'`)).toBe('dismissed');
+
 	// disconnect: the vendor revokes, the tokens go, the card says so
 	await page.goto('/connections?lang=en');
+	await expect(card.locator('.pill')).toHaveText('OK');
 	await card.getByRole('button', { name: 'Disconnect' }).click();
 	await card.getByRole('group').getByRole('button', { name: 'Disconnect' }).click();
 	await expect(card).toContainText('Hospital LabNorte is disconnected, and the vendor revoked the access.');

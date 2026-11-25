@@ -24,7 +24,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedKeys, unmappedSummary } from '#lib/logic/inbox';
+	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, syncGapMessage, unmappedKeys, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -620,6 +620,7 @@
 								{#if it.kind === 'imaging_study' && imagingAcceptable(it)}<div class="dim" style="font-size:11.5px">{t('i2_img_accept_d')}</div>{/if}
 								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t(unmappedKeys(unmappedSummary(it) ?? {}).note)}</div>{/if}
 								{#if it.kind === 'family_proposal'}<div class="dim" style="font-size:11.5px">{t('i2_fp_d')}</div>{/if}
+								{#if syncGapMessage(it, i18n.lang)}<div style="font-size:11.5px">{syncGapMessage(it, i18n.lang)}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
@@ -646,6 +647,9 @@
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
+							{:else if it.kind === 'source_gap'}
+								<a class="btn sm" href="/connections">{t('con_nav')}</a>
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if it.kind === 'family_proposal'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>

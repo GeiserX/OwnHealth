@@ -349,3 +349,12 @@ test('the Open Wearables stops read in English and Spanish', () => {
 	);
 	assert.equal(runWords('PermanentJobError: too_large: Open Wearables answers for one day passed the size limit', hasKey, sayIn('es')), 'Las respuestas de esta ejecución pasaron el límite de tamaño, así que el resto no se leyó.');
 });
+
+test('an open sync-gap alert turns a card that would read OK into Watch, never hides a worse state', () => {
+	assert.equal(connectionState(conn({ open_gaps: 1 }), NOW), 'gap');
+	assert.equal(statusWord('gap'), 'watch');
+	assert.equal(connectionState(conn({ open_gaps: 0 }), NOW), 'ok');
+	assert.equal(connectionState(conn({ open_gaps: 1, enabled: false }), NOW), 'off');
+	assert.equal(connectionState(conn({ open_gaps: 1, reconsent_needed_at: inDays(-0.1) }), NOW), 'reconsent');
+	assert.equal(connectionState(conn({ open_gaps: 1, consecutive_failures: 2, last_error_at: inDays(0), last_error: 'x' }), NOW), 'out');
+});

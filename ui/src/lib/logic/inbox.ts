@@ -514,6 +514,19 @@ export function nearDuplicateOf<T extends { kind: string; document_id: string | 
 }
 
 /**
+ * A sync-gap alert's text (source_gap): which connection stopped and what to do, written by the server
+ * in es and en. In the reader's language, else in English; empty for any other item or no text.
+ */
+export function syncGapMessage(item: { kind: string; payload: unknown }, lang: string): string {
+	if (item.kind !== 'source_gap') return '';
+	const message = (item.payload as { message?: unknown } | null)?.message;
+	if (!message || typeof message !== 'object') return '';
+	const texts = message as Record<string, unknown>;
+	const text = texts[lang] ?? texts.en;
+	return typeof text === 'string' ? text : '';
+}
+
+/**
  * A grouped item (fhir_unmapped_summary): the resource type, how many came, and the connection's or
  * the file's name. A C-CDA upload's item says `ccda`: `section` for a section's entries not read yet,
  * `narrative` for the sections that hold text only. Null for any other item, or when the payload does

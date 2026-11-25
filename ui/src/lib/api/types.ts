@@ -112,7 +112,8 @@ export interface ReviewItem {
 		| 'encrypted_document'
 		| 'fhir_unmapped_summary'
 		| 'family_proposal'
-		| 'imaging_study';
+		| 'imaging_study'
+		| 'source_gap';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
 	reasons: string[];
