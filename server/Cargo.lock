@@ -4073,6 +4073,7 @@ dependencies = [
  "ownhealth-normalize",
  "ownhealth-ops",
  "ownhealth-rules",
+ "p256",
  "proc-macro2",
  "regex",
  "reqwest",

@@ -48,6 +48,8 @@ anyhow.workspace = true
 flate2.workspace = true
 icalendar.workspace = true
 image.workspace = true
+# signs the SMART Health Cards a test link carries
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 proc-macro2 = "1"
 regex.workspace = true
 rxing.workspace = true
