@@ -765,7 +765,7 @@ async fn reconcile_gap(
     conn: &mut PgConnection,
     id: Uuid,
     checks: &HashMap<String, GapCheck>,
-    now: DateTime<Utc>,
+    clock: &Clock<'_>,
 ) -> Result<()> {
     // The source row serializes schedulers and health writers. Read the run and review rows in
     // separate statements after acquiring the lock so they include any writer we waited for.
@@ -780,6 +780,9 @@ async fn reconcile_gap(
     let Some(source) = source else {
         return Ok(());
     };
+    // The clock is read only now, so a poll that committed while this pass waited is judged at a time
+    // after it: a report's age is never measured from before the report.
+    let now = clock();
     // Passes can reach the row out of order. Every evaluation stamps the alert it keeps, so a pass whose
     // clock is older than the newest evaluation of this source leaves the alerts to that one.
     let newest: Option<DateTime<Utc>> = sqlx::query_scalar(
@@ -868,7 +871,10 @@ async fn reconcile_gap(
     Ok(())
 }
 
-async fn check_source_gaps(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<()> {
+/// A scheduler pass's clock for sync-gap checks.
+pub type Clock<'a> = dyn Fn() -> DateTime<Utc> + Send + Sync + 'a;
+
+async fn check_source_gaps(conn: &mut PgConnection, clock: &Clock<'_>) -> Result<()> {
     let checks = GAP_CHECKS.read().map(|m| m.clone()).unwrap_or_default();
     if checks.is_empty() {
         return Ok(());
@@ -879,7 +885,7 @@ async fn check_source_gaps(conn: &mut PgConnection, now: DateTime<Utc>) -> Resul
         .fetch_all(&mut *conn)
         .await?;
     for id in sources {
-        reconcile_gap(conn, id, &checks, now).await?;
+        reconcile_gap(conn, id, &checks, clock).await?;
     }
     Ok(())
 }
@@ -887,15 +893,21 @@ async fn check_source_gaps(conn: &mut PgConnection, now: DateTime<Utc>) -> Resul
 /// Queue due polls before reconciling sync-gap alerts and sweeping expired share files.
 /// Returns the jobs added.
 pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
-    scheduler_tick_at(ctx, Utc::now()).await
+    scheduler_tick_with_clock(ctx, &Utc::now).await
 }
 
 /// The scheduler pass with an explicit clock for sync-gap alerts.
 pub async fn scheduler_tick_at(ctx: &JobContext, now: DateTime<Utc>) -> Result<Vec<i64>> {
+    scheduler_tick_with_clock(ctx, &move || now).await
+}
+
+/// The scheduler pass with a clock of the caller's for sync-gap alerts. Each source's check reads it once
+/// it holds that source's row.
+pub async fn scheduler_tick_with_clock(ctx: &JobContext, clock: &Clock<'_>) -> Result<Vec<i64>> {
     add_default_sources(ctx).await?;
     let mut conn = ctx.pool.acquire().await?;
     let added = schedule_due(&mut conn).await?;
-    if let Err(error) = check_source_gaps(&mut conn, now).await {
+    if let Err(error) = check_source_gaps(&mut conn, clock).await {
         tracing::warn!(%error, "source sync-gap check failed");
     }
     sweep_link_files(&mut conn).await?;

@@ -1992,3 +1992,54 @@ async fn switching_a_source_off_and_on_before_a_gap_check_ends_the_episode() -> 
     );
     Ok(())
 }
+
+/// A poll can commit a new report while a gap check waits for the source row. The check reads its clock
+/// once it holds the row, so the age it judges belongs to the report it reads.
+#[tokio::test]
+async fn a_gap_check_reads_its_clock_once_it_holds_the_source() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let a = instant("2026-01-01T00:00:00Z");
+    let report = |synced: DateTime<Utc>| json!({"connections": {"polar": {"status": "active", "last_synced_at": synced, "observed_at": synced}}});
+    sqlx::query("update source set cursor = $2 where id = $1")
+        .bind(id)
+        .bind(report(a - Duration::hours(10)))
+        .execute(&env.ctx.pool)
+        .await?;
+    sources::scheduler_tick_at(&env.ctx, a + Duration::hours(11)).await?;
+    let open = open_gaps(&env, id).await?;
+    let [item] = open[..] else {
+        anyhow::bail!("one alert expected");
+    };
+    // The check starts at 19:59:59. A poll holding the row commits at 20:00:01 a report whose last sync
+    // was at 00:00: Polar is then 20 h and 1 s behind, past its window.
+    let clock = Mutex::new(a + Duration::hours(20) - Duration::seconds(1));
+    let mut poller = env.ctx.pool.begin().await?;
+    sqlx::query("select 1 from source where id = $1 for update")
+        .bind(id)
+        .execute(&mut *poller)
+        .await?;
+    let read = || *clock.lock().expect("clock");
+    let check = sources::scheduler_tick_with_clock(&env.ctx, &read);
+    let commit = async {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        sqlx::query("update source set cursor = $2 where id = $1")
+            .bind(id)
+            .bind(report(a))
+            .execute(&mut *poller)
+            .await?;
+        *clock.lock().expect("clock") = a + Duration::hours(20) + Duration::seconds(1);
+        poller.commit().await?;
+        anyhow::Ok(())
+    };
+    let (checked, polled) = tokio::join!(check, commit);
+    checked?;
+    polled?;
+    assert_eq!(
+        open_gaps(&env, id).await?,
+        [item],
+        "the check judged the new report by the clock it read before waiting"
+    );
+    Ok(())
+}
