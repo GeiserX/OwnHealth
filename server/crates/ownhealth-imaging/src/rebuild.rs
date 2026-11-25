@@ -10,8 +10,8 @@
 //! second disc can add series to a recorded study, so the first upload alone is not enough. A study
 //! recorded before that table names only its first upload; when one is still short after those
 //! replays, every upload of the profile from before that table (`links_complete` false) whose import
-//! is not queued or running, and that was not yet replayed for it, is read for its UID too, and each
-//! one that holds it is linked. A later upload is linked by its own import, so an unlinked one (its
+//! finished and that was not yet replayed for it is read for its UID too. Each one that holds it is
+//! linked. A later upload is linked by its own import, so an unlinked one (its
 //! import has not run yet) is never read for a study. An upload whose part of the study waits in
 //! review, or was dismissed or rejected there, sends nothing of it. It sends each file of the study
 //! under the one StudyInstanceUID lock every Orthanc writer takes
@@ -19,8 +19,8 @@
 //! Orthanc files a study by PatientID and UID, so the rebuilt study gets the id the record names; a
 //! file Orthanc files under another study is taken back at once, and so is one an earlier try left
 //! there (its take-back failed) when no record names that study. A retracted study is rebuilt too:
-//! its row stays, and so do its pixels. The record is not changed. An upload whose zip does not open
-//! (its profile's key was shredded) is counted and left out.
+//! its row stays, and so do its pixels. The record is not changed. A profile with a shredded key is
+//! left out. If an upload could not be read and a live study is still short, the job retries.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,9 +48,9 @@ fn this_run() -> &'static str {
 
 /// Queues a rebuild of `profile_id`'s studies, unless one is queued or running, or one that this run
 /// of the app queued finished in the last day and could not bring every study back (the sweep runs
-/// every hour: without this it would read the same zips again each time). A rebuild of an earlier run
-/// does not count: after a restart, and after a restore that brought its job back, Orthanc may be
-/// another one.
+/// every hour: without this it would read the same zips again each time). A rebuild that hits a
+/// retryable ZIP read failure while restoring a study stays out of this cooldown. A rebuild of an
+/// earlier app run does not count. Orthanc may have changed after a restart or restore.
 pub async fn enqueue(conn: &mut PgConnection, profile_id: Uuid) -> sqlx::Result<Option<i64>> {
     let key = format!("{JOB}:{profile_id}");
     let stuck: bool = sqlx::query_scalar(
@@ -107,6 +107,22 @@ pub(crate) fn covers(held: &BTreeMap<String, usize>, fhir: &Value) -> bool {
     })
 }
 
+/// Legacy uploads that finished the initial import, with no import running or queued for them.
+async fn legacy_uploads(ctx: &JobContext, profile_id: Option<Uuid>) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>, JobError> {
+    Ok(sqlx::query_as(
+        "select i.id, i.profile_id, i.zip_blob from imaging_import i where not i.links_complete \
+         and ($1::uuid is null or i.profile_id = $1) \
+         and exists (select 1 from job j where j.kind = $2 and j.state = 'done' \
+         and j.payload->>'import_id' = i.id::text and not (j.payload ? 'accept')) \
+         and not exists (select 1 from job j where j.kind = $2 and j.state in ('queued', 'running') \
+         and j.payload->>'import_id' = i.id::text) order by i.created_at, i.id",
+    )
+    .bind(profile_id)
+    .bind(crate::import::JOB)
+    .fetch_all(&ctx.pool)
+    .await?)
+}
+
 /// Runs one rebuild. Payload: `profile_id`.
 pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     let profile_id = job.uuid("profile_id")?;
@@ -157,8 +173,8 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     // 1234 copied `imaging_study.import_id`), so a series a later upload added is not replayed above.
     // When a study is still short, every upload of the profile from before that table is read for its
     // UID too (an upload replayed above for one study can hold an unlinked part of another), skipping
-    // the pairs already replayed and an upload whose import is queued or running, and each one that
-    // held it is linked to it. A later upload holds no study its import did not link.
+    // the pairs already replayed and uploads without a completed import. Each upload that held the
+    // study is linked to it. A later upload holds no study its import did not link.
     let mut short: BTreeSet<String> = BTreeSet::new();
     for (uid, (id, fhir)) in &needed {
         if !complete(&orthanc, id, fhir).await? {
@@ -166,16 +182,7 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         }
     }
     if !short.is_empty() {
-        let all: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
-            "select i.id, i.zip_blob from imaging_import i where i.profile_id = $1 and not i.links_complete \
-             and not exists (select 1 from job j where j.kind = $2 and j.state in ('queued', 'running') \
-             and j.payload->>'import_id' = i.id::text) order by i.created_at, i.id",
-        )
-        .bind(profile_id)
-        .bind(crate::import::JOB)
-        .fetch_all(&ctx.pool)
-        .await?;
-        for (import_id, zip) in all {
+        for (import_id, _, zip) in legacy_uploads(&ctx, Some(profile_id)).await? {
             let holds: BTreeSet<String> = match replayed.get(&import_id) {
                 Some(done) => short.difference(done).cloned().collect(),
                 None => short.clone(),
@@ -200,6 +207,22 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
             missing += 1;
         }
     }
+    if let Some(error) = tally.read_failure
+        && missing > 0
+    {
+        // The profile may have been deleted or its key shredded since the first query.
+        // The next sweep removes any pixels it no longer names.
+        let live: bool = sqlx::query_scalar(
+            "select exists (select 1 from profile p where p.id = $1 and not exists \
+             (select 1 from profile_key k where k.profile_id = p.id and k.wrapped_dek is null))",
+        )
+        .bind(profile_id)
+        .fetch_one(&ctx.pool)
+        .await?;
+        if live {
+            return Err(error);
+        }
+    }
     Ok(Some(json!({
         "studies": needed.len(),
         "rebuilt": rebuilt,
@@ -213,24 +236,16 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
 }
 
 /// For the sweep: gives each upload from before `imaging_import_study` (`links_complete` false) whose
-/// import is not queued or running the links its import would have made, then marks its links
+/// initial import finished the links its import would have made, then marks its links
 /// complete, so its removal follows the rules of a later upload. Its zip is read for the studies it
 /// holds, and each one its profile records is linked, unless the upload's part of it waits in review
 /// or was dismissed or rejected there (the import did not record that part). It runs under the UID
-/// lock of each of those studies, so a study being recorded right now is counted. An upload whose zip
-/// does not open keeps its flag and is tried again at the next sweep. The number of uploads it
-/// completed.
+/// lock of each of those studies, so a study being recorded right now is counted. If the ZIP or an
+/// entry cannot be read, the links stay incomplete and the next sweep retries. Returns the number
+/// of completed uploads.
 pub(crate) async fn complete_links(ctx: &JobContext) -> Result<usize, JobError> {
-    let legacy: Vec<(Uuid, Uuid, Vec<u8>)> = sqlx::query_as(
-        "select i.id, i.profile_id, i.zip_blob from imaging_import i where not i.links_complete \
-         and not exists (select 1 from job j where j.kind = $1 and j.state in ('queued', 'running') \
-         and j.payload->>'import_id' = i.id::text) order by i.created_at, i.id",
-    )
-    .bind(crate::import::JOB)
-    .fetch_all(&ctx.pool)
-    .await?;
     let mut completed = 0;
-    for (import_id, profile_id, zip) in legacy {
+    for (import_id, profile_id, zip) in legacy_uploads(ctx, None).await? {
         let scan = match StudyFiles::open(&ctx.blobs, BlobOwner::Profile(profile_id), &hex::encode(&zip)).await {
             Ok((_, scan)) => scan,
             Err(e) => {
@@ -238,6 +253,10 @@ pub(crate) async fn complete_links(ctx: &JobContext) -> Result<usize, JobError> 
                 continue;
             }
         };
+        if scan.unreadable_entries > 0 {
+            tracing::warn!(%import_id, unreadable_entries = scan.unreadable_entries, "an imaging upload could not be read in full");
+            continue;
+        }
         let uids: Vec<String> = scan.studies.keys().cloned().collect();
         let mut tx = ctx.pool.begin().await?;
         for uid in &uids {
@@ -281,6 +300,7 @@ pub(crate) async fn complete_links(ctx: &JobContext) -> Result<usize, JobError> 
 #[derive(Default)]
 struct Tally {
     unreadable: usize,
+    read_failure: Option<JobError>,
     sent: usize,
     refused: usize,
     misfiled: usize,
@@ -313,9 +333,16 @@ async fn replay(
         Err(e) => {
             tracing::warn!(%import_id, error = %e, "an imaging upload does not open: the rebuild leaves it out");
             t.unreadable += 1;
+            if !e.permanent {
+                t.read_failure.get_or_insert(e);
+            }
             return Ok(());
         }
     };
+    if scan.unreadable_entries > 0 {
+        t.read_failure
+            .get_or_insert_with(|| JobError::retry("an imaging upload could not be read in full"));
+    }
     for (uid, study) in scan.studies.iter().filter(|(uid, _)| holds.contains(*uid)) {
         let Some((id, _)) = needed.get(uid) else {
             continue;
@@ -358,6 +385,8 @@ async fn replay(
         let mut kept = 0;
         for instance in &study.entries {
             let Some(staged) = files.stage_instance(instance.index).await? else {
+                t.read_failure
+                    .get_or_insert_with(|| JobError::retry("an imaging upload instance could not be read"));
                 continue;
             };
             match orthanc.store_file(staged.file, staged.size).await.map_err(retry)? {

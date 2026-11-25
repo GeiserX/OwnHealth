@@ -158,6 +158,8 @@ pub struct Scan {
     pub not_dicom: usize,
     pub directories: usize,
     pub damaged: usize,
+    /// Entries whose ZIP data could not be read far enough to identify the study.
+    pub(crate) unreadable_entries: usize,
     pub too_large: usize,
     pub studies: BTreeMap<String, StudyScan>,
 }
@@ -185,7 +187,10 @@ pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
 }
 
 fn open_archive(reader: BlobReader) -> Result<zip::ZipArchive<BlobReader>, JobError> {
-    zip::ZipArchive::new(reader).map_err(|e| JobError::permanent(format!("the upload is not a zip that reads: {e}")))
+    zip::ZipArchive::new(reader).map_err(|e| match e {
+        zip::result::ZipError::Io(_) => JobError::retry(format!("the upload zip could not be read: {e}")),
+        _ => JobError::permanent(format!("the upload is not a zip that reads: {e}")),
+    })
 }
 
 fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError> {
@@ -203,6 +208,7 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
             Err(_) => {
                 s.files += 1;
                 s.damaged += 1;
+                s.unreadable_entries += 1;
                 continue;
             }
         };
@@ -216,6 +222,7 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
         }
         let Ok(mut head) = read_entry(zip, i, HEAD_BYTES) else {
             s.damaged += 1;
+            s.unreadable_entries += 1;
             continue;
         };
         if !is_part10(&head) {
@@ -229,6 +236,7 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
                 Ok(more) => head = more,
                 Err(_) => {
                     s.damaged += 1;
+                    s.unreadable_entries += 1;
                     continue;
                 }
             }
@@ -260,14 +268,19 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
 /// of the original bytes before any study is sent.
 fn entry_hash(zip: &mut zip::ZipArchive<BlobReader>, index: usize) -> Result<[u8; 32], JobError> {
     let unreadable = || JobError::permanent("a duplicate DICOM entry could not be read");
-    let entry = zip.by_index(index).map_err(|_| unreadable())?;
+    let entry = zip.by_index(index).map_err(|error| match error {
+        zip::result::ZipError::Io(e) => JobError::retry(format!("a duplicate DICOM entry could not be read: {e}")),
+        _ => unreadable(),
+    })?;
     let expected = entry.size();
     let mut entry = entry.take(MAX_FILE_BYTES + 1);
     let mut digest = Sha256::new();
     let mut count = 0;
     let mut buf = [0; FILE_CHUNK];
     loop {
-        let n = entry.read(&mut buf).map_err(|_| unreadable())?;
+        let n = entry
+            .read(&mut buf)
+            .map_err(|e| JobError::retry(format!("a duplicate DICOM entry could not be read: {e}")))?;
         if n == 0 {
             break;
         }

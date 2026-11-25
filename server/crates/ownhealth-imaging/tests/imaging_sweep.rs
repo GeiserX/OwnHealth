@@ -912,6 +912,35 @@ async fn a_rebuild_that_stopped_short_before_a_restore_does_not_hold_back_the_ne
 }
 
 #[tokio::test]
+async fn a_rebuild_retries_when_the_stored_zip_returns() -> R {
+    let e = env().await?;
+    let files = study_files(&Study::new(U1, ALEX), "DICOM");
+    let (_, sha) = e.upload("alex", &files).await?;
+    e.import().await?;
+    e.orthanc.wipe();
+    let owner = BlobOwner::Profile(e.fam.profile("alex"));
+    assert!(e.rt.blobs.delete(owner, &sha)?);
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuilds_queued"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, result) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "queued", "{result}");
+
+    assert_eq!(e.rt.blobs.put_bytes(owner, &zip_files(&files))?, sha);
+    sqlx::query("update job set run_after = now() where kind = $1 and state = 'queued'")
+        .bind(rebuild::JOB)
+        .execute(&e.rt.pool)
+        .await?;
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, result) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{result}");
+    assert_eq!(result["rebuilt"], 1, "{result}");
+    assert_eq!(result["missing"], 0, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_reupload_of_the_same_zip_racing_the_removal_keeps_the_upload_and_its_zip() -> R {
     let e = env().await?;
     let alex = e.fam.profile("alex");
@@ -1057,14 +1086,10 @@ async fn a_study_recorded_before_the_upload_links_rebuilds_from_every_upload_tha
         "select count(*) from imaging_import_study where study_instance_uid = '{U1}' and import_id = '{}'",
         later.import_id
     );
-    assert_eq!(e.count(&link).await?, 0);
-
     e.orthanc.wipe();
-    let swept = e.sweep().await?;
-    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
-    assert_eq!(e.run(rebuild::JOB).await?, 1);
-    let (state, rebuilt) = e.result(rebuild::JOB).await?;
-    assert_eq!(state, "done", "{rebuilt}");
+    assert_eq!(e.count(&link).await?, 0);
+    let rebuilt = rebuild_alex(&e).await?;
+    assert_eq!(rebuilt["linked_uploads"], 1, "{rebuilt}");
     assert_eq!(
         (rebuilt["rebuilt"].clone(), rebuilt["missing"].clone()),
         (1.into(), 0.into()),
@@ -1091,6 +1116,17 @@ async fn links(e: &Env, import_id: Uuid, uid: &str) -> anyhow::Result<i64> {
         "select count(*) from imaging_import_study where study_instance_uid = '{uid}' and import_id = '{import_id}'"
     ))
     .await
+}
+
+/// Runs a rebuild for Alex without first giving the legacy uploads their links in the sweep.
+async fn rebuild_alex(e: &Env) -> anyhow::Result<Value> {
+    let mut conn = e.rt.pool.acquire().await?;
+    assert!(rebuild::enqueue(&mut conn, e.fam.profile("alex")).await?.is_some());
+    drop(conn);
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    Ok(rebuilt)
 }
 
 /// Queues a sweep and runs the rebuild it queues for Alex: the rebuild's result.
@@ -1127,7 +1163,9 @@ async fn an_upload_replayed_for_one_study_is_read_again_for_another_study_it_hol
     assert_eq!(links(&e, x.import_id, U1).await?, 1);
 
     e.orthanc.wipe();
-    let rebuilt = sweep_and_rebuild(&e).await?;
+    assert_eq!(links(&e, x.import_id, U2).await?, 0);
+    let rebuilt = rebuild_alex(&e).await?;
+    assert_eq!(rebuilt["linked_uploads"], 1, "{rebuilt}");
     assert_eq!(
         (rebuilt["rebuilt"].clone(), rebuilt["missing"].clone()),
         (2.into(), 0.into()),
@@ -1136,6 +1174,46 @@ async fn an_upload_replayed_for_one_study_is_read_again_for_another_study_it_hol
     assert_eq!(e.orthanc.series_under(U2), (0..3).map(|s| b.series_uid(s)).collect());
     assert_eq!(e.orthanc.instances_under(U1), 6);
     assert_eq!(links(&e, x.import_id, U2).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_legacy_upload_whose_initial_import_failed_is_neither_replayed_nor_linked() -> R {
+    let e = env().await?;
+    let four = Study {
+        series: 4,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&four, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (later, _) = e.upload("alex", &series_files(&four, &[2], "DICOM")).await?;
+    e.import().await?;
+    let (failed, _) = e.upload("alex", &series_files(&four, &[3], "DICOM")).await?;
+    sqlx::query("update job set state = 'dead', finished_at = now() where id = $1")
+        .bind(failed.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    as_before_the_links(&e, &[later.import_id, failed.import_id]).await?;
+
+    e.orthanc.wipe();
+    let rebuilt = rebuild_alex(&e).await?;
+    assert_eq!(rebuilt["rebuilt"], 1, "{rebuilt}");
+    let replayed = e.orthanc.series_under(U1);
+    let fallback_link = links(&e, failed.import_id, U1).await?;
+    sqlx::query("delete from imaging_import_study where import_id = $1")
+        .bind(failed.import_id)
+        .execute(&e.rt.pool)
+        .await?;
+
+    e.sweep().await?;
+    let sweep_link = links(&e, failed.import_id, U1).await?;
+    assert_eq!(
+        (fallback_link, sweep_link),
+        (0, 0),
+        "rebuild and sweep links to a failed import"
+    );
+    assert_eq!(replayed, (0..3).map(|s| four.series_uid(s)).collect());
+    assert_eq!(links(&e, later.import_id, U1).await?, 1);
     Ok(())
 }
 
@@ -1183,6 +1261,11 @@ async fn a_rebuild_leaves_out_an_upload_whose_part_of_the_study_waits_in_review(
     );
     assert_eq!(links(&e, held.import_id, U1).await?, 0);
     assert_eq!(e.in_review("alex").await?.len(), 1);
+    assert_eq!(
+        e.sweep().await?["rebuilds_queued"],
+        0,
+        "the held part cannot be rebuilt"
+    );
 
     // dismissed, the held part stays out too: the person said it is not this study's
     let mut tx = e.rt.pool.begin().await?;
@@ -1469,6 +1552,56 @@ async fn the_sweep_links_an_upload_from_before_the_links_so_one_with_no_recorded
     assert_eq!(e.count(open).await?, 0);
     // nothing left to read at the next sweep
     assert_eq!(e.sweep().await?["links_completed"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_sweep_retries_legacy_links_after_a_zip_entry_fails_to_read() -> R {
+    use std::io::{Cursor, Read};
+
+    let e = env().await?;
+    let study = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&study, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let mut extra = series_files(&study, &[2], "DICOM");
+    extra.truncate(1);
+    let (later, sha) = e.upload("alex", &extra).await?;
+    e.import().await?;
+    as_before_the_links(&e, &[later.import_id]).await?;
+
+    let mut zip = zip_files(&extra);
+    let header = zip
+        .windows(4)
+        .rposition(|bytes| bytes == b"PK\x01\x02")
+        .ok_or_else(|| anyhow::anyhow!("no ZIP central directory"))?;
+    zip[header + 16] ^= 1; // the image entry's central directory CRC
+    let mut archive = zip::ZipArchive::new(Cursor::new(&zip))?;
+    assert!(archive.by_index(1)?.read_to_end(&mut Vec::new()).is_err());
+    let owner = BlobOwner::Profile(e.fam.profile("alex"));
+    let damaged = e.rt.blobs.put_bytes(owner, &zip)?;
+    let point_to = "update imaging_import set zip_blob = $2 where id = $1";
+    sqlx::query(point_to)
+        .bind(later.import_id)
+        .bind(hex::decode(damaged)?)
+        .execute(&e.rt.pool)
+        .await?;
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["links_completed"], 1, "{swept}");
+    assert_eq!(links(&e, later.import_id, U1).await?, 0);
+    assert_eq!(remove_now(&e, later.import_id).await?, Removal::Recorded);
+
+    sqlx::query(point_to)
+        .bind(later.import_id)
+        .bind(hex::decode(sha)?)
+        .execute(&e.rt.pool)
+        .await?;
+    assert_eq!(e.sweep().await?["links_completed"], 1);
+    assert_eq!(links(&e, later.import_id, U1).await?, 1);
+    assert_eq!(remove_now(&e, later.import_id).await?, Removal::Recorded);
     Ok(())
 }
 
