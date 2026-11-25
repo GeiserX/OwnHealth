@@ -1460,7 +1460,7 @@ impl Drop for Container {
 fn caddy(image: &str, callback: Option<&str>) -> anyhow::Result<(Container, String)> {
     let name = format!("oh-share-block-{}", uuid::Uuid::new_v4().simple());
     let caddyfile = std::fs::read_to_string(root().join("deploy/Caddyfile"))?
-        + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
+        + "\nhttp://:8080 {\n\theader X-Upstream-URI {uri}\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
     let mut create = Command::new("docker");
     create.args(["create", "--name", &name, "--add-host", "app:127.0.0.1"]);
     create.args([
@@ -1691,14 +1691,27 @@ fn the_public_wearables_callback_needs_the_literal_true_switch() -> R {
                 assert_eq!(code, 404, "{value:?} {path}: {body}");
             }
         }
-        // Withings probes its callback with HEAD when it is registered; only the callback answers it
-        let (code, head) = fetch(&addr, "HEAD", callback)?;
+        // Test the raw path as well as the registered callback. HEAD has no body to echo the URI.
+        let probe = "/ow/api/v1/oauth/withings/callback";
         let want = if value == Some("true") { 200 } else { 404 };
-        assert_eq!(code, want, "{value:?} HEAD {callback}: {head}");
+        for path in [probe.to_owned(), format!("/login/..{probe}?check=1")] {
+            let (code, head) = fetch(&addr, "HEAD", &path)?;
+            assert_eq!(code, want, "{value:?} HEAD {path}: {head}");
+            if value == Some("true") {
+                let uri = head.lines().find_map(|line| {
+                    let (header, value) = line.split_once(':')?;
+                    header.eq_ignore_ascii_case("X-Upstream-URI").then(|| value.trim())
+                });
+                assert_eq!(uri, Some(path.strip_prefix("/login/..").unwrap_or(&path)), "{head}");
+            }
+        }
         for (method, path) in [
             ("HEAD", success),
             ("HEAD", error),
             ("HEAD", "/ow/api/v1/oauth/strava/callback"),
+            ("HEAD", "/ow/api/v1/oauth/withings/authorize"),
+            ("HEAD", "/ow/api/v1/users"),
+            ("HEAD", "/api/me"),
             ("POST", callback),
             ("OPTIONS", success),
             ("GET", "/ow/api/v1/oauth/strava/callback"),

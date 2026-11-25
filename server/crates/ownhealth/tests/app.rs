@@ -355,9 +355,10 @@ async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R 
                     [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
                     "<script>alert(1)</script>",
                 )
-            }),
+            })
+            .head(|| async { StatusCode::NO_CONTENT }),
         )
-        .route("/api/v1/users", on_get(|| async { "private upstream route" }));
+        .fallback(|| async { StatusCode::IM_A_TEAPOT });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
     let task = tokio::spawn(async move { axum::serve(listener, fake).await });
@@ -422,15 +423,12 @@ async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R 
             .to_str()?
             .starts_with("sandbox;")
     );
-    // Withings' registration probe: an empty 200 on an allowed callback, answered here. The fake's
-    // WHOOP, Oura and Polar callbacks answer a forwarded request with 400 or a refused redirect.
-    for provider in ["withings", "whoop", "oura", "polar"] {
-        let head = Request::head(format!("/ow/api/v1/oauth/{provider}/callback")).body(Body::empty())?;
-        let (status, body, cache) = call(&app, head).await?;
-        assert_eq!(status, StatusCode::OK, "{provider}");
-        assert!(body.is_empty(), "{provider}");
-        assert_eq!(cache.as_deref(), Some("no-store"));
-    }
+    // The fake returns a distinct status for HEAD so a local 200 or a forwarded GET fails.
+    let head = Request::head("/ow/api/v1/oauth/withings/callback").body(Body::empty())?;
+    let (status, body, cache) = call(&app, head).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    assert_eq!(cache.as_deref(), Some("no-store"));
     // HEAD stays refused everywhere else
     for (path, want) in [
         (

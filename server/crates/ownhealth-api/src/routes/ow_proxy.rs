@@ -87,8 +87,7 @@ async fn forward(upstream: Option<Upstream>, method: Method, uri: Uri) -> Respon
     if provider.is_none() && !matches!(path, SUCCESS | ERROR) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // Withings sends HEAD to the callback when it is registered (OW 0.11 answers it in oauth.py).
-    // The probe carries no code or state, so it is answered here and never reaches the sidecar.
+    // Open Wearables has a dedicated HEAD handler for callback reachability probes.
     let probe = method == Method::HEAD && provider.is_some();
     if method != Method::GET && !probe {
         let allow = if provider.is_some() { "GET, HEAD" } else { "GET" };
@@ -97,22 +96,20 @@ async fn forward(upstream: Option<Upstream>, method: Method, uri: Uri) -> Respon
     let Some(upstream) = upstream else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if probe {
-        return StatusCode::OK.into_response();
-    }
     let url = upstream.url(path, uri.query());
     if provider.is_none() && !result_allowed(&url, None) {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    // Only the callback query comes from the browser. OW sees a fresh GET with no caller headers
-    // or body. Do not log reqwest errors, which can contain the authorization code and state.
-    let Ok(mut res) = upstream.client.get(url).send().await else {
+    // OW sees a fresh request with no caller headers or body. Do not log reqwest errors,
+    // which can contain the authorization code and state.
+    let Ok(mut res) = upstream.client.request(method, url).send().await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
     if res.status().is_redirection() {
         // OW 0.11 answers 303 with an unprefixed result path. Never follow or relay another target.
-        if res.status() == StatusCode::SEE_OTHER
+        if !probe
+            && res.status() == StatusCode::SEE_OTHER
             && let Some(provider) = provider
             && let Some(location) = res.headers().get(header::LOCATION)
             && let Some(location) = result_location(&upstream, provider, location)
@@ -120,6 +117,10 @@ async fn forward(upstream: Option<Upstream>, method: Method, uri: Uri) -> Respon
             return (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response();
         }
         return StatusCode::BAD_GATEWAY.into_response();
+    }
+
+    if probe {
+        return res.status().into_response();
     }
 
     // The pinned sidecar's result pages are JSON. Treat any other response type as plain text.
