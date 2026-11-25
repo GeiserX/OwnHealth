@@ -577,7 +577,7 @@ Sources: https://github.com/medplum/medplum https://www.medplum.com/docs/self-ho
 
 ### 6.4 Wearable volume
 
-At full resolution an Apple Watch export holds about 5k to 30k samples per person per day (estimate, not measured). A family of four over 10 years is 70M to 400M rows. v0.1 uses one `wearable_sample` table. Once it passes about 50M rows, a migration converts it to monthly range partitions on `t` with a BRIN index; the job loop creates next month's partition ahead of time. MCP tools and charts read `wearable_rollup` by default and fetch raw samples only for a bounded window.
+At full resolution an Apple Watch export holds about 5k to 30k samples per person per day (estimate, not measured). A family of four over 10 years is 70M to 400M rows. v0.1 uses one `wearable_sample` table. Once it holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50M), a job, never a migration, converts it to monthly range partitions on `t` (`ownhealth partition`, ownhealth-ops `partition.rs`). The old table becomes the partition of everything before a cutoff through ATTACH, with no row copied; a DEFAULT partition takes what no month holds; BRIN on `t` and a btree on `document_id` serve the time windows and retractions; each later run creates next month's partition ahead of time. A migration that touches `wearable_sample` must work on both forms: a unique index must include `t`, and `create index concurrently` is not available on the partitioned form. MCP tools and charts read `wearable_rollup` by default and fetch raw samples only for a bounded window.
 
 ## 7. Blob store
 

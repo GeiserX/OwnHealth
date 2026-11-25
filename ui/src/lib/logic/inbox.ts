@@ -514,18 +514,35 @@ export function nearDuplicateOf<T extends { kind: string; document_id: string | 
 }
 
 /**
- * A connector pull's grouped item (fhir_unmapped_summary): the resource type, how many came, and the
- * connection's name. Null for any other item, or when the payload does not say a type and a count.
+ * A grouped item (fhir_unmapped_summary): the resource type, how many came, and the connection's or
+ * the file's name. A C-CDA upload's item says `ccda`: `section` for a section's entries not read yet,
+ * `narrative` for the sections that hold text only. Null for any other item, or when the payload does
+ * not say a type and a count.
  */
-export function unmappedSummary(item: { kind: string; payload: Record<string, unknown> }): { type: string; count: number; source: string } | null {
+export function unmappedSummary(item: { kind: string; payload: Record<string, unknown> }): { type: string; count: number; source: string; ccda?: 'section' | 'narrative' } | null {
 	if (item.kind !== 'fhir_unmapped_summary') return null;
 	const p = item.payload;
 	const type = typeof p.resource_type === 'string' ? p.resource_type : '';
 	const count = typeof p.count === 'number' && Number.isInteger(p.count) && p.count > 0 ? p.count : 0;
 	if (!type || !count) return null;
-	const label = (p.source as { label?: unknown } | null | undefined)?.label;
-	return { type, count, source: typeof label === 'string' ? label : '' };
+	const src = p.source as { label?: unknown; kind?: unknown } | null | undefined;
+	const label = src?.label;
+	const ccda = src?.kind === 'ccda' ? { ccda: type === CCDA_NARRATIVE ? ('narrative' as const) : ('section' as const) } : {};
+	return { type, count, source: typeof label === 'string' ? label : '', ...ccda };
 }
+
+/**
+ * The dict keys of a grouped item's line, its note and its file link. A connector pull's item speaks
+ * of a downloaded bundle of resources; a C-CDA upload's of the file the person uploaded, and counts
+ * entries or sections, not resources.
+ */
+export function unmappedKeys(s: { ccda?: 'section' | 'narrative' }): { title: string; note: string; open: string } {
+	if (!s.ccda) return { title: 'i2_fus_t', note: 'i2_fus_d', open: 'i2_fus_open' };
+	return { title: s.ccda === 'narrative' ? 'i2_fus_ccda_narrative_t' : 'i2_fus_ccda_t', note: 'i2_fus_ccda_d', open: 'i2_fus_ccda_open' };
+}
+
+/** The `resource_type` of the C-CDA item that lists the sections holding text only (server `ccda::NARRATIVE`). */
+export const CCDA_NARRATIVE = 'C-CDA narrative section';
 
 /** The review kinds a FHIR import leaves in the queue: one per resource from a file, and a pull's grouped item. */
 export const FHIR_ITEM_KINDS = ['fhir_unmapped', 'fhir_unmapped_summary'];

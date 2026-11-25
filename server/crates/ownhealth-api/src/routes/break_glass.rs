@@ -13,7 +13,7 @@
 //! GET    /api/break-glass                                           the profiles that named them
 //! POST   /api/break-glass/requests                      + step-up   {profile, reason}
 //! anyone logged in
-//! GET    /api/notifications                                         {items, uses, unread}; each names the contact
+//! GET    /api/notifications                                         {items, uses, ice, unread}; each names the contact
 //! POST   /api/notifications/read                                    {ids?} -> {read}
 //! ```
 //!
@@ -506,6 +506,15 @@ struct UsesRow {
     contact: Value,
 }
 
+/// The opens of one profile's emergency card (`ice.access`, which carries no request), counted.
+#[derive(Deserialize)]
+struct IceRow {
+    count: i64,
+    unread: i64,
+    last_at: DateTime<Utc>,
+    profile: Value,
+}
+
 /// One listed notice, as the statement aggregates it.
 #[derive(Deserialize)]
 struct ListedRow {
@@ -525,17 +534,22 @@ struct ListedRow {
 
 /// The caller's unread count, the use counts and the listed notices, as one row of one statement (one
 /// snapshot), each part once.
-type Notices = (i64, sqlx::types::Json<Vec<UsesRow>>, sqlx::types::Json<Vec<ListedRow>>);
+type Notices = (
+    i64,
+    sqlx::types::Json<Vec<UsesRow>>,
+    sqlx::types::Json<Vec<IceRow>>,
+    sqlx::types::Json<Vec<ListedRow>>,
+);
 
 async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
     let user = caller.0.user_id.ok_or_else(ApiError::unauthenticated)?;
     let mut tx = rt.pool.begin().await?;
-    let (unread, uses, listed): Notices = sqlx::query_as(
+    let (unread, uses, ice, listed): Notices = sqlx::query_as(
         "with visible as (
              (select id from notification_outbox where user_id = $1 order by created_at desc, id limit 200)
              union
              select id from notification_outbox where user_id = $1 and read_at is null
-             and kind <> 'break_glass.use'
+             and kind not in ('break_glass.use', 'ice.access')
          ),
          unread as (select count(*) as n from notification_outbox where user_id = $1 and read_at is null),
          counted as (
@@ -554,6 +568,21 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
              where u.unread > 0 or u.request_id in
                    (select n.request_id from visible v join notification_outbox n on n.id = v.id)
          ),
+         ice_counted as (
+             select profile_id, count(*) as n, count(*) filter (where read_at is null) as unread,
+                    max(created_at) as last_at
+             from notification_outbox where user_id = $1 and kind = 'ice.access' group by profile_id
+         ),
+         ice as (
+             select coalesce(json_agg(json_build_object(
+                        'count', i.n, 'unread', i.unread, 'last_at', i.last_at,
+                        'profile', json_build_object('id', p.id, 'slug', p.slug, 'display_name', p.display_name))
+                    order by i.last_at desc, p.id), '[]'::json) as j
+             from ice_counted i join profile p on p.id = i.profile_id
+             where i.unread > 0 or i.profile_id in
+                   (select n.profile_id from visible v join notification_outbox n on n.id = v.id
+                    where n.kind = 'ice.access')
+         ),
          listed as (
              select coalesce(json_agg(json_build_object(
                         'id', n.id, 'kind', n.kind, 'profile_id', p.id, 'slug', p.slug,
@@ -566,7 +595,7 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
              left join break_glass_request r on r.id = n.request_id
              left join app_user c on c.id = r.contact_user_id
          )
-         select u.n, us.j, l.j from unread u cross join uses us cross join listed l",
+         select u.n, us.j, ic.j, l.j from unread u cross join uses us cross join ice ic cross join listed l",
     )
     .bind(user)
     .fetch_one(&mut *tx)
@@ -577,6 +606,14 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
         .map(|u| {
             json!({"request_id": u.request_id, "profile": u.profile, "contact": u.contact, "count": u.count,
                "unread": u.unread, "last_at": pydantic_datetime_utc(&u.last_at)})
+        })
+        .collect();
+    let ice: Vec<Value> = ice
+        .0
+        .iter()
+        .map(|i| {
+            json!({"profile": i.profile, "count": i.count, "unread": i.unread,
+                   "last_at": pydantic_datetime_utc(&i.last_at)})
         })
         .collect();
     audit_read(&mut tx, &caller, "break_glass.notices", "notification_outbox", None).await?;
@@ -594,7 +631,7 @@ async fn notices(State(rt): State<Runtime>, caller: Caller) -> R {
                    "created_at": pydantic_datetime_utc(&n.created_at), "read_at": ts(&n.read_at)})
         })
         .collect();
-    ok(json!({"items": items, "uses": uses, "unread": unread}))
+    ok(json!({"items": items, "uses": uses, "ice": ice, "unread": unread}))
 }
 
 #[derive(Deserialize)]

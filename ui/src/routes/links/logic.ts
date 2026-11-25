@@ -1,12 +1,23 @@
 // The share-links page (/links): who may share a profile, what a link carries, the words for its
 // state and its access log, and the QR drawing. Pure, so tests/links.test.ts runs it under node.
-import type { Role, ShlAccess, ShlCategory, ShlLink } from '#lib/api/types';
+import type { ProfileSummary, Role, ShlAccess, ShlCategory, ShlLink } from '#lib/api/types';
 
 /** The roles routes/shl.rs lets share (`ROLES`). A break-glass grant is refused there too. */
 export const SHARER_ROLES: readonly Role[] = ['owner', 'guardian'];
 
 /** Whether this grant may share the profile: owner or guardian, and not a break-glass grant. */
 export const mayShare = (role: Role | null | undefined, breakGlass?: boolean | null): boolean => !!role && SHARER_ROLES.includes(role) && !breakGlass;
+
+export const shareLinksHref = (profileId: string): string => `/links?profile=${encodeURIComponent(profileId)}`;
+
+export function profileForLinks(
+	profileId: string | null,
+	profiles: readonly Pick<ProfileSummary, 'id' | 'slug' | 'role' | 'break_glass'>[],
+	current: string | null
+): string | null {
+	const target = profiles.find((p) => p.id === profileId && mayShare(p.role, p.break_glass));
+	return target?.slug ?? current;
+}
 
 /** Whether the views menu shows Share links: at least one profile this person may share. */
 export const sharesAny = (profiles: readonly { role: Role; break_glass?: boolean }[] | null | undefined): boolean =>

@@ -1,0 +1,32 @@
+OwnHealth
+Copyright the OwnHealth contributors. Licensed under the GNU Affero General Public License,
+version 3 or later (see LICENSE).
+
+This product includes software derived from Medplum (https://github.com/medplum/medplum):
+the C-CDA to FHIR mapping in server/crates/ownhealth-ingest-structured/src/ccda/ is a Rust port of
+packages/ccda/src/ccda-to-fhir.ts. Medplum is licensed under the Apache License, Version 2.0; its
+full text is in LICENSES/Apache-2.0.txt (also at http://www.apache.org/licenses/LICENSE-2.0). Its
+NOTICE file reads:
+
+    Medplum
+    Copyright 2020–2025 Orangebot, Inc. and Medplum contributors
+
+    This product includes software developed by Orangebot, Inc. and
+    other contributors under the Apache License, Version 2.0.
+
+    "Medplum" is a registered trademark of Orangebot, Inc.
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at:
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+The test fixtures in fixtures/ccda/ are copies of HL7 C-CDA-Examples samples
+(https://github.com/HL7/C-CDA-Examples), published by HL7 under CC0 1.0 Universal.

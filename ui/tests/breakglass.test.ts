@@ -14,7 +14,7 @@ import {
 	unreadGroups,
 	type NoticeView
 } from '../src/lib/logic/breakglass.ts';
-import type { Notice, NoticeUses, Notices } from '../src/lib/api/types.ts';
+import type { Notice, NoticeIce, NoticeUses, Notices } from '../src/lib/api/types.ts';
 
 const now = new Date('2026-11-24T12:00:00Z');
 const before = '2026-11-24T11:00:00Z';
@@ -258,4 +258,40 @@ test('unread notices open the panel after the first load that works, once per lo
 	await forB;
 	assert.equal(v.open, true);
 	assert.equal(store.getItem(NOTICES_SHOWN), 'u-b');
+});
+
+test('the opens of an emergency card are one entry per profile, counted by the server', () => {
+	const lucia = { id: 'p2', slug: 'lucia', display_name: 'Lucía Rivera' };
+	const open = (at: string, profile = alex) => notice('ice.access', at, { request_id: null, contact: null, profile });
+	const items = [
+		...Array.from({ length: 3 }, (_, i) => open(`2026-11-24T10:00:0${i}Z`)),
+		open('2026-11-24T09:00:00Z', lucia),
+		notice('break_glass.request', '2026-11-24T08:00:00Z')
+	];
+	// the server counts every open of the card on alex; the one on lucia has no count, so the list counts it
+	const ice: NoticeIce[] = [{ profile: alex, count: 40, unread: 2, last_at: '2026-11-24T10:00:02Z' }];
+	const g = groupNotices(items, [], ice);
+	assert.deepEqual(g.map((x) => [x.key, x.card, x.uses, x.unread]), [
+		['ice:p1', true, 40, 2],
+		['ice:p2', true, 1, 1],
+		['r1', false, 0, 1]
+	]);
+	assert.equal(g[0].request, null);
+	assert.deepEqual(g[0].steps, []);
+	assert.equal(g[0].lastUse, '2026-11-24T10:00:02Z');
+});
+
+test('unread opens of an emergency card that the list does not hold open the panel on the first login', async () => {
+	const v: NoticeView = { data: null, error: null, open: false };
+	const h = held();
+	const store = memory();
+	const load = noticeLoader(v, () => 'u-a', h.fetch, store);
+	// the list holds only an old open, already read; the server counts two newer unread ones
+	const read = notice('ice.access', '2026-11-24T08:00:00Z', { request_id: null, contact: null, read_at: '2026-11-24T09:00:00Z' });
+	const ice: NoticeIce[] = [{ profile: alex, count: 3, unread: 2, last_at: '2026-11-24T10:00:00Z' }];
+	const first = load();
+	h.calls[0].resolve({ items: [read], uses: [], ice, unread: 2 });
+	await first;
+	assert.equal(v.open, true);
+	assert.equal(store.getItem(NOTICES_SHOWN), 'u-a');
 });

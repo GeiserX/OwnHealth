@@ -15,6 +15,9 @@ pub const QUEUES: [&str; 2] = ["core", "ocr"];
 /// Public: `create_app` refuses it outside dev_auth and demo.
 pub const DEV_SECRET_KEY: &str = "dev-insecure-secret-change-me";
 
+/// The default of `OWNHEALTH_PARTITION_ROWS`.
+pub const DEFAULT_PARTITION_ROWS: u64 = 50_000_000;
+
 /// The values the app runs with. `Debug` leaves out the database URL and the secret key.
 #[derive(Clone, PartialEq)]
 pub struct Settings {
@@ -34,6 +37,9 @@ pub struct Settings {
     pub job_workers: usize,
     pub job_poll_seconds: f64,
     pub queues: Vec<String>,
+    /// `OWNHEALTH_PARTITION_ROWS`: once `wearable_sample` holds more rows than this, the partition job
+    /// turns it into monthly partitions (`ownhealth_ops::partition`).
+    pub partition_rows: u64,
     pub auto_accept_threshold: f64,
     pub age_of_majority: i32,
     pub host: String,
@@ -91,6 +97,7 @@ impl Default for Settings {
             job_workers: 2,
             job_poll_seconds: 2.0,
             queues: vec!["core".into()],
+            partition_rows: DEFAULT_PARTITION_ROWS,
             auto_accept_threshold: 0.95,
             age_of_majority: 18,
             host: "0.0.0.0".into(),
@@ -124,6 +131,7 @@ impl fmt::Debug for Settings {
             .field("job_workers", &self.job_workers)
             .field("job_poll_seconds", &self.job_poll_seconds)
             .field("queues", &self.queues)
+            .field("partition_rows", &self.partition_rows)
             .field("auto_accept_threshold", &self.auto_accept_threshold)
             .field("age_of_majority", &self.age_of_majority)
             .field("host", &self.host)
@@ -346,6 +354,7 @@ impl Settings {
             job_workers: parse(env, "JOB_WORKERS", d.job_workers)?,
             job_poll_seconds: parse(env, "JOB_POLL_SECONDS", d.job_poll_seconds)?,
             queues: parse_queues(&env_or(env, "QUEUES")?.unwrap_or_else(|| "core".into()))?,
+            partition_rows: parse(env, "PARTITION_ROWS", d.partition_rows)?,
             auto_accept_threshold: threshold.max(0.90),
             age_of_majority: parse(env, "AGE_OF_MAJORITY", d.age_of_majority)?,
             host: env_or(env, "HOST")?.unwrap_or(d.host),

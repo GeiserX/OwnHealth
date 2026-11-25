@@ -5,6 +5,7 @@
 pub mod apple_health;
 pub mod bluebutton;
 pub mod brands;
+pub mod ccda;
 pub mod demo;
 pub mod fhir;
 pub mod jobs;
@@ -18,7 +19,7 @@ pub mod wearables;
 
 use ownhealth_core::jobs::register_handler;
 
-/// Register lane C's job handlers (`import.fhir_bundle`, `import.apple_health`), accept handler
+/// Register lane C's job handlers (`import.fhir_bundle`, `import.apple_health`, `import.ccda`), accept handler
 /// (`fhir_unmapped`), the SMART poller (source kind `smart`), demo hook (`apple_fhir`, order 300) and the US
 /// endpoint directory poller (`brands`, no default-sources hook).
 pub fn register() {
@@ -28,6 +29,7 @@ pub fn register() {
     register_handler("import.apple_health", |ctx, job| {
         Box::pin(jobs::import_apple_health_job(ctx, job))
     });
+    register_handler(ccda::JOB, |ctx, job| Box::pin(ccda::import_ccda_job(ctx, job)));
     ownhealth_core::review::register_accept_handler("fhir_unmapped", fhir::accept_fhir_boxed);
     smart::register();
     bluebutton::register();

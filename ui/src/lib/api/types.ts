@@ -135,7 +135,7 @@ export interface ReviewItem {
 
 export interface ImportItem {
 	filename: string;
-	kind: 'pdf' | 'image' | 'apple_health_zip' | 'garmin_zip' | 'fhir_json' | 'fhir_ndjson' | 'genome_facts' | 'vcf' | 'tbi' | 'fit' | 'fit_gz' | 'libreview_csv' | 'dexcom_clarity_csv';
+	kind: 'pdf' | 'image' | 'apple_health_zip' | 'garmin_zip' | 'fhir_json' | 'fhir_ndjson' | 'genome_facts' | 'vcf' | 'tbi' | 'fit' | 'fit_gz' | 'libreview_csv' | 'dexcom_clarity_csv' | 'ccda';
 	sha256: string;
 	document_id?: Uuid;
 	duplicate?: boolean;
@@ -944,12 +944,15 @@ export interface NextDraw {
 export type ShlCategory = 'read:summary' | 'read:labs' | 'read:records';
 /** What a recipient would meet: `paused` while sharing is off on the instance, `revoked` for good. */
 export type ShlState = 'active' | 'paused' | 'revoked' | 'expired' | 'locked_out';
-/** Why: `sharing_off` (paused); `person`, `locked` or `access_changed` (revoked). */
-export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed';
+/** Why: `sharing_off` (paused); `person`, `locked`, `access_changed` or `replaced` (a new
+ *  emergency card ended this one) (revoked). */
+export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed' | 'replaced';
 
 /** One link in GET /profiles/{p}/shl. */
 export interface ShlLink {
 	id: Uuid;
+	ice?: true;
+	online?: boolean;
 	label: string | null;
 	passcode: boolean;
 	attempts_left: number | null;
@@ -960,7 +963,7 @@ export interface ShlLink {
 	revoked_at: IsoDateTime | null;
 	state: ShlState;
 	reason: ShlReason | null;
-	/** manifests served */
+	/** Manifests served, or direct file reads for an emergency card. */
 	opened: number;
 	last_access_at: IsoDateTime | null;
 }
@@ -1078,7 +1081,8 @@ export type NoticeKind =
 	| 'break_glass.activate'
 	| 'break_glass.use'
 	| 'break_glass.expire'
-	| 'break_glass.revoke';
+	| 'break_glass.revoke'
+	| 'ice.access';
 /** One in-app notice, in GET /notifications. */
 export interface Notice {
 	id: Uuid;
@@ -1101,6 +1105,13 @@ export interface NoticeUses {
 	unread: number;
 	last_at: IsoDateTime;
 }
+/** The opens of one profile's emergency card, counted over all of them (an `ice.access` has no request). */
+export interface NoticeIce {
+	profile: { id: Uuid; slug: string; display_name: string };
+	count: number;
+	unread: number;
+	last_at: IsoDateTime;
+}
 /**
  * GET /notifications: the 200 newest notices plus every older unread one other than a read, and the
  * read count of each request that is in the list or has unread reads.
@@ -1108,6 +1119,8 @@ export interface NoticeUses {
 export interface Notices {
 	items: Notice[];
 	uses: NoticeUses[];
+	/** the opens of each profile's emergency card that is in the list or has unread opens */
+	ice?: NoticeIce[];
 	unread: number;
 }
 /** GET /break-glass/requests/{id}: one request for the cancel screen, with the profile that holds it. */

@@ -1,5 +1,5 @@
 //! `ownhealth serve | migrate | demo-seed | worker | healthcheck | backup | restore | verify-restore |
-//! clinvar-diff | seal-legacy`.
+//! clinvar-diff | seal-legacy | partition`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -64,6 +64,31 @@ enum Cmd {
         /// The ClinVar VCF, for example clinvar_20261005.vcf.gz.
         path: PathBuf,
     },
+    /// Link an Open Wearables user to a profile. Vincula un usuario de Open Wearables a un perfil.
+    OpenwearablesConnect {
+        /// The profile's id or short name (alex). El id o el nombre corto del perfil (alex).
+        #[arg(long)]
+        profile: String,
+        /// The Open Wearables user id. El id del usuario de Open Wearables.
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        admin_email: String,
+        /// JSON file with admin_password and api_key. Archivo JSON con admin_password y api_key.
+        #[arg(long, default_value = "/dev/stdin")]
+        credentials_file: PathBuf,
+    },
+    /// Delete an Open Wearables user with an API key that works now: a cleanup the sidecar refused,
+    /// or a link left stale by a new sidecar (after a restore). Borra un usuario de Open Wearables con
+    /// una clave de API que funcione: una limpieza rechazada o un vínculo obsoleto tras restaurar.
+    OpenwearablesDelete {
+        /// The Open Wearables user id. El id del usuario de Open Wearables.
+        #[arg(long)]
+        user: String,
+        /// JSON file with api_key. Archivo JSON con api_key.
+        #[arg(long, default_value = "/dev/stdin")]
+        credentials_file: PathBuf,
+    },
     /// Encrypt what an install stored before profile keys: each older file under the key of every
     /// profile or pending item that reads it, and each older refresh token under its profile's key.
     /// The job removes a plain copy only when no ownerless reader still needs it. The JSON report
@@ -75,6 +100,20 @@ enum Cmd {
         /// Report what a run would do and change nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Turn wearable_sample into monthly partitions once it holds more than OWNHEALTH_PARTITION_ROWS
+    /// rows (default 50000000), with no row copied; once it is partitioned, make next month's
+    /// partition ahead of time. Run it as the database owner (the admin service), while the app runs
+    /// if you like. You can stop it at any time and run it again to resume. It prints a JSON report and
+    /// exits 1 when work is left for a later run. Needs OWNHEALTH_DATABASE_URL.
+    Partition {
+        /// Instead of a run: delete the samples that inboxes pushed with no file (Health Auto Export,
+        /// Nightscout) dated on or after the start of this day in UTC, from the table and from the
+        /// samples set aside, and rebuild the rollups of those inboxes from the samples that stay.
+        /// Give the date a `needs_maintenance` note names, after setting the device clock right. It
+        /// refuses a date that is not ahead of now, and prints what it removed.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        drop_pushed_from: Option<ownhealth_ops::partition::NaiveDate>,
     },
 }
 
@@ -138,8 +177,8 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     // hashes, and the minor rule in them must match the server's.
     ownhealth_core::access::set_env_majority(settings.age_of_majority);
     // Every profile's files are sealed under a key made from OWNHEALTH_SECRETS_KEY, so nothing that
-    // reads or writes them starts without it. migrate and healthcheck never open a blob.
-    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck) {
+    // reads or writes them starts without it. migrate, healthcheck and partition never open a blob.
+    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck | Cmd::Partition { .. }) {
         // a restore needs the key the backup was made with: a new one never opens it
         if settings.secrets_key.is_none() && matches!(cmd, Cmd::Restore { .. } | Cmd::VerifyRestore { .. }) {
             anyhow::bail!(ownhealth_core::keys::MISSING_BACKUP_KEY);
@@ -201,6 +240,67 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
                 ExitCode::SUCCESS
             })
         }
+        Cmd::OpenwearablesConnect {
+            profile,
+            user,
+            admin_email,
+            credentials_file,
+        } => {
+            use ownhealth_core::secrets::SecretString;
+            let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
+            let contents = tokio::fs::read(credentials_file).await?;
+            let credentials: serde_json::Value = serde_json::from_slice(&contents).unwrap_or_default();
+            let (password, key) = credentials["admin_password"]
+                .as_str()
+                .zip(credentials["api_key"].as_str())
+                .ok_or_else(|| anyhow::anyhow!("Invalid credentials file. / Archivo de credenciales no válido."))?;
+            let profile = ownhealth_devices::openwearables::profile_id(&rt.pool, &profile).await?;
+            let user = user.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "--user takes the Open Wearables user id. / --user necesita el id del usuario de Open Wearables."
+                )
+            })?;
+            let source = ownhealth_devices::openwearables::connect(
+                &rt.job_context(),
+                profile,
+                user,
+                &admin_email,
+                &SecretString::new(password),
+                &SecretString::new(key),
+            )
+            .await?;
+            println!(
+                "Linked: Open Wearables user {user} syncs into profile {profile} (source {source}). Providers outside the allowlist are off, and the first pull is queued."
+            );
+            println!(
+                "Vinculado: el usuario {user} de Open Wearables se sincroniza con el perfil {profile} (fuente {source}). Los proveedores fuera de la lista permitida están desactivados y la primera sincronización está en cola."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::OpenwearablesDelete { user, credentials_file } => {
+            use ownhealth_core::secrets::SecretString;
+            let rt = Runtime::new(settings)?;
+            app::check_profile_keys(&rt).await?;
+            let contents = tokio::fs::read(credentials_file).await?;
+            let credentials: serde_json::Value = serde_json::from_slice(&contents).unwrap_or_default();
+            let key = credentials["api_key"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid credentials file. / Archivo de credenciales no válido."))?;
+            let user = user.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "--user takes the Open Wearables user id. / --user necesita el id del usuario de Open Wearables."
+                )
+            })?;
+            ownhealth_devices::openwearables::delete(&rt.job_context(), user, &SecretString::new(key)).await?;
+            println!(
+                "Deleted: Open Wearables user {user} and its link in OwnHealth. The readings already stored stay."
+            );
+            println!(
+                "Borrado: el usuario {user} de Open Wearables y su vínculo en OwnHealth. Las lecturas ya guardadas se quedan."
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::SealLegacy { dry_run } => {
             let rt = Runtime::new(settings)?;
             let mut conn = rt.pool.acquire().await?;
@@ -211,6 +311,19 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             app::check_profile_keys(&rt).await?;
             let sb = ownhealth_core::secrets::SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
             report(&ownhealth_ops::seal_legacy(&rt.pool, &rt.blobs, &sb, dry_run).await?)
+        }
+        Cmd::Partition { drop_pushed_from } => {
+            let rt = Runtime::new(settings)?;
+            let mut conn = rt.pool.acquire().await?;
+            if !migrate::pending(&mut conn, &migrate::embedded()?).await?.is_empty() {
+                anyhow::bail!("the database is not migrated: run `ownhealth migrate` first");
+            }
+            drop(conn);
+            let opts = ownhealth_ops::partition::Options::new(rt.settings.partition_rows);
+            match drop_pushed_from {
+                Some(from) => report(&ownhealth_ops::partition::drop_pushed(&rt.pool, &opts, from).await?),
+                None => report(&ownhealth_ops::partition::run(&rt.pool, &opts).await?),
+            }
         }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;

@@ -29,7 +29,7 @@ use std::process::{Command, Output, Stdio};
 
 use ownhealth_core::config::Settings;
 use ownhealth_core::testing::{TestDb, admin_url};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{Connection, PgConnection};
 
 type R = anyhow::Result<()>;
@@ -848,9 +848,8 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             "{case}: wearables network"
         );
 
-        // The sidecar shares no network with OwnHealth's own containers except ow-db, which holds db
-        // and the sidecar only: OW cannot reach the app (so it cannot forward a client address to it),
-        // only Postgres, where its role opens nothing but its own database.
+        // Only the polling app and the OW API share ow-api. Postgres and vendor egress
+        // stay on their own networks. Caddy is the only trusted proxy in homelab.
         let nets = |s: &str| strings(&services[s]["networks"]);
         let ours: Vec<String> = services
             .as_object()
@@ -867,7 +866,7 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
         for s in OW_ALL {
             for n in nets(s) {
                 assert!(
-                    n == "ow-db" || !ours.contains(&n),
+                    n == "ow-db" || (s == "ow-app" && n == "ow-api") || !ours.contains(&n),
                     "{case}: {s} shares {n} with OwnHealth"
                 );
             }
@@ -876,6 +875,28 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
             !ours.contains(&"ow-db".to_string()),
             "{case}: an OwnHealth service is on ow-db"
         );
+        let mut api_network: Vec<&str> = services
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(s, _)| s.as_str())
+            .filter(|s| nets(s).contains(&"ow-api".to_string()))
+            .collect();
+        api_network.sort_unstable();
+        assert_eq!(api_network, ["app", "ow-app"], "{case}: ow-api network members");
+        assert_eq!(doc["networks"]["ow-api"]["internal"], true, "{case}: ow-api network");
+        if case == "homelab" {
+            let caddy = services["caddy"]["networks"]["front"]["ipv4_address"]
+                .as_str()
+                .unwrap_or_default();
+            let trusted = env_str(&services["app"], "OWNHEALTH_TRUSTED_PROXIES");
+            assert!(
+                !caddy.is_empty() && trusted == caddy,
+                "{case}: only Caddy can forward addresses: {trusted:?} and Caddy at {caddy:?}"
+            );
+            front_keeps_caddys_address(&doc["networks"]["front"], caddy)?;
+            assert_eq!(nets("caddy"), ["front"], "{case}: Caddy only uses the front network");
+        }
         assert!(nets("db").contains(&"ow-db".to_string()), "{case}: db is not on ow-db");
         assert_eq!(doc["networks"]["ow-db"]["internal"], true, "{case}: ow-db network");
         for s in ["ow-db-init", "ow-app", "ow-worker", "ow-beat"] {
@@ -917,6 +938,94 @@ fn compose_wearables_profile_is_pinned_quiet_and_fenced() -> R {
     }
     digests.dedup();
     assert_eq!(digests.len(), 1, "both compose files pin the same image: {digests:?}");
+    Ok(())
+}
+
+/// `a.b.c.d/n` as its network address and mask.
+fn cidr(v: &str) -> anyhow::Result<(u32, u32)> {
+    let (ip, len) = v.split_once('/').ok_or_else(|| anyhow::anyhow!("not a CIDR: {v:?}"))?;
+    let len: u32 = len.parse()?;
+    anyhow::ensure!((1..=32).contains(&len), "prefix length of {v}");
+    let mask = u32::MAX << (32 - len);
+    Ok((u32::from(ip.parse::<std::net::Ipv4Addr>()?) & mask, mask))
+}
+
+/// Docker can always give Caddy its fixed address on `front`: the address is inside the subnet,
+/// outside the `ip_range` Docker hands out to the other containers, and is not the network, the
+/// gateway (the first usable address) or the broadcast address.
+fn front_keeps_caddys_address(front: &Value, caddy: &str) -> anyhow::Result<()> {
+    let ipam = &front["ipam"]["config"][0];
+    let (net, mask) = cidr(ipam["subnet"].as_str().unwrap_or_default())?;
+    let (pool, pool_mask) = cidr(
+        ipam["ip_range"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("front has no ip_range: {ipam}"))?,
+    )?;
+    let ip = u32::from(caddy.parse::<std::net::Ipv4Addr>()?);
+    anyhow::ensure!(
+        pool & mask == net && pool_mask >= mask,
+        "the ip_range is not inside the subnet: {ipam}"
+    );
+    anyhow::ensure!(ip & mask == net, "Caddy's {caddy} is outside the subnet: {ipam}");
+    anyhow::ensure!(ip & pool_mask != pool, "Caddy's {caddy} is in the ip_range: {ipam}");
+    anyhow::ensure!(
+        ![net, net + 1, net | !mask].contains(&ip),
+        "Caddy's {caddy} is the network, gateway or broadcast address: {ipam}"
+    );
+    Ok(())
+}
+
+#[test]
+fn caddys_front_address_check_refuses_every_address_docker_may_take() -> R {
+    let front = |range: &str| json!({"ipam": {"config": [{"subnet": "172.31.253.0/28", "ip_range": range}]}});
+    let pool = front("172.31.253.8/29");
+    front_keeps_caddys_address(&pool, "172.31.253.2")?;
+    for taken in [
+        "172.31.253.0",
+        "172.31.253.1",
+        "172.31.253.9",
+        "172.31.253.15",
+        "172.31.254.2",
+        "",
+    ] {
+        assert!(front_keeps_caddys_address(&pool, taken).is_err(), "{taken}");
+    }
+    assert!(front_keeps_caddys_address(&front("172.31.252.0/29"), "172.31.253.2").is_err());
+    assert!(
+        front_keeps_caddys_address(
+            &json!({"ipam": {"config": [{"subnet": "172.31.253.0/28"}]}}),
+            "172.31.253.2"
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+/// The homelab file with the three front-network overrides set together, as the README says.
+#[test]
+fn homelab_front_overrides_keep_caddys_address_out_of_the_pool() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    let r = root();
+    let doc = render_doc(
+        &r.join("deploy/compose.homelab.yaml"),
+        &r.join("deploy/env.homelab.example"),
+        "OWNHEALTH_CADDY_SUBNET=10.99.0.0/24\nOWNHEALTH_CADDY_RANGE=10.99.0.128/25\nOWNHEALTH_CADDY_IP=10.99.0.2\n",
+        &[],
+    )?;
+    let services = &doc["services"];
+    assert_eq!(
+        services["caddy"]["networks"]["front"]["ipv4_address"], "10.99.0.2",
+        "the IP override"
+    );
+    assert_eq!(env_str(&services["app"], "OWNHEALTH_TRUSTED_PROXIES"), "10.99.0.2");
+    front_keeps_caddys_address(&doc["networks"]["front"], "10.99.0.2")?;
+    assert_eq!(
+        doc["networks"]["front"]["ipam"]["config"][0]["ip_range"],
+        "10.99.0.128/25"
+    );
     Ok(())
 }
 
@@ -1240,32 +1349,53 @@ fn bring_up(case: &str, compose: &Path, env_file: &Path, extra: &str) -> R {
             "{case}: {s} settings"
         );
     }
-    // off OwnHealth's network: from each sidecar container, db answers, and the app answers neither by
-    // its name nor by any of its addresses
+    // Fenced from OwnHealth's network: from each sidecar container db answers, and the app answers
+    // only ow-app, by its name and by its ow-api address (the poller calls ow-app:8000 there). The
+    // app's other addresses stay closed to every sidecar container, and worker and beat reach no app.
     let app_id = project.service("app")?["ID"].as_str().unwrap_or_default().to_string();
     let inspect = Command::new("docker")
         .args([
             "inspect",
             "-f",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+            "{{range $name, $net := .NetworkSettings.Networks}}{{$name}}={{$net.IPAddress}} {{end}}",
             &app_id,
         ])
         .output()?;
     anyhow::ensure!(inspect.status.success(), "{}", String::from_utf8_lossy(&inspect.stderr));
-    let app_ips: Vec<String> = String::from_utf8_lossy(&inspect.stdout)
+    let app_ips: Vec<(String, String)> = String::from_utf8_lossy(&inspect.stdout)
         .split_whitespace()
-        .map(str::to_string)
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(net, ip)| (net.to_string(), ip.to_string()))
         .collect();
     anyhow::ensure!(!app_ips.is_empty(), "{case}: the app has no address");
-    let mut targets = vec!["db:5432".to_string(), "app:8080".to_string()];
-    targets.extend(app_ips.iter().map(|ip| format!("{ip}:8080")));
-    let want: Vec<String> = targets
-        .iter()
-        .map(|t| format!("{t} {}", if t == "db:5432" { "open" } else { "closed" }))
-        .collect();
+    // An empty address would probe `:8080`, which reads as closed and proves nothing.
+    for (net, ip) in &app_ips {
+        anyhow::ensure!(
+            ip.parse::<std::net::IpAddr>().is_ok(),
+            "{case}: the app has no address on {net}: {app_ips:?}"
+        );
+    }
+    anyhow::ensure!(
+        app_ips.iter().any(|(net, _)| net.ends_with("_ow-api")),
+        "{case}: the app is not on ow-api: {app_ips:?}"
+    );
+    let mut targets = vec![("db:5432".to_string(), "db"), ("app:8080".to_string(), "api")];
+    targets.extend(app_ips.iter().map(|(net, ip)| {
+        (
+            format!("{ip}:8080"),
+            if net.ends_with("_ow-api") { "api" } else { "app" },
+        )
+    }));
     for s in OW_SERVICES {
+        let want: Vec<String> = targets
+            .iter()
+            .map(|(t, kind)| {
+                let open = *kind == "db" || (*kind == "api" && s == "ow-app");
+                format!("{t} {}", if open { "open" } else { "closed" })
+            })
+            .collect();
         let mut args = vec!["exec", "-T", s, "python", "-c", PROBE_PY];
-        args.extend(targets.iter().map(String::as_str));
+        args.extend(targets.iter().map(|(t, _)| t.as_str()));
         let got = project.ok(&args)?;
         assert_eq!(got.lines().collect::<Vec<_>>(), want, "{case}: what {s} reaches");
     }
@@ -1424,11 +1554,15 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
     let t = "Y9xwkUdtmN9wwoJoN3ffJIhX2UGvCL1JnlPVNL3kDWM";
     let m = format!("/api/shl/{id}");
     let f = format!("/api/shl/{id}/file/{t}");
+    let ice = format!("{m}/ice");
+    let direct = format!("{ice}?recipient=LabNorte");
     // (method, raw path, the request line the app must get)
     let mut through: Vec<(&str, String, String)> = vec![
         ("POST", m.clone(), format!("POST {m}")),
         ("OPTIONS", m.clone(), format!("OPTIONS {m}")),
         ("GET", f.clone(), format!("GET {f}")),
+        ("GET", direct.clone(), format!("GET {direct}")),
+        ("GET", format!("/x/..{direct}"), format!("GET {direct}")),
         ("GET", format!("{f}?x=1"), format!("GET {f}")),
         ("POST", format!("{m}?x=1"), format!("POST {m}")),
         ("POST", format!("//api/shl/{id}"), format!("POST {m}")),
@@ -1500,6 +1634,7 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
     }
     for method in ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         refused.push((method, f.clone()));
+        refused.push((method, ice.clone()));
     }
     let (_c, addr) = caddy(&image)?;
     for (method, path, line) in &through {

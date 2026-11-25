@@ -1222,6 +1222,359 @@ async fn a_move_while_a_run_for_its_profile_is_still_marked_running_imports_afte
     Ok(())
 }
 
+/// A C-CDA document moved to another profile runs the C-CDA import again for that profile: the file
+/// for someone else is held whole on Alex, and on Lucía (Isabella Jones in the sample) it brings her
+/// problems in.
+#[tokio::test]
+async fn a_moved_ccda_document_runs_the_ccda_import_for_its_new_profile() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    let kinds = ["import.ccda".to_string()];
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    sqlx::query("update profile set display_name = 'Isabella Jones', birth_date = '2005-05-01' where id = $1")
+        .bind(lucia)
+        .execute(&a.rt.pool)
+        .await?;
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ccda/history-and-physical.xml");
+    let xml = std::fs::read(&path)?;
+    let (s, v) = a.upload("alex", &[("profile", "alex")], &[("hp.xml", &xml)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["items"][0]["kind"], "ccda", "{v}");
+    let ctx = a.rt.job_context();
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'hp.xml'")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let conditions =
+        |p: uuid::Uuid| format!("select count(*) from condition where profile_id = '{p}' and status = 'current'");
+    assert_eq!(
+        a.count(&conditions(alex)).await?,
+        0,
+        "another person's file is held whole"
+    );
+    let (s, moved) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/assign"),
+            Some(json!({"profile": "lucia"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{moved}");
+    let kind: String = sqlx::query_scalar("select kind from job where id = $1")
+        .bind(moved["job_id"].as_i64().unwrap_or_default())
+        .fetch_one(&a.rt.pool)
+        .await?;
+    assert_eq!(kind, "import.ccda");
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    assert_eq!(a.count(&conditions(lucia)).await?, 2);
+    assert_eq!(a.count(&conditions(alex)).await?, 0);
+    Ok(())
+}
+
+/// T9 (round 4): a C-CDA document moved to another profile and then retracted before its queued
+/// import runs is never imported: the job finds the document no longer active and writes nothing, as
+/// the PDF import does.
+#[tokio::test]
+async fn a_moved_ccda_document_retracted_before_its_import_runs_writes_nothing() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    let kinds = ["import.ccda".to_string()];
+    let (alex, lucia) = (a.family.profile("alex"), a.family.profile("lucia"));
+    sqlx::query("update profile set display_name = 'Isabella Jones', birth_date = '2005-05-01' where id = $1")
+        .bind(lucia)
+        .execute(&a.rt.pool)
+        .await?;
+    let path =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ccda/history-and-physical.xml");
+    let xml = std::fs::read(&path)?;
+    let (s, v) = a.upload("alex", &[("profile", "alex")], &[("hp.xml", &xml)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let ctx = a.rt.job_context();
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let doc: uuid::Uuid = sqlx::query_scalar("select id from document where profile_id = $1 and filename = 'hp.xml'")
+        .bind(alex)
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let (s, moved) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/assign"),
+            Some(json!({"profile": "lucia"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{moved}");
+    let (s, r) = a
+        .post(
+            "alex",
+            &format!("/documents/{doc}/retract"),
+            Some(json!({"reason": "wrong file"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    ownhealth_core::jobs::drain(&ctx, "core", 5, Some(&kinds)).await?;
+    let result: Option<serde_json::Value> = sqlx::query_scalar("select result from job where id = $1")
+        .bind(moved["job_id"].as_i64().unwrap_or_default())
+        .fetch_one(&a.rt.pool)
+        .await?;
+    let result = result.unwrap_or_default();
+    assert_eq!(result["reasons"]["not_assigned_or_retracted"], json!(1), "{result}");
+    for table in [
+        "condition",
+        "allergy",
+        "immunization",
+        "medication_statement",
+        "observation",
+    ] {
+        let n = a
+            .count(&format!("select count(*) from {table} where profile_id = '{lucia}'"))
+            .await?;
+        assert_eq!(n, 0, "{table}");
+    }
+    let open = a
+        .count(&format!(
+            "select count(*) from review_item where document_id = '{doc}' and status = 'open'"
+        ))
+        .await?;
+    assert_eq!(open, 0);
+    Ok(())
+}
+
+/// CR2 (round 3): a jobs read that returns a finished C-CDA import's result (what it brought into the
+/// record) writes one read audit row in the same transaction, as a DICOM import's does. A read while
+/// the job has no result yet writes none.
+#[tokio::test]
+async fn reading_a_finished_ccda_job_writes_one_audit_row() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    let kinds = ["import.ccda".to_string()];
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ccda/ccd-2.xml");
+    let xml = std::fs::read(&path)?;
+    let (s, v) = a.upload("alex", &[("profile", "alex")], &[("ccd.xml", &xml)]).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let job = v["items"][0]["job_id"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("no job: {v}"))?;
+    let audits = "select count(*) from audit_event where tool = 'GET /api/jobs' and action = 'read'";
+    let (s, body) = a.get("alex", &format!("/jobs?ids={job}")).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["jobs"][0]["result"], serde_json::Value::Null, "{body}");
+    assert_eq!(a.count(audits).await?, 0);
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+    let (s, body) = a.get("alex", &format!("/jobs?ids={job}")).await?;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body["jobs"][0]["result"]["document_id"].is_string(), "{body}");
+    let rows: Vec<(uuid::Uuid, Option<uuid::Uuid>, Vec<String>)> = sqlx::query_as(
+        "select actor_id, profile_id, resource_ids from audit_event where tool = 'GET /api/jobs' and action = 'read'",
+    )
+    .fetch_all(&a.rt.pool)
+    .await?;
+    assert_eq!(
+        rows,
+        [(
+            a.family.user("alex"),
+            Some(a.family.profile("alex")),
+            vec![job.to_string()]
+        )]
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn round_5_job_reads_are_audited_by_profile() -> R {
+    let a = app().await?;
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("sam"))
+        .bind(a.family.profile("alex"))
+        .bind(["read:summary", "read:records"])
+        .execute(&a.rt.pool)
+        .await?;
+    let mut ids = Vec::new();
+    for (slug, kind) in [
+        ("alex", ownhealth_imaging::import::JOB),
+        ("lucia", ownhealth_ingest_structured::ccda::JOB),
+        ("alex", ownhealth_imaging::import::JOB),
+    ] {
+        let id: i64 = sqlx::query_scalar(
+            "insert into job (kind, state, payload, result) values ($1, 'done',              jsonb_build_object('profile_id', $2::text), '{\"accepted\": 1}') returning id",
+        )
+        .bind(kind)
+        .bind(a.family.profile(slug).to_string())
+        .fetch_one(&a.rt.pool)
+        .await?;
+        ids.push(id);
+    }
+    let (status, response) = a
+        .get("sam", &format!("/jobs?ids={},{},{}", ids[0], ids[1], ids[2]))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let jobs = response["jobs"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no jobs: {response}"))?;
+    assert_eq!(jobs.len(), 3, "{response}");
+    assert!(jobs.iter().all(|j| j["result"]["accepted"] == 1), "{response}");
+
+    for (slug, expected_ids) in [("alex", vec![ids[2], ids[0]]), ("lucia", vec![ids[1]])] {
+        let (status, log) = a.get("alex", &format!("/audit?profile={slug}")).await?;
+        assert_eq!(status, StatusCode::OK, "{log}");
+        let rows: Vec<_> = log["items"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("no audit items: {log}"))?
+            .iter()
+            .filter(|r| r["tool"] == "GET /api/jobs")
+            .collect();
+        assert_eq!(rows.len(), 1, "{slug}: {log}");
+        assert_eq!(rows[0]["actor"], "Sam Rivera");
+        assert_eq!(rows[0]["rows_out"], expected_ids.len());
+        assert_eq!(
+            rows[0]["resource_ids"],
+            json!(expected_ids.iter().map(i64::to_string).collect::<Vec<_>>())
+        );
+
+        for reader in ["alex", "sam"] {
+            let (status, who) = a.get(reader, &format!("/audit/who?profile={slug}")).await?;
+            assert_eq!(status, StatusCode::OK, "{who}");
+            let event = &who["items"][0];
+            assert_eq!(event["actor"], "Sam Rivera", "{reader} on {slug}: {who}");
+            assert_eq!(event["events"], 1, "{reader} on {slug}: {who}");
+        }
+    }
+
+    let (status, response) = a.get("sam", "/jobs?ids=0").await?;
+    assert_eq!((status, response["jobs"].clone()), (StatusCode::OK, json!([])));
+    let (status, log) = a.get("sam", "/audit").await?;
+    assert_eq!(status, StatusCode::OK, "{log}");
+    let row = &log["items"][0];
+    assert_eq!(row["tool"], "GET /api/jobs");
+    assert_eq!(row["profile"], serde_json::Value::Null);
+    assert_eq!(row["rows_out"], 0);
+    assert_eq!(row["resource_ids"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn round_5_copied_narrative_keeps_its_source_section_security() -> R {
+    let a = app().await?;
+    ownhealth_ingest_structured::register();
+    sqlx::query("update profile_grant set categories = $3 where user_id = $1 and profile_id = $2")
+        .bind(a.family.user("sam"))
+        .bind(a.family.profile("alex"))
+        .bind(["read:summary", "read:labs"])
+        .execute(&a.rt.pool)
+        .await?;
+    let results = [
+        (
+            "13457-7",
+            r##"<value xsi:type="ST"><reference value="#result"/></value>"##,
+        ),
+        (
+            "2085-9",
+            r##"<value xsi:type="PQ" value="51" unit="mg/dL"/>
+            <referenceRange><observationRange><text><reference value="#range"/></text></observationRange></referenceRange>"##,
+        ),
+        ("2345-7", r#"<value xsi:type="PQ" value="92" unit="mg/dL"/>"#),
+    ];
+    let components: String = results
+        .iter()
+        .map(|(code, value)| {
+            format!(
+                r#"<component><observation classCode="OBS" moodCode="EVN">
+             <id root="1.2.3" extension="{code}"/><code code="{code}" codeSystem="2.16.840.1.113883.6.1"/>
+             <statusCode code="completed"/><effectiveTime value="20240101"/>{value}
+           </observation></component>"#
+            )
+        })
+        .collect();
+    let xml = format!(
+        r#"<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+          <recordTarget><patientRole><patient><name><given>Alex</given><family>Rivera</family></name>
+            <birthTime value="19790514"/></patient></patientRole></recordTarget>
+          <component><structuredBody>
+            <component><section><templateId root="2.16.840.1.113883.10.20.22.2.3.1"/><title>Results</title>
+              <entry><organizer classCode="BATTERY" moodCode="EVN"><id root="1.2.3" extension="lab"/>
+                <confidentialityCode code="M" codeSystem="2.16.840.1.113883.5.25"/>
+                <statusCode code="completed"/>{components}
+              </organizer></entry>
+            </section></component>
+            <component><section><confidentialityCode code="R" codeSystem="2.16.840.1.113883.5.25"/>
+              <entry><observation><templateId root="2.16.840.1.113883.3.3445.1"/>
+                <value code="PSY" codeSystem="2.16.840.1.113883.5.4"/></observation></entry>
+              <component><section><text><content ID="result">Reviewed separately</content>
+                <content ID="range">Use the clinic interval</content></text>
+              </section></component>
+            </section></component>
+          </structuredBody></component></ClinicalDocument>"#
+    );
+    let (status, upload) = a
+        .upload("alex", &[("profile", "alex")], &[("notes.xml", xml.as_bytes())])
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{upload}");
+    let kinds = [ownhealth_ingest_structured::ccda::JOB.to_string()];
+    ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?;
+
+    // Free-text LDL and an unparsed HDL range can require confirmation before they become facts.
+    let review_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "select id from review_item where profile_id = $1 and kind = 'candidate_row' and status = 'open'",
+    )
+    .bind(a.family.profile("alex"))
+    .fetch_all(&a.rt.pool)
+    .await?;
+    for id in review_ids {
+        let (status, accepted) = a.post("alex", &format!("/review/{id}/accept"), Some(json!({}))).await?;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+    }
+
+    let route = "/profiles/alex/observations?category=laboratory";
+    let (status, owner) = a.get("alex", route).await?;
+    assert_eq!(status, StatusCode::OK, "{owner}");
+    let owner_rows = owner["items"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no observations: {owner}"))?;
+    assert_eq!(owner_rows.len(), 3, "{owner}");
+    assert!(
+        owner_rows
+            .iter()
+            .any(|o| o["loinc"] == "13457-7" && o["printed"]["value"] == "Reviewed separately"),
+        "{owner}"
+    );
+    assert!(
+        owner_rows
+            .iter()
+            .any(|o| o["loinc"] == "2085-9" && o["printed"]["range"] == "Use the clinic interval"),
+        "{owner}"
+    );
+
+    let (status, reader) = a.get("sam", route).await?;
+    assert_eq!(status, StatusCode::OK, "{reader}");
+    let reader_codes: Vec<_> = reader["items"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no observations: {reader}"))?
+        .iter()
+        .map(|o| &o["loinc"])
+        .collect();
+    assert_eq!(reader_codes, [&json!("2345-7")], "{reader}");
+
+    let converted = ownhealth_ingest_structured::ccda::convert(xml.as_bytes())?;
+    let security_codes: Vec<Vec<&str>> = converted
+        .entries
+        .iter()
+        .filter(|e| e.resource["resourceType"] == "Observation")
+        .map(|e| {
+            e.resource["meta"]["security"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["code"].as_str())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        security_codes,
+        [vec!["M", "R", "PSY"], vec!["M", "R", "PSY"], vec!["M"]]
+    );
+    Ok(())
+}
+
 /// A Garmin export's document holds the readings it read from the zip (the zip is not kept): a move
 /// runs the Garmin import of that document for the new owner, so the readings follow it.
 #[tokio::test]

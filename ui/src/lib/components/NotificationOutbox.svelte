@@ -14,6 +14,7 @@
 	import { intlLocale } from '#lib/i18n/langs';
 	import { groupNotices, noticeLoader, unreadGroups, when, type NoticeView } from '#lib/logic/breakglass';
 	import { app } from '#lib/state/app.svelte';
+	import { shareLinksHref } from '../../routes/links/logic';
 
 	/** A tab that comes back reads the notices again, at most once a minute (each read writes an audit row). */
 	const REFRESH_MS = 60_000;
@@ -39,7 +40,7 @@
 	}
 	const user = $derived(signedIn());
 	const data = $derived<Notices | null>(view.data);
-	const groups = $derived(groupNotices(data?.items ?? [], data?.uses));
+	const groups = $derived(groupNotices(data?.items ?? [], data?.uses, data?.ice));
 	const badge = $derived(unreadGroups(groups));
 	const loc = $derived(intlLocale(i18n.lang));
 	const store = { getItem: (k: string) => localStorage.getItem(k), setItem: (k: string, v: string) => localStorage.setItem(k, v) };
@@ -146,13 +147,14 @@
 						{#each groups as g (g.key)}
 							<li class:unread={g.unread > 0}>
 								<div class="who">
-									<b>{tf('nt_group', { contact: g.contact ?? t('nt_someone'), profile: g.profile.display_name })}</b>
+									<b>{g.card ? tf('nt_ice_group', { profile: g.profile.display_name }) : tf('nt_group', { contact: g.contact ?? t('nt_someone'), profile: g.profile.display_name })}</b>
 									{#if g.unread}<span class="new">{t('nt_new')}</span>{/if}
 								</div>
 								{#each g.steps as s, i (i)}
 									<div class="step" class:muted={!s.unread}>{step(s.kind, s.by)} · <span class="num">{when(s.at, loc)}</span></div>
 								{/each}
-								{#if g.uses}<div class="step">{tp('nt_uses', g.uses, { at: when(g.lastUse, loc) })}</div>{/if}
+								{#if g.uses}<div class="step">{tp(g.card ? 'nt_ice_opens' : 'nt_uses', g.uses, { at: when(g.lastUse, loc) })}</div>{/if}
+								{#if g.card}<a href={shareLinksHref(g.profile.id)} onclick={() => (view.open = false)}>{t('ice_manage')}</a>{/if}
 								{#if g.request}<a href="/family/break-glass/{g.request}" onclick={() => (view.open = false)}>{t('nt_see')}</a>{/if}
 							</li>
 						{/each}

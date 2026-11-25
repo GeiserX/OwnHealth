@@ -25,7 +25,7 @@ in the same commit that changes the code, and say so in the PR.
 | E | `ownhealth-rules` | rule pack, state body, render, status words, dashboard, drug check | `state/`, `rules/`, `jobs/kinds/state.py` |
 | F | `ownhealth-mcp` | `/mcp`: the 8 tools, PAT guard, envelope, budgets, limits, resources, prompts | `mcp/` |
 | G | `ownhealth-auth` | passkeys, OIDC, passwords, recovery, sessions, step-up, PATs, household management | `auth/` |
-| H | `ownhealth-ops` | backup, restore, verify-restore, seal-legacy, the profile export; the base demo seed | `ops/`, `export/`, `demo/base.py` |
+| H | `ownhealth-ops` | backup, restore, verify-restore, seal-legacy, the profile export, the wearable_sample partition job; the base demo seed | `ops/`, `export/`, `demo/base.py` |
 | I | `ownhealth-api` | `/api`: error mapping, extractors, the foundation routes, timeline | `api/_deps.py`, `api/core.py`, `api/review.py`, `api/imports.py`, `api/timeline.py`, `auth/deps.py` |
 | J | `contract-tests/` | black-box HTTP and MCP tests both backends must pass | `tests/` (as behaviour, not code) |
 | foundation | `ownhealth` (bin) | CLI, app assembly, UI serving, probes, startup and shutdown | `cli.py`, `app.py` |
@@ -245,7 +245,7 @@ Each crate's `src/lib.rs` documents them. The shapes:
 | | `check_drug(conn, profile, drug, &scopes, lang, as_of) -> Result<Value>`; `resolve_drug(conn, name)` | F, I, C |
 | mcp (F) | `router(Runtime) -> Router` (`/mcp` behind the PAT guard, and `/.well-known/oauth-protected-resource`) | bin |
 | auth (G) | `tokens::{create_token, verify_token, revoke_token}`; `sessions::{resolve_session, create_session, require_step_up}` | foundation, F, I |
-| ops (H) | `backup(settings, dest) -> Result<PathBuf>`; `restore` / `verify_restore -> Result<Value>` (the report, `ok` decides the exit code); `seal_legacy(pool, blobs, secret_box, dry_run) -> Result<Value>` (the same kind of report); `export::export_profile(conn, blobs, profile, out: Write + Seek, fmt) -> Result<Value>` | bin, I |
+| ops (H) | `backup(settings, dest) -> Result<PathBuf>`; `restore` / `verify_restore -> Result<Value>` (the report, `ok` decides the exit code); `seal_legacy(pool, blobs, secret_box, dry_run) -> Result<Value>` (the same kind of report); `export::export_profile(conn, blobs, profile, out: Write + Seek, fmt) -> Result<Value>`; `partition::run(pool, &Options) -> Result<Value>` (the same kind of report) | bin, I |
 
 Python keyword arguments become a small options struct with `::new(...)` and `..Default::default()`
 when there are more than about four of them (`CommitOptions`, `RouteFact`, `EnqueueOptions`, `RowIn`).

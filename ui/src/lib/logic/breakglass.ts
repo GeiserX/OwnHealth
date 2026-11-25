@@ -1,6 +1,6 @@
 // Break-glass on screen (routes/break_glass.rs): where a request stands, the notices grouped per
 // request, and who the owner may name. Pure, so the tests can run it without a browser.
-import type { BreakGlassRequest, Notice, NoticeKind, NoticeUses, Notices } from '../api/types';
+import type { BreakGlassRequest, Notice, NoticeIce, NoticeKind, NoticeUses, Notices } from '../api/types';
 
 type Req = Pick<BreakGlassRequest, 'status' | 'activates_at' | 'owner_feed_at' | 'waiting_for_calendar' | 'expires_at' | 'ended_at'>;
 
@@ -81,6 +81,8 @@ export interface NoticeGroup {
 	/** the request id (a notice without one stands alone, under its own id) */
 	key: string;
 	request: string | null;
+	/** the opens of a profile's emergency card (key `ice:<profile id>`): `uses` counts them */
+	card: boolean;
 	profile: Notice['profile'];
 	/** who asked */
 	contact: string | null;
@@ -110,18 +112,34 @@ const ms = (iso: string): number => {
  * only the newest notices, so the count comes from `uses`, which the server counts over every read;
  * the reads in the list count only for a request it does not cover.
  */
-export function groupNotices(items: readonly Notice[], uses: readonly NoticeUses[] = []): NoticeGroup[] {
+export function groupNotices(
+	items: readonly Notice[],
+	uses: readonly NoticeUses[] = [],
+	ice: readonly NoticeIce[] = []
+): NoticeGroup[] {
 	const groups = new Map<string, NoticeGroup>();
 	const counted = new Set(uses.map((u) => u.request_id));
+	const cards = new Set(ice.map((i) => i.profile.id));
 	const group = (key: string, request: string | null, profile: Notice['profile'], latest: string): NoticeGroup => {
 		let g = groups.get(key);
 		if (!g) {
-			g = { key, request, profile, contact: null, steps: [], uses: 0, lastUse: null, latest, unread: 0 };
+			const card = key.startsWith('ice:');
+			g = { key, request, card, profile, contact: null, steps: [], uses: 0, lastUse: null, latest, unread: 0 };
 			groups.set(key, g);
 		}
 		return g;
 	};
 	for (const n of items) {
+		// the opens of an emergency card have no request: one entry per profile, counted like reads
+		if (n.kind === 'ice.access') {
+			const g = group(`ice:${n.profile.id}`, null, n.profile, n.created_at);
+			if (ms(n.created_at) > ms(g.latest)) g.latest = n.created_at;
+			if (cards.has(n.profile.id)) continue;
+			g.uses += 1;
+			if (!n.read_at) g.unread += 1;
+			if (!g.lastUse || ms(n.created_at) > ms(g.lastUse)) g.lastUse = n.created_at;
+			continue;
+		}
 		const g = group(n.request_id ?? n.id, n.request_id, n.profile, n.created_at);
 		g.contact ??= n.contact?.display_name ?? null;
 		if (ms(n.created_at) > ms(g.latest)) g.latest = n.created_at;
@@ -142,6 +160,13 @@ export function groupNotices(items: readonly Notice[], uses: readonly NoticeUses
 		g.lastUse = u.last_at;
 		g.unread += u.unread;
 		if (ms(u.last_at) > ms(g.latest)) g.latest = u.last_at;
+	}
+	for (const i of ice) {
+		const g = group(`ice:${i.profile.id}`, null, i.profile, i.last_at);
+		g.uses = i.count;
+		g.lastUse = i.last_at;
+		g.unread += i.unread;
+		if (ms(i.last_at) > ms(g.latest)) g.latest = i.last_at;
 	}
 	for (const g of groups.values()) g.steps.sort((a, b) => ms(a.at) - ms(b.at));
 	return [...groups.values()].sort((a, b) => ms(b.latest) - ms(a.latest));
@@ -181,7 +206,7 @@ export function noticeLoader(
 			if (!current()) return;
 			v.data = d;
 			v.error = null;
-			if (!unreadGroups(groupNotices(d.items, d.uses)) || store.getItem(NOTICES_SHOWN) === u) return;
+			if (!unreadGroups(groupNotices(d.items, d.uses, d.ice)) || store.getItem(NOTICES_SHOWN) === u) return;
 			store.setItem(NOTICES_SHOWN, u);
 			v.open = true;
 		} catch (e) {

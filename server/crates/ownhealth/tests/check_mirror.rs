@@ -37,7 +37,10 @@ fn mirrors() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
         (
             "notification_outbox",
             "notification_outbox_kind_check",
-            break_glass::OUTBOX_KINDS.to_vec(),
+            break_glass::OUTBOX_KINDS
+                .into_iter()
+                .chain([ownhealth_ops::ice::NOTICE])
+                .collect(),
         ),
     ]
 }
