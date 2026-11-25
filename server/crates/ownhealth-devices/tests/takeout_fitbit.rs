@@ -1,4 +1,5 @@
-//! Synthetic Fitbit Takeout ZIPs through the upload dispatcher and the real worker.
+//! Synthetic Fitbit Takeout ZIPs through the upload dispatcher and the real worker. Folder, file and
+//! column names follow real exports (fixtures/fitbit/README.md names the sources).
 mod common;
 
 use std::io::{Cursor, Write};
@@ -22,9 +23,12 @@ fn archive(members: &[(&str, &str)]) -> anyhow::Result<Vec<u8>> {
 }
 
 async fn upload(env: &Env, members: &[(&str, &str)]) -> anyhow::Result<(String, String, Value)> {
-    let bytes = archive(members)?;
+    upload_bytes(env, &archive(members)?).await
+}
+
+async fn upload_bytes(env: &Env, bytes: &[u8]) -> anyhow::Result<(String, String, Value)> {
     let profile = env.fam.profile("lucia");
-    let hash = env.blobs.put_bytes(BlobOwner::Profile(profile), &bytes)?;
+    let hash = env.blobs.put_bytes(BlobOwner::Profile(profile), bytes)?;
     let mut db = env.db.pool.acquire().await?;
     let out = dispatch_upload(
         &mut db,
@@ -761,5 +765,41 @@ async fn a_garmin_run_never_reads_a_fitbit_readings_document() -> R {
         (state.as_str(), error.as_deref()),
         ("dead", Some("PermanentJobError: the Garmin Connect document is gone"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_committed_fixtures_import_four_readings_each() -> R {
+    let env = Env::new().await?;
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../fixtures/fitbit");
+    for (file, expected, omitted_files) in [
+        (
+            "legacy.zip",
+            [
+                ("hr", 72.0, "2024-07-04T06:10:00Z", 120),
+                ("hr_resting", 55.4, "2024-07-04T00:00:00Z", 0),
+                ("hrv_rmssd", 43.5, "2024-07-03T23:15:00Z", 120),
+                ("spo2", 97.5, "2024-07-04T00:00:00Z", 0),
+            ],
+            vec!["Takeout/Fitbit/Oxygen Saturation (SpO2)/Minute SpO2 - 2024-07-04.csv"],
+        ),
+        (
+            "google-data.zip",
+            [
+                ("hr", 74.0, "2024-07-05T06:10:00Z", 120),
+                ("hr_resting", 54.0, "2024-07-05T00:00:00Z", 0),
+                ("hrv_rmssd", 44.1, "2024-07-05T00:00:00Z", 0),
+                ("spo2", 96.6, "2024-07-05T00:00:00Z", 0),
+            ],
+            vec![],
+        ),
+    ] {
+        let bytes = std::fs::read(format!("{fixtures}/{file}"))?;
+        let (state, error, result) = upload_bytes(&env, &bytes).await?;
+        assert_eq!(state, "done", "{file}: {error}");
+        let listed: Vec<_> = omitted(&result).into_iter().map(|(member, _)| member).collect();
+        assert_eq!(listed, omitted_files, "{file}");
+        assert_readings(&env, result, &expected).await?;
+    }
     Ok(())
 }
