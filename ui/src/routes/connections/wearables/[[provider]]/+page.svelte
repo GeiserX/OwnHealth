@@ -38,7 +38,7 @@
 			name: 'Withings',
 			env: 'WITHINGS',
 			portal: 'https://developer.withings.com/',
-			terms: 'https://www.withings.com/en-uk/policies/terms-of-service',
+			terms: 'https://media.withings.com/web/legal/legal-pdf/api-terms-of-use/wo-en-api-terms-of-use-20180912.pdf',
 			scopes: 'user.info,user.metrics,user.activity',
 			publicHttps: true
 		}

@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 const user = 'c2825c8e-9b51-4195-afe5-a28b2fc556bd';
 const ow = `http://127.0.0.1:${process.env.OWNHEALTH_E2E_FAKE_PORT}/api/v1/oauth`;
 const callback = `http://localhost:${process.env.OWNHEALTH_E2E_PORT}/ow/api/v1/oauth/whoop/callback`;
+const withingsTerms = 'https://media.withings.com/web/legal/legal-pdf/api-terms-of-use/wo-en-api-terms-of-use-20180912.pdf';
 const whoopScopes = 'offline read:cycles read:sleep read:recovery read:workout';
 
 test('a person follows WHOOP setup and confirms consent through the OwnHealth callback', async ({ page, request }) => {
@@ -14,6 +15,9 @@ test('a person follows WHOOP setup and confirms consent through the OwnHealth ca
 	await expect(page.getByLabel('OAuth scopes', { exact: true })).toHaveValue(whoopScopes);
 	await expect(page.getByRole('link', { name: 'WHOOP API terms' })).toHaveAttribute('href', 'https://developer.whoop.com/api-terms-of-use/');
 	await expect(page.getByText('MCP access withheld')).toBeVisible();
+	await page.goto('/connections/wearables/withings?lang=en');
+	await expect(page.getByRole('link', { name: 'Withings API terms' })).toHaveAttribute('href', withingsTerms);
+	await expect(page.getByText('HEAD')).toHaveCount(0);
 
 	// This is the request the guide has the operator run inside the Open Wearables container.
 	const response = await request.get(`${ow}/whoop/authorize?user_id=${user}`);
