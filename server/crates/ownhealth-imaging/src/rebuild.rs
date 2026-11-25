@@ -108,18 +108,33 @@ pub(crate) fn covers(held: &BTreeMap<String, usize>, fhir: &Value) -> bool {
     })
 }
 
-/// Legacy uploads that finished the initial import, with no import running or queued for them.
-async fn legacy_uploads(ctx: &JobContext, profile_id: Option<Uuid>) -> Result<Vec<(Uuid, Uuid, Vec<u8>)>, JobError> {
+/// Legacy uploads with a terminal initial import and no import running or queued for them.
+#[derive(sqlx::FromRow)]
+struct LegacyUpload {
+    id: Uuid,
+    profile_id: Uuid,
+    zip_blob: Vec<u8>,
+    imported: bool,
+}
+
+async fn legacy_uploads(
+    ctx: &JobContext,
+    profile_id: Option<Uuid>,
+    include_dead: bool,
+) -> Result<Vec<LegacyUpload>, JobError> {
     Ok(sqlx::query_as(
-        "select i.id, i.profile_id, i.zip_blob from imaging_import i where not i.links_complete \
-         and ($1::uuid is null or i.profile_id = $1) \
-         and exists (select 1 from job j where j.kind = $2 and j.state = 'done' \
-         and j.payload->>'import_id' = i.id::text and not (j.payload ? 'accept')) \
+        "select i.id, i.profile_id, i.zip_blob, initial.imported from imaging_import i \
+         join lateral (select j.state = 'done' as imported from job j where j.kind = $2 \
+         and (j.state = 'done' or ($3 and j.state = 'dead')) \
+         and j.payload->>'import_id' = i.id::text and not (j.payload ? 'accept') \
+         order by imported desc limit 1) initial on true \
+         where not i.links_complete and ($1::uuid is null or i.profile_id = $1) \
          and not exists (select 1 from job j where j.kind = $2 and j.state in ('queued', 'running') \
          and j.payload->>'import_id' = i.id::text) order by i.created_at, i.id",
     )
     .bind(profile_id)
     .bind(crate::import::JOB)
+    .bind(include_dead)
     .fetch_all(&ctx.pool)
     .await?)
 }
@@ -183,7 +198,8 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         }
     }
     if !short.is_empty() {
-        for (import_id, _, zip) in legacy_uploads(&ctx, Some(profile_id)).await? {
+        for upload in legacy_uploads(&ctx, Some(profile_id), false).await? {
+            let import_id = upload.id;
             let holds: BTreeSet<String> = match replayed.get(&import_id) {
                 Some(done) => short.difference(done).cloned().collect(),
                 None => short.clone(),
@@ -192,7 +208,15 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
                 continue;
             }
             replay(
-                &ctx, &orthanc, profile_id, import_id, &zip, &holds, &needed, true, &mut tally,
+                &ctx,
+                &orthanc,
+                profile_id,
+                import_id,
+                &upload.zip_blob,
+                &holds,
+                &needed,
+                true,
+                &mut tally,
             )
             .await?;
         }
@@ -237,17 +261,22 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
 }
 
 /// For the sweep: gives each upload from before `imaging_import_study` (`links_complete` false) whose
-/// initial import finished the links its import would have made, then marks its links
-/// complete, so its removal follows the rules of a later upload. Its zip is read for the studies it
-/// holds, and each one its profile records is linked, unless the upload's part of it waits in review
-/// or was dismissed or rejected there (the import did not record that part). It runs under the UID
-/// lock of each of those studies, so a study being recorded right now is counted. If the ZIP or an
-/// entry cannot be read, the links stay incomplete and the next sweep retries. Returns the number
-/// of completed uploads.
+/// initial import succeeded the links its import would have made, then marks its links complete.
+/// A dead initial import can complete without links if its ZIP holds no study on the profile's
+/// record. Each recorded study is linked only if the upload's part of it has no pending or
+/// declined review decision. The sweep takes the UID lock of each study in the ZIP, so it counts
+/// studies being recorded concurrently. A ZIP that cannot be opened, or an entry I/O failure,
+/// leaves the links incomplete for the next sweep. Returns the number of completed uploads.
 pub(crate) async fn complete_links(ctx: &JobContext) -> Result<usize, JobError> {
     let mut completed = 0;
-    for (import_id, profile_id, zip) in legacy_uploads(ctx, None).await? {
-        let scan = match StudyFiles::open(&ctx.blobs, BlobOwner::Profile(profile_id), &hex::encode(&zip)).await {
+    for upload in legacy_uploads(ctx, None, true).await? {
+        let LegacyUpload {
+            id: import_id,
+            profile_id,
+            zip_blob,
+            imported,
+        } = upload;
+        let scan = match StudyFiles::open(&ctx.blobs, BlobOwner::Profile(profile_id), &hex::encode(&zip_blob)).await {
             Ok((_, scan)) => scan,
             Err(e) => {
                 tracing::warn!(%import_id, error = %e.message, "an imaging upload does not open: its links stay incomplete");
@@ -273,20 +302,35 @@ pub(crate) async fn complete_links(ctx: &JobContext) -> Result<usize, JobError> 
             tx.commit().await?;
             continue;
         }
-        sqlx::query(
-            "insert into imaging_import_study (import_id, study_instance_uid) \
-             select $1, s.study_instance_uid from imaging_study s where s.profile_id = $2 \
-             and s.study_instance_uid = any($3) and not exists (select 1 from review_item r \
-             where r.kind = $4 and r.ref_table = 'imaging_import' and r.ref_id = $1 \
-             and r.payload->>'study_uid' = s.study_instance_uid and r.status <> 'accepted') \
-             on conflict do nothing",
-        )
-        .bind(import_id)
-        .bind(profile_id)
-        .bind(&uids)
-        .bind(REVIEW_KIND)
-        .execute(&mut *tx)
-        .await?;
+        if imported {
+            sqlx::query(
+                "insert into imaging_import_study (import_id, study_instance_uid) \
+                 select $1, s.study_instance_uid from imaging_study s where s.profile_id = $2 \
+                 and s.study_instance_uid = any($3) and not exists (select 1 from review_item r \
+                 where r.kind = $4 and r.ref_table = 'imaging_import' and r.ref_id = $1 \
+                 and r.payload->>'study_uid' = s.study_instance_uid and r.status <> 'accepted') \
+                 on conflict do nothing",
+            )
+            .bind(import_id)
+            .bind(profile_id)
+            .bind(&uids)
+            .bind(REVIEW_KIND)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            let recorded: bool = sqlx::query_scalar(
+                "select exists (select 1 from imaging_study \
+                 where profile_id = $1 and study_instance_uid = any($2))",
+            )
+            .bind(profile_id)
+            .bind(&uids)
+            .fetch_one(&mut *tx)
+            .await?;
+            if recorded {
+                tx.commit().await?;
+                continue;
+            }
+        }
         sqlx::query("update imaging_import set links_complete = true where id = $1")
             .bind(import_id)
             .execute(&mut *tx)

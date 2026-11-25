@@ -1248,6 +1248,30 @@ async fn a_legacy_upload_whose_initial_import_failed_is_neither_replayed_nor_lin
     );
     assert_eq!(replayed, (0..3).map(|s| four.series_uid(s)).collect());
     assert_eq!(links(&e, later.import_id, U1).await?, 1);
+    assert_eq!(remove_now(&e, failed.import_id).await?, Removal::Recorded);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dead_legacy_upload_with_no_recorded_study_can_be_removed_after_the_sweep() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    let (failed, _) = e.upload("alex", &study_files(&Study::new(U2, ALEX), "DICOM")).await?;
+    sqlx::query("update job set state = 'dead', finished_at = now() where id = $1")
+        .bind(failed.job_id)
+        .execute(&e.rt.pool)
+        .await?;
+    as_before_the_links(&e, &[failed.import_id]).await?;
+    assert_eq!(remove_now(&e, failed.import_id).await?, Removal::Recorded);
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["links_completed"], 2, "{swept}");
+    assert_eq!(links(&e, failed.import_id, U1).await?, 0);
+    assert!(matches!(
+        remove_now(&e, failed.import_id).await?,
+        Removal::Removed { .. }
+    ));
     Ok(())
 }
 
