@@ -213,3 +213,23 @@ async fn an_inbox_drops_the_raw_strava_archive_and_links_a_second_arrival() -> R
     }
     Ok(())
 }
+
+/// An export of manual activities only holds the CSV and an empty activities folder. It is still a
+/// Strava export: nothing imports, and every row is counted as a row without a file.
+#[tokio::test]
+async fn an_export_without_activity_files_counts_its_rows() -> R {
+    let env = Env::new().await?;
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    writer.start_file("activities.csv", SimpleFileOptions::default())?;
+    writer.write_all(b"Activity ID,Activity Name,Filename\n1,Manual walk,\n2,Manual run,\n")?;
+    writer.add_directory("activities/", SimpleFileOptions::default())?;
+    writer.start_file("profile.csv", SimpleFileOptions::default())?;
+    writer.write_all(b"Athlete ID\n1\n")?;
+    let archive = writer.finish()?.into_inner();
+    let (out, _) = upload(&env, &archive).await?;
+    assert_eq!(out["accepted"], 0, "{out}");
+    assert_eq!(out["strava"]["files_imported"], 0);
+    assert_eq!(out["strava"]["rows_without_file"], 2);
+    assert_eq!(out["strava"]["files_without_row"], 0);
+    Ok(())
+}

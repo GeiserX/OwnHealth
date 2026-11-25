@@ -146,8 +146,8 @@ fn classify_zip(reader: impl Read + Seek) -> UploadKind {
     kind
 }
 
-/// Find activities.csv beside the activity files, including in a repacked export with a wrapper
-/// directory. Directory entries alone do not identify a Strava export.
+/// Find activities.csv beside the activities folder, including in a repacked export with a wrapper
+/// directory. An export of manual activities only has the folder entry and no activity file.
 pub fn strava_manifest(archive: &zip::ZipArchive<impl Read + Seek>) -> Option<String> {
     let roots: std::collections::HashSet<_> = archive
         .file_names()
@@ -161,9 +161,6 @@ pub fn strava_manifest(archive: &zip::ZipArchive<impl Read + Seek>) -> Option<St
         return None;
     }
     archive.file_names().flatten().find_map(|name| {
-        if name.ends_with('/') {
-            return None;
-        }
         for (i, _) in name.match_indices("activities/") {
             let root = &name[..i];
             if roots.contains(root) {
