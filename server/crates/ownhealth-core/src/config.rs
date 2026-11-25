@@ -59,10 +59,10 @@ pub struct Settings {
     /// every SMART Health Link points at. Unset: sharing is off. https, or http on a loopback host
     /// ([`check_share_url`]).
     pub share_url: Option<String>,
-    /// `OWNHEALTH_OW_URL`: the private Open Wearables origin. Unset: the OAuth proxy is off.
+    /// The private Open Wearables origin. Set by `OWNHEALTH_OW_URL` or the Compose wearables profile.
     pub ow_url: Option<reqwest::Url>,
     /// `OWNHEALTH_OW_PUBLIC_URL`: the origin the vendor sends the browser to, before the /ow prefix.
-    /// Unset: the setup guide uses `base_url`.
+    /// Set when the integration is on and a callback origin is configured. Otherwise the guide uses `base_url`.
     pub ow_public_url: Option<String>,
     /// `OWNHEALTH_TRUSTED_PROXIES`: comma-separated addresses or CIDR ranges of the proxies in front
     /// of the app. Only a request whose direct peer is one of them has its `X-Forwarded-For` read for
@@ -336,6 +336,48 @@ fn ow_origin(value: &str, setting: &str) -> Result<reqwest::Url> {
         .ok_or_else(|| Error::Invalid(format!("{setting} must be an HTTP or HTTPS origin.")))
 }
 
+fn configured_ow_public_url(env: &dyn Env, compose_fallback: Option<String>) -> Result<Option<String>> {
+    const PUBLIC: &str = "OWNHEALTH_OW_PUBLIC_URL";
+    const DOMAIN: &str = "OWNHEALTH_DOMAIN";
+    let public = if compose_fallback.is_some() {
+        // The sidecar receives the interpolated string, including when a _FILE twin is set.
+        env.var(PUBLIC).filter(|value| !value.is_empty())
+    } else {
+        env_or(env, "OW_PUBLIC_URL")?
+    };
+    let (value, source) = match (public, compose_fallback) {
+        (Some(value), _) => (value, Some(PUBLIC)),
+        (None, Some(value)) => {
+            let source = match env.var("OWNHEALTH_OW_COMPOSE_FALLBACK_VAR").as_deref() {
+                Some(DOMAIN) => Some(DOMAIN),
+                Some("OWNHEALTH_BASE_URL") => Some("OWNHEALTH_BASE_URL"),
+                _ => None, // Quickstart derived the origin from its published port.
+            };
+            (value, source)
+        }
+        (None, None) => return Ok(None),
+    };
+    let canonical = ow_origin(&value, source.unwrap_or(PUBLIC))?
+        .origin()
+        .ascii_serialization();
+    if value != canonical {
+        // OW appends its callback path to the string as written. Normalizing only the guide
+        // would tell the operator to register a redirect URI different from the one OW sends.
+        let guidance = match source {
+            Some(DOMAIN) => format!(
+                "{DOMAIN} must be written as {}",
+                canonical.trim_start_matches("https://")
+            ),
+            Some(setting) => format!("{setting} must be written as {canonical}"),
+            None => format!("Set {PUBLIC}={canonical} for the callback origin"),
+        };
+        return Err(Error::Invalid(format!(
+            "{guidance} because Open Wearables builds its redirect URI from the value as written."
+        )));
+    }
+    Ok(Some(value))
+}
+
 impl Settings {
     pub fn from_env() -> Result<Settings> {
         Settings::from(&ProcessEnv)
@@ -350,26 +392,24 @@ impl Settings {
         if let Some(password) = env_or(env, "DB_PASSWORD")? {
             url = with_password(&url, &password);
         }
+        // Compose starts the sidecar only with the wearables profile. A separately configured
+        // private URL also enables the integration, including outside Compose.
+        let ow_compose_fallback = env.var("OWNHEALTH_OW_COMPOSE_FALLBACK").filter(|_| {
+            env.var("COMPOSE_PROFILES").is_some_and(|profiles| {
+                profiles
+                    .split(',')
+                    .any(|profile| matches!(profile.trim(), "wearables" | "*"))
+            })
+        });
         let ow_url = env_or(env, "OW_URL")?
+            .or_else(|| ow_compose_fallback.as_ref().map(|_| "http://ow-app:8000".into()))
             .map(|s| ow_origin(&s, "OWNHEALTH_OW_URL"))
             .transpose()?;
-        // The Compose files give Open Wearables this value as written with /ow appended (falling back
-        // to OWNHEALTH_BASE_URL), and it builds its redirect URI from that. So the guide's URI matches
-        // only when the value is already its canonical origin: no trailing slash or space, a lowercase
-        // host, no default port and an ASCII host.
-        let ow_public_url = env_or(env, "OW_PUBLIC_URL")?
-            .map(|s| {
-                let canon = ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?.origin().ascii_serialization();
-                if s != canon {
-                    return Err(Error::Invalid(format!(
-                        "OWNHEALTH_OW_PUBLIC_URL must be written as {canon}, because Open Wearables \
-                         builds its redirect URI from the value as written. The Compose files use \
-                         OWNHEALTH_BASE_URL when it is unset, so write that one the same way."
-                    )));
-                }
-                Ok(s)
-            })
-            .transpose()?;
+        let ow_public_url = if ow_url.is_some() {
+            configured_ow_public_url(env, ow_compose_fallback)?
+        } else {
+            None
+        };
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
         let dev_auth = flag(env, "DEV_AUTH", false)?;
         // only a debug build with dev auth uses the map (routes/shc.rs), so no other start reads it
@@ -695,9 +735,12 @@ mod tests {
             ("https://bücher.example.test", "https://xn--bcher-kva.example.test"),
         ];
         for (value, canonical) in cases {
-            let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)]))
-                .expect_err(value)
-                .to_string();
+            let err = Settings::from(&env(&[
+                ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+                ("OWNHEALTH_OW_PUBLIC_URL", value),
+            ]))
+            .expect_err(value)
+            .to_string();
             assert!(
                 err.contains(&format!("OWNHEALTH_OW_PUBLIC_URL must be written as {canonical}")),
                 "{value}: {err}"
@@ -709,7 +752,11 @@ mod tests {
             "http://localhost:8080",
             "http://[::1]:8080",
         ] {
-            let s = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)])).expect(value);
+            let s = Settings::from(&env(&[
+                ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+                ("OWNHEALTH_OW_PUBLIC_URL", value),
+            ]))
+            .expect(value);
             assert_eq!(s.ow_public_url.as_deref(), Some(value));
         }
     }
@@ -733,7 +780,9 @@ mod tests {
         ];
         for setting in ["OWNHEALTH_OW_URL", "OWNHEALTH_OW_PUBLIC_URL"] {
             for value in bad {
-                let err = Settings::from(&env(&[(setting, value)])).expect_err(value).to_string();
+                let mut vars = env(&[("OWNHEALTH_OW_URL", "http://ow-app:8000")]);
+                vars.insert(setting.into(), value.into());
+                let err = Settings::from(&vars).expect_err(value).to_string();
                 assert!(
                     err.contains(setting) && !err.contains("secret"),
                     "{setting}={value}: {err}"
@@ -743,9 +792,12 @@ mod tests {
         // Open Wearables appends /ow to the raw value, so a trailing slash would give it //ow while
         // the guide shows /ow. Compose falls back to OWNHEALTH_BASE_URL, so this catches that too.
         for value in ["https://cb.example.test/", "http://localhost:8080/"] {
-            let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)]))
-                .expect_err(value)
-                .to_string();
+            let err = Settings::from(&env(&[
+                ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+                ("OWNHEALTH_OW_PUBLIC_URL", value),
+            ]))
+            .expect_err(value)
+            .to_string();
             let canonical = value.trim_end_matches('/');
             assert!(
                 err.contains(&format!("must be written as {canonical}")),

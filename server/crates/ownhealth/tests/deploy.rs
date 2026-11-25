@@ -1733,6 +1733,101 @@ fn the_public_wearables_callback_needs_the_literal_true_switch() -> R {
     Ok(())
 }
 
+fn rendered_wearables_settings(app: &Value) -> Result<Settings, ownhealth_core::error::Error> {
+    let vars = [
+        "OWNHEALTH_SECRETS_KEY_FILE",
+        "OWNHEALTH_DB_PASSWORD_FILE",
+        "OWNHEALTH_SECRET_KEY_FILE",
+    ];
+    let env: HashMap<String, String> = app["environment"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| !vars.contains(&key.as_str()))
+        .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_owned())))
+        .collect();
+    Settings::from(&env)
+}
+
+#[test]
+fn both_stacks_ignore_the_wearables_origin_with_the_profile_off() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        let base = format!("\n{extra}COMPOSE_PROFILES=\n");
+        let noncanonical = if case == "homelab" {
+            "OWNHEALTH_DOMAIN=Health.Example.test:443\n"
+        } else {
+            "OWNHEALTH_BASE_URL=\nOWNHEALTH_HTTP_PORT=80\n"
+        };
+        for override_url in ["", "OWNHEALTH_OW_PUBLIC_URL=invalid\n"] {
+            let services = render(&compose, &env, &format!("{base}{noncanonical}{override_url}"), &[])?;
+            assert!(services.get("ow-app").is_none(), "{case}");
+            let settings =
+                rendered_wearables_settings(&services["app"]).map_err(|err| anyhow::anyhow!("{case}: {err}"))?;
+            assert!(settings.ow_url.is_none() && settings.ow_public_url.is_none(), "{case}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn both_stacks_name_the_setting_to_fix_for_wearables_callbacks() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        let base = format!("\n{extra}COMPOSE_PROFILES=ocr,wearables\n");
+        let (noncanonical, source, correction) = if case == "homelab" {
+            (
+                "OWNHEALTH_DOMAIN=Health.Example.test:443\n",
+                "OWNHEALTH_DOMAIN",
+                "health.example.test",
+            )
+        } else {
+            (
+                "OWNHEALTH_BASE_URL=http://LOCALHOST:80\n",
+                "OWNHEALTH_BASE_URL",
+                "http://localhost",
+            )
+        };
+        for (override_url, source, correction) in [
+            ("", source, correction),
+            (
+                "OWNHEALTH_OW_PUBLIC_URL=https://Public.Example.test:443\n",
+                "OWNHEALTH_OW_PUBLIC_URL",
+                "https://public.example.test",
+            ),
+        ] {
+            let services = render(&compose, &env, &format!("{base}{noncanonical}{override_url}"), &[])?;
+            let err = rendered_wearables_settings(&services["app"])
+                .expect_err(case)
+                .to_string();
+            assert!(
+                err.contains(&format!("{source} must be written as {correction}")),
+                "{case}: {err}"
+            );
+        }
+
+        if case == "quickstart" {
+            let services = render(
+                &compose,
+                &env,
+                &format!("{base}OWNHEALTH_BASE_URL=\nOWNHEALTH_HTTP_PORT=80\n"),
+                &[],
+            )?;
+            let err = rendered_wearables_settings(&services["app"])
+                .expect_err(case)
+                .to_string();
+            assert!(err.contains("Set OWNHEALTH_OW_PUBLIC_URL=http://localhost "), "{err}");
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn both_stacks_give_the_guide_and_open_wearables_the_same_callback_origin() -> R {
     if !has_compose() {
@@ -1743,11 +1838,11 @@ fn both_stacks_give_the_guide_and_open_wearables_the_same_callback_origin() -> R
         let base = format!("\n{extra}COMPOSE_PROFILES=wearables\n");
         let public = "https://callbacks.example.test";
         let services = render(&compose, &env, &base, &[])?;
-        let origin = env_str(&services["app"], "OWNHEALTH_OW_PUBLIC_URL");
-        assert!(!origin.is_empty(), "{case}: default callback origin");
+        let settings = rendered_wearables_settings(&services["app"])?;
+        let origin = settings.ow_public_url.as_deref().expect("default callback origin");
         assert_eq!(
-            env_str(&services["app"], "OWNHEALTH_OW_URL"),
-            "http://ow-app:8000",
+            settings.ow_url.as_ref().map(|url| url.as_str()),
+            Some("http://ow-app:8000/"),
             "{case}"
         );
         assert_eq!(
@@ -1760,7 +1855,8 @@ fn both_stacks_give_the_guide_and_open_wearables_the_same_callback_origin() -> R
         }
         let custom = format!("{base}OWNHEALTH_OW_PUBLIC_URL={public}\nOWNHEALTH_OW_CALLBACK=true\n");
         let services = render(&compose, &env, &custom, &[])?;
-        assert_eq!(env_str(&services["app"], "OWNHEALTH_OW_PUBLIC_URL"), public, "{case}");
+        let settings = rendered_wearables_settings(&services["app"])?;
+        assert_eq!(settings.ow_public_url.as_deref(), Some(public), "{case}");
         assert_eq!(
             env_str(&services["ow-app"], "API_BASE_URL"),
             format!("{public}/ow"),

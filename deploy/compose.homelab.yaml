@@ -54,8 +54,12 @@ services:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth_app@db:5432/ownhealth
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password
       OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
-      OWNHEALTH_OW_URL: http://ow-app:8000
-      OWNHEALTH_OW_PUBLIC_URL: ${OWNHEALTH_OW_PUBLIC_URL:-https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}}
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
+      OWNHEALTH_OW_URL: ${OWNHEALTH_OW_URL:-}
+      OWNHEALTH_OW_PUBLIC_URL: ${OWNHEALTH_OW_PUBLIC_URL:-}
+      # Keep the fallback in sync with ow-app's API_BASE_URL. Pass its source for startup errors.
+      OWNHEALTH_OW_COMPOSE_FALLBACK: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
+      OWNHEALTH_OW_COMPOSE_FALLBACK_VAR: OWNHEALTH_DOMAIN
       OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals every profile's files and the inbox secrets
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
