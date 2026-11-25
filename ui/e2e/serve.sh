@@ -50,7 +50,7 @@ export OWNHEALTH_BASE_URL="http://127.0.0.1:$port"
 # share links on: a loopback http address is the one plain-http share address the app accepts
 export OWNHEALTH_SHARE_URL="http://127.0.0.1:$port"
 export OWNHEALTH_SECRET_KEY="$(openssl rand -hex 48)"
-export OWNHEALTH_SECRETS_KEY="$(openssl rand -base64 32)" # seals the connectors' refresh tokens
+export OWNHEALTH_SECRETS_KEY="${OWNHEALTH_E2E_SECRETS_KEY:-$(openssl rand -base64 32)}" # seals the connectors' refresh tokens
 export OWNHEALTH_DEV_CONNECTOR_LOOPBACK=1 # debug build with dev auth only: the fake vendor on loopback
 # imaging on, against fake-orthanc.mjs, when the config names its port (imaging.spec.ts)
 if [ -n "${OWNHEALTH_E2E_ORTHANC_PORT:-}" ]; then

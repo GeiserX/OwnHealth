@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::blobs::{BlobOwner, BlobStore};
+use crate::blobs::{BlobOwner, BlobStore, remove_unheld_upload, sha256_hex_to_bytes};
 use crate::dedup::{record_item, seen_item};
-use crate::documents::{NewDocument, UploadKind, create_document, job_kind, mime, sniff};
+use crate::documents::{NewDocument, UploadKind, create_document, job_kind, lock_exports, mime, sniff};
 use crate::error::{Error, Result};
 use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
@@ -131,6 +131,45 @@ async fn remember(conn: &mut PgConnection, a: &Arrival<'_>, document_id: Option<
     Ok(())
 }
 
+/// A previously imported Garmin item can match the next arrival by its raw hash, even when its
+/// new inbox ID differs. The original archive has already been released, so release this copy too.
+async fn garmin_duplicate(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>) -> Result<Option<Arrived>> {
+    let (Some(source), Some(ext)) = (a.source_id, a.external_id) else {
+        return Ok(None);
+    };
+    let hash = sha256_hex_to_bytes(a.sha256)?;
+    let prior: Option<Option<Uuid>> = sqlx::query_scalar(
+        "select i.document_id from source_item i left join document d on d.id = i.document_id \
+         where i.source_id = $1 and i.profile_id = $2 and i.blob_sha256 = $3 and i.raw_released_at is not null \
+         and (i.document_id is null or (d.profile_id = $2 and d.status = 'active')) \
+         order by i.seen_at desc limit 1",
+    )
+    .bind(source)
+    .bind(a.profile_id)
+    .bind(&hash)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(document_id) = prior else {
+        return Ok(None);
+    };
+    remember(&mut *conn, a, document_id).await?;
+    sqlx::query(
+        "update source_item set raw_released_at = now() \
+         where source_id = $1 and external_id = $2 and profile_id = $3 and blob_sha256 = $4",
+    )
+    .bind(source)
+    .bind(ext)
+    .bind(a.profile_id)
+    .bind(hash)
+    .execute(&mut *conn)
+    .await?;
+    remove_unheld_upload(conn, blobs, a.profile_id, a.sha256).await?;
+    Ok(Some(match document_id {
+        Some(document_id) => Arrived::Duplicate { document_id },
+        None => Arrived::AlreadySeen { document_id: None },
+    }))
+}
+
 /// One arrival, in the caller's transaction. See the module docs for the steps.
 pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>) -> Result<Arrived> {
     if a.external_id.is_some() && a.source_id.is_none() {
@@ -139,12 +178,27 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
     if let (Some(source_id), Some(ext)) = (a.source_id, a.external_id)
         && let Some(item) = seen_item(&mut *conn, source_id, ext).await?
     {
+        if item.raw_released_at.is_some()
+            && item.profile_id == Some(a.profile_id)
+            && item.blob_sha256.as_deref() == Some(sha256_hex_to_bytes(a.sha256)?.as_slice())
+        {
+            lock_exports(&mut *conn, a.profile_id, "garmin").await?;
+            remove_unheld_upload(&mut *conn, blobs, a.profile_id, a.sha256).await?;
+        }
         return Ok(Arrived::AlreadySeen {
             document_id: item.document_id,
         });
     }
     let filename = a.filename.unwrap_or("").to_string();
     let kind = sniff_blob(blobs, BlobOwner::Profile(a.profile_id), a.sha256, filename.clone()).await?;
+    if kind == "garmin_zip" {
+        // Hold the import's lock while registering the raw hash, so a duplicate arrival that
+        // shares the running job cannot register a new holder after that job releases the hash.
+        lock_exports(&mut *conn, a.profile_id, "garmin").await?;
+        if let Some(duplicate) = garmin_duplicate(&mut *conn, blobs, a).await? {
+            return Ok(duplicate);
+        }
+    }
     match kind {
         "pdf" | "image" => {
             let m = mime(kind).unwrap_or_else(|| image_mime(&filename));

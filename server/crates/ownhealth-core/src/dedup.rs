@@ -48,12 +48,14 @@ pub struct SourceItem {
     pub blob_sha256: Option<Vec<u8>>,
     pub document_id: Option<Uuid>,
     pub quarantine_id: Option<Uuid>,
+    pub profile_id: Option<Uuid>,
+    pub raw_released_at: Option<DateTime<Utc>>,
     pub seen_at: DateTime<Utc>,
 }
 
 pub async fn seen_item(conn: &mut PgConnection, source_id: Uuid, external_id: &str) -> Result<Option<SourceItem>> {
     Ok(sqlx::query_as(
-        "select source_id, external_id, blob_sha256, document_id, quarantine_id, seen_at from source_item \
+        "select source_id, external_id, blob_sha256, document_id, quarantine_id, profile_id, raw_released_at, seen_at from source_item \
          where source_id = $1 and external_id = $2",
     )
     .bind(source_id)
@@ -127,7 +129,7 @@ pub async fn record_pulled(
         "insert into source_item (source_id, external_id, blob_sha256, document_id, profile_id) \
          values ($1, $2, $3, $4, $5) on conflict (source_id, external_id) do update \
          set blob_sha256 = excluded.blob_sha256, document_id = excluded.document_id, \
-         profile_id = excluded.profile_id, seen_at = now()",
+         profile_id = excluded.profile_id, raw_released_at = null, seen_at = now()",
     )
     .bind(source_id)
     .bind(external_id)

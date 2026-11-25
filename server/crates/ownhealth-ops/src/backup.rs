@@ -269,7 +269,7 @@ async fn referenced_blobs(conn: &mut PgConnection) -> Result<Vec<(BlobOwner, Str
     parts.push(
         "select i.profile_id, i.quarantine_id, i.blob_sha256 from source_item i \
          left join quarantine_item q on q.id = i.quarantine_id \
-         where i.profile_id is not null or i.quarantine_id is null or q.status = 'held'"
+         where i.raw_released_at is null and (i.profile_id is not null or i.quarantine_id is null or q.status = 'held')"
             .into(),
     );
     parts.push("select profile_id, null::uuid, zip_blob from imaging_import".into());

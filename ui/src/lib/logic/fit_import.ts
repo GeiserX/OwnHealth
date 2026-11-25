@@ -58,9 +58,13 @@ export function fitDocLines(flags: unknown): FitLine[] | null {
 	return fitLines({ fit: (flags as Record<string, unknown>).fit }, DOC_COUNTS);
 }
 
-/** An import.fit job that ended with its result hidden from this member (no read:wearables there). */
+/** The imports whose result the panel explains as shared only with people who can see Wearables. */
+const HIDDEN_LINE_KINDS = ['import.fit', 'import.garmin_zip'];
+
+/** An import.fit or import.garmin_zip job that ended with its result hidden from this member (no
+ * read:wearables there). */
 export function fitHidden(job: { kind?: string; state?: string; result?: unknown } | undefined): boolean {
-	return !!job && job.kind === 'import.fit' && job.state === 'done' && (job.result === null || job.result === undefined);
+	return !!job && HIDDEN_LINE_KINDS.includes(job.kind ?? '') && job.state === 'done' && (job.result === null || job.result === undefined);
 }
 
 /** The document a finished import.fit upload made (the job result names it; the upload answer cannot, as

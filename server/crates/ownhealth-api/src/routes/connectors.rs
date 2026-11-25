@@ -7,7 +7,7 @@
 //! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie |
 //! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>`; a connect or reconnect of a polled kind queues its first pull |
 //! | `POST /connectors/{id}/reconnect` | `{authorize_url}` for a new grant on the same source; clears the reconsent flag on return |
-//! | `DELETE /connectors/{id}` | revoke at the vendor when it offers it, then delete the tokens and the cursor: `{id, revocation, revoke_page}` |
+//! | `DELETE /connectors/{id}` | revoke at the vendor when it offers it, then delete the tokens and the cursor: `{id, revocation, revoke_page}`; `revoke_page` is the vendor's own page when the revocation failed or is not offered, and always for Blue Button |
 //!
 //! An owner or guardian of the household who manages the profile. The callback counts only in the
 //! browser and the session that started the launch, for a profile that person still manages. No
@@ -445,7 +445,7 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(error = %e, profile_id = %pending.profile_id, "a connector code exchange failed");
-            return Ok(back(&state, "exchange_failed"));
+            return Ok(back(&state, exchange_refusal(&e)));
         }
     };
     let now = Utc::now();
@@ -469,6 +469,16 @@ async fn callback(State(rt): State<Runtime>, meta: Meta, Query(q): Params, o: Op
     Ok(redirect(&state, &format!("/connections?connected={id}")))
 }
 
+/// The code a failed exchange sends back to the Connections screen: a refusal that has its own words
+/// there keeps its code; anything else reads as the generic exchange failure, which names the
+/// registration at the vendor.
+fn exchange_refusal(e: &OAuthError) -> &'static str {
+    match e {
+        OAuthError::Refused { code, .. } if matches!(*code, "no_patient" | "client_secret_required") => code,
+        _ => "exchange_failed",
+    }
+}
+
 fn word(r: Revocation) -> &'static str {
     match r {
         Revocation::Revoked => "revoked",
@@ -479,9 +489,7 @@ fn word(r: Revocation) -> &'static str {
 }
 
 fn revoke_page(kind: &str, r: Revocation) -> Option<&'static str> {
-    matches!(r, Revocation::Failed | Revocation::NotOffered)
-        .then(|| oauth::kind_spec(kind).and_then(|s| s.revoke_page))
-        .flatten()
+    oauth::revoke_page(kind, r)
 }
 
 async fn disconnect(
@@ -558,6 +566,42 @@ pub async fn revoke_before_delete(rt: &Runtime, p: &Principal, profile_id: Uuid,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_medicare_disconnect_always_links_the_medicare_page() {
+        // CMS's revoke_token ends the tokens; the app stays listed at Medicare until the person removes it
+        for r in [
+            Revocation::Revoked,
+            Revocation::Failed,
+            Revocation::NotOffered,
+            Revocation::NoToken,
+        ] {
+            assert_eq!(
+                revoke_page("bluebutton", r),
+                Some("https://www.medicare.gov/account/"),
+                "{r:?}"
+            );
+        }
+        assert_eq!(revoke_page("smart", Revocation::Revoked), None);
+        assert_eq!(revoke_page("smart", Revocation::Failed), None);
+    }
+
+    #[test]
+    fn an_exchange_refusal_with_its_own_words_keeps_its_code() {
+        let refused = |code| OAuthError::Refused { code, message: "" };
+        assert_eq!(exchange_refusal(&refused("no_patient")), "no_patient");
+        assert_eq!(
+            exchange_refusal(&refused("client_secret_required")),
+            "client_secret_required"
+        );
+        // a client registered for another server reads as the generic words that name the registration
+        assert_eq!(exchange_refusal(&refused("bad_issuer")), "exchange_failed");
+        let vendor = OAuthError::Vendor {
+            status: 400,
+            code: "invalid_grant".into(),
+        };
+        assert_eq!(exchange_refusal(&vendor), "exchange_failed");
+    }
 
     #[test]
     fn the_dev_loopback_switch_is_ignored_without_dev_auth() {

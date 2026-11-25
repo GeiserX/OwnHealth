@@ -3,6 +3,7 @@
 //! `demo/hooks/apple_fhir.py` (order 300).
 
 pub mod apple_health;
+pub mod bluebutton;
 pub mod brands;
 pub mod ccda;
 pub mod demo;
@@ -31,6 +32,7 @@ pub fn register() {
     register_handler(ccda::JOB, |ctx, job| Box::pin(ccda::import_ccda_job(ctx, job)));
     ownhealth_core::review::register_accept_handler("fhir_unmapped", fhir::accept_fhir_boxed);
     smart::register();
+    bluebutton::register();
     ownhealth_core::demo::register_demo_hook("apple_fhir", demo::ORDER, demo::seed_boxed);
     brands::register();
 }

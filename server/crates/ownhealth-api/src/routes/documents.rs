@@ -665,7 +665,7 @@ async fn assign(
     e.done()?;
     let profile = profile.unwrap_or_default();
     let mut tx = rt.pool.begin().await?;
-    // A CGM export's lock before its row: a running import of it holds that lock and then writes the row.
+    // Take the CGM or Garmin export lock before the row, in the order its importer uses.
     ownhealth_ingest_structured::retract::lock_export_of(&mut tx, document_id).await?;
     // The row lock first: a move running at the same time commits before the owner is read here, so
     // the permission check and the re-key (in assign_document) both see the owner it left.
@@ -713,7 +713,7 @@ async fn retract(
     let reason = body_str(&mut e, &body, "reason");
     e.done()?;
     let mut tx = rt.pool.begin().await?;
-    // As the assign route: a CGM export's lock, then the row lock, then the owner read. A move that
+    // As in assign: take the export lock, then the row lock, then read the owner. A move that
     // commits while this waits gives the document its new owner, and the permission is checked on it.
     ownhealth_ingest_structured::retract::lock_export_of(&mut tx, document_id).await?;
     ownhealth_core::documents::lock_owner(&mut tx, document_id).await?;
