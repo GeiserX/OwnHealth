@@ -258,6 +258,8 @@ pub async fn shutdown_signal() {
 
 pub async fn serve(settings: Settings) -> anyhow::Result<()> {
     check_secret_key(&settings)?;
+    // the vendor profiles drive the connector token code: a bad file stops the start and names its line
+    ownhealth_core::connector_profiles::check().map_err(anyhow::Error::msg)?;
     // Imaging is on when OWNHEALTH_ORTHANC_URL is set (Settings reads it; a URL without a password
     // stops the start). The viewer proxy and the DICOM import job use the same Orthanc.
     let orthanc = settings.orthanc.clone();
