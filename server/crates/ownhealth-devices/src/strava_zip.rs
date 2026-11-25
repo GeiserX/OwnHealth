@@ -382,6 +382,16 @@ fn sport(text: &str) -> Option<String> {
     Some(kind.into())
 }
 
+/// Strava's own GPX writes its activity type numbers: 9 run, 10 walk, 4 hike (1 is a ride).
+fn gpx_sport(text: &str) -> Option<String> {
+    sport(match text {
+        "9" => "running",
+        "10" => "walking",
+        "4" => "hiking",
+        other => other,
+    })
+}
+
 #[derive(Default)]
 struct Point {
     time: Option<DateTime<Utc>>,
@@ -440,7 +450,7 @@ impl XmlReadings {
         let value = value.trim();
         let positive = || value.parse::<f64>().ok().filter(|v| v.is_finite() && *v >= 0.0);
         match path {
-            [Gpx, Track, Type] => self.activity.sport = sport(value),
+            [Gpx, Track, Type] => self.activity.sport = gpx_sport(value),
             [Gpx, Track, Segment, Point, Time] | [Tcx, Activities, Activity, Lap, TcxTrack, TcxPoint, Time] => {
                 self.point.time = utc(value)
             }
@@ -587,5 +597,25 @@ mod tests {
         assert!(gps);
         assert!(xml_readings(Format::Gpx, b"<!DOCTYPE gpx><gpx/>").is_none());
         assert!(xml_readings(Format::Gpx, b"<gpx><trk>").is_none());
+    }
+
+    fn gpx_distance(kind: &str) -> Vec<(&'static str, f64)> {
+        let source = format!(
+            r#"<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><type>{kind}</type><trkseg>
+            <trkpt lat="40.0" lon="-3.0"><time>2024-01-08T08:00:00Z</time></trkpt>
+            <trkpt lat="40.01" lon="-3.0"><time>2024-01-08T08:05:00Z</time></trkpt>
+            </trkseg></trk></gpx>"#
+        );
+        let (samples, _) = xml_readings(Format::Gpx, source.as_bytes()).expect("well-formed GPX");
+        samples.iter().map(|s| (s.metric, s.v)).collect()
+    }
+
+    #[test]
+    fn strava_activity_type_numbers_in_a_gpx_name_the_sport() {
+        // Strava's own GPX writes 9 for a run, 10 for a walk, 4 for a hike and 1 for a ride.
+        for kind in ["running", "9", "10", "4"] {
+            assert_eq!(gpx_distance(kind), [("distance", 1.112)], "type {kind}");
+        }
+        assert!(gpx_distance("1").is_empty(), "a ride brings no walking or running distance");
     }
 }
