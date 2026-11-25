@@ -22,6 +22,7 @@ providers:
   health_auto_export: {ingest: allow, mcp: served, path: "Health Auto Export push"}
   gadgetbridge: {ingest: allow, mcp: served, path: "Gadgetbridge database export"}
   nightscout: {ingest: allow, mcp: served, path: "the person's own Nightscout"}
+  garmin_export: {ingest: allow, mcp: served, path: "Garmin account export zip"}
   fit: {ingest: allow, mcp: served, path: "FIT activity files (Garmin, Coros, Suunto exports)"}
   strava_export: {ingest: allow, mcp: served, path: "Strava bulk account export"}
   libreview: {ingest: allow, mcp: served, path: "LibreView CSV export"}

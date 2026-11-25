@@ -670,7 +670,7 @@ fn fetch_failure(e: NetError) -> Fetch {
         NetError::Resolve(_) => Fetch::Failed("dns".into()),
         NetError::Timeout(_) => Fetch::Failed("timeout".into()),
         NetError::TooLarge(_) => Fetch::Failed("too_large".into()),
-        NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Write(_) => {
+        NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Connect(_) | NetError::Write(_) => {
             Fetch::Failed("connect".into())
         }
     }
@@ -1258,6 +1258,7 @@ mod tests {
             NetError::BadUrl,
             NetError::NotHttps,
             NetError::Write("w".into()),
+            NetError::Connect("h".into()),
             NetError::Http {
                 host: "h".into(),
                 message: "m".into(),

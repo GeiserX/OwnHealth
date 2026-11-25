@@ -167,7 +167,9 @@
 	const revocationText = (r: ConnectionRow, done: DisconnectOut) =>
 		(done.revocation === 'failed' || done.revocation === 'not_offered') && !done.revoke_page && r.server
 			? tf('con_rev_' + done.revocation + '_at', { label: r.label, server: r.server })
-			: tf('con_rev_' + done.revocation, { label: r.label });
+			: done.revocation === 'revoked' && done.revoke_page
+				? tf('con_rev_revoked_page', { label: r.label })
+				: tf('con_rev_' + done.revocation, { label: r.label });
 
 	const stateLine = (r: ConnectionRow, s: ConnectionState): { text: string; tone: string } | null => {
 		const n = daysLeft(r.grant_expires_at, now) ?? 0;
@@ -243,6 +245,10 @@
 					<dd class:stale={s === 'stale'}><span class="num nw">{r.last_success_at ? ago(r.last_success_at) : t('i2_never')}</span></dd>
 					<dt>{t('fu_last_run')}</dt>
 					<dd><span class="num nw">{r.last_run_at ? ago(r.last_run_at) : t('i2_never')}</span></dd>
+					{#if r.kind === 'bluebutton' && r.claim_count != null}
+						<dt>{t('con_medicare_claims')}</dt>
+						<dd><span class="num">{new Intl.NumberFormat(intlLocale(i18n.lang)).format(r.claim_count)}</span></dd>
+					{/if}
 					{#if r.server}
 						<dt>{t('con_server')}</dt>
 						<dd class="mono srv">{r.server}</dd>
@@ -327,13 +333,14 @@
 	}
 	.facts {
 		display: grid;
-		grid-template-columns: auto 1fr;
+		grid-template-columns: fit-content(48%) minmax(0, 1fr);
 		gap: 2px 12px;
 		margin: 0;
 		font-size: 12px;
 	}
 	.facts dt {
 		color: var(--dim);
+		overflow-wrap: anywhere;
 	}
 	.facts dd {
 		margin: 0;

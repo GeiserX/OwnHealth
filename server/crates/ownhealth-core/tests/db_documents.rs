@@ -146,3 +146,114 @@ async fn concurrent_uploads_of_the_same_bytes_return_one_document() -> R {
     assert_eq!(sources, 2);
     Ok(())
 }
+
+/// Removes `profile`'s upload of `sha` in a transaction of its own, as an importer does once it released it.
+async fn remove_released_upload(c: &mut sqlx::PgConnection, blobs: &BlobStore, profile: uuid::Uuid, sha: &str) -> R {
+    use sqlx::Connection;
+    let mut tx = c.begin().await?;
+    ownhealth_core::blobs::remove_unheld_upload(&mut tx, blobs, profile, sha).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A document row of `profile` naming bytes of its own, for a page to hang from.
+async fn bare_document(
+    c: &mut sqlx::PgConnection,
+    household: uuid::Uuid,
+    profile: uuid::Uuid,
+) -> anyhow::Result<uuid::Uuid> {
+    Ok(sqlx::query_scalar(
+        "insert into document (household_id, profile_id, blob_sha256, filename, mime, size_bytes, doc_type) \
+         values ($1, $2, decode($3, 'hex'), 'informe.pdf', 'application/pdf', 3, 'other') returning id",
+    )
+    .bind(household)
+    .bind(profile)
+    .bind(ownhealth_core::ids::token_hex(32))
+    .fetch_one(c)
+    .await?)
+}
+
+/// The bytes of a released upload that another row also names (an imaging zip, a rendered page, any
+/// blob column the backup and the seal job count) stay after the upload is removed: a row of the same
+/// profile keeps the profile's copy, a row of another profile keeps the plain copy. With no other row
+/// left, the upload's file goes.
+#[tokio::test]
+async fn removing_a_released_upload_keeps_the_bytes_any_blob_column_names() -> R {
+    use ownhealth_core::blobs::BlobOwner;
+    let db = TestDb::new().await?;
+    let dir = tempfile::tempdir()?;
+    let blobs = BlobStore::for_settings(&db.settings(dir.path())?)?;
+    assert!(blobs.seals());
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let (hh, alex, lucia) = (f.household_id, f.profile("alex"), f.profile("lucia"));
+
+    // the same profile's imaging zip
+    let zip = format!("PK imaging LabNorte {}", uuid::Uuid::new_v4());
+    let sha = blobs.put_bytes(BlobOwner::Profile(alex), zip.as_bytes())?;
+    sqlx::query(
+        "insert into imaging_import (profile_id, zip_blob, size_bytes, files) values ($1, decode($2, 'hex'), $3, 1)",
+    )
+    .bind(alex)
+    .bind(&sha)
+    .bind(zip.len() as i64)
+    .execute(&mut *c)
+    .await?;
+    remove_released_upload(&mut c, &blobs, alex, &sha).await?;
+    assert!(
+        blobs.exists(BlobOwner::Profile(alex), &sha),
+        "the imaging zip lost its file"
+    );
+    // nothing else names it: the file goes
+    sqlx::query("delete from imaging_import where zip_blob = decode($1, 'hex')")
+        .bind(&sha)
+        .execute(&mut *c)
+        .await?;
+    remove_released_upload(&mut c, &blobs, alex, &sha).await?;
+    assert!(
+        !blobs.exists(BlobOwner::Profile(alex), &sha),
+        "an unheld upload kept its file"
+    );
+
+    // a rendered page of the same profile's document
+    let png = format!("PNG page LabNorte {}", uuid::Uuid::new_v4());
+    let sha = blobs.put_bytes(BlobOwner::Profile(alex), png.as_bytes())?;
+    let doc = bare_document(&mut c, hh, alex).await?;
+    sqlx::query(
+        "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, image_blob) \
+         values ($1, 1, 595, 842, true, decode($2, 'hex'))",
+    )
+    .bind(doc)
+    .bind(&sha)
+    .execute(&mut *c)
+    .await?;
+    remove_released_upload(&mut c, &blobs, alex, &sha).await?;
+    assert!(
+        blobs.exists(BlobOwner::Profile(alex), &sha),
+        "the page image lost its file"
+    );
+
+    // a rendered page of another profile's document, over a plain copy from before the keys
+    let png = format!("PNG page LabNorte {}", uuid::Uuid::new_v4());
+    let sha = blobs.put_bytes(BlobOwner::Profile(alex), png.as_bytes())?;
+    assert_eq!(blobs.put_bytes(BlobOwner::Reference, png.as_bytes())?, sha);
+    let doc = bare_document(&mut c, hh, lucia).await?;
+    sqlx::query(
+        "insert into document_page (document_id, page_no, width_pt, height_pt, text_layer_ok, words_blob) \
+         values ($1, 1, 595, 842, true, decode($2, 'hex'))",
+    )
+    .bind(doc)
+    .bind(&sha)
+    .execute(&mut *c)
+    .await?;
+    remove_released_upload(&mut c, &blobs, alex, &sha).await?;
+    assert!(
+        blobs.exists(BlobOwner::Reference, &sha),
+        "another profile's page lost the plain copy"
+    );
+    assert!(
+        !blobs.is_sealed(BlobOwner::Profile(alex), &sha)?,
+        "the upload kept a copy no row of its profile names"
+    );
+    Ok(())
+}

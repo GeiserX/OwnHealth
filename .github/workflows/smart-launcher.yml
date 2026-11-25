@@ -1,0 +1,144 @@
+name: SMART launcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/smart-launcher.yml
+      - server/**
+      - migrations/**
+      - data/**
+      - ui/**
+      - scripts/fetch-pdfium.sh
+      - scripts/test-db.sh
+  pull_request:
+    paths:
+      - .github/workflows/smart-launcher.yml
+      - server/**
+      - migrations/**
+      - data/**
+      - ui/**
+      - scripts/fetch-pdfium.sh
+      - scripts/test-db.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-launcher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  standalone:
+    name: SMART standalone launch and PKCE
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f # 17.11
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      fhir:
+        image: hapiproject/hapi@sha256:34c86fd5805df77c2b9d9c10538050b16ac3dc244352da0ebe4717f931330775 # v8.8.0-1
+        env:
+          JAVA_TOOL_OPTIONS: -Xmx768m
+        ports:
+          - 18216:8080
+      launcher:
+        image: smartonfhir/smart-launcher-2@sha256:72bd3e3c682ce4c74e6dddb605d89acad7c8aae446ae38079e8dfe8455b84793 # latest, pushed 2025-02-13
+        env:
+          FHIR_SERVER_R4: http://fhir:8080/fhir
+          # The first pull refreshes because the access token is already within its 60-second margin.
+          ACCESS_TOKEN_LIFETIME: "1"
+        ports:
+          - 18217:80
+    env:
+      # The same Rust and Cargo env as ci.yml: rust-cache hashes it into the key of the e2e cache reused below.
+      RUST_TOOLCHAIN: "1.98.1"
+      CARGO_TERM_COLOR: always
+      OWNHEALTH_E2E_PORT: "8216"
+      OWNHEALTH_E2E_DB: oh_e2e_smartlauncher
+      OWNHEALTH_E2E_SMART_LAUNCHER: http://127.0.0.1:18217
+      OWNHEALTH_E2E_SMART_FHIR: http://127.0.0.1:18216/fhir
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      # Restore the debug build cache that ci.yml's e2e job saves on main, for the same
+      # `cargo build -p ownhealth --locked`: its key ends in that job's id, e2e.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+          save-if: false
+          key: ${{ hashFiles('server/Cargo.toml') }}-e2e
+          add-job-id-key: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.2"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+      - name: Build the UI and install Chromium
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec tsc -p e2e
+          pnpm exec playwright install --with-deps --only-shell chromium
+      - name: Install pinned PDFium
+        run: bash scripts/fetch-pdfium.sh linux-x64
+      - name: Build OwnHealth with the debug connector egress override
+        working-directory: server
+        run: cargo build -p ownhealth --locked
+      - name: Start OwnHealth on a fresh demo database
+        id: start
+
+        working-directory: ui
+        env:
+          PG_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker rename "$PG_CONTAINER_ID" ownhealth-testpg
+          curl --fail --silent --show-error --retry 20 --retry-all-errors --retry-delay 2 \
+            --max-time 5 --output /dev/null "$OWNHEALTH_E2E_SMART_FHIR/metadata"
+          curl --fail --silent --show-error --retry 20 --retry-all-errors --retry-delay 2 \
+            --max-time 5 --output /dev/null "$OWNHEALTH_E2E_SMART_LAUNCHER/v/r4/fhir/.well-known/smart-configuration"
+          mkdir -p "$RUNNER_TEMP/smart-evidence"
+          nohup bash e2e/serve.sh > "$RUNNER_TEMP/smart-evidence/ownhealth-smart.log" 2>&1 < /dev/null &
+          curl --fail --silent --show-error --retry 30 --retry-all-errors --retry-delay 2 \
+            --max-time 5 --output /dev/null "http://127.0.0.1:$OWNHEALTH_E2E_PORT/readyz"
+      - name: Launch with offline access, refresh, and import
+        working-directory: ui
+        env:
+          OWNHEALTH_E2E_SMART_SHOTS: ${{ runner.temp }}/smart-evidence/shots
+        run: |
+          pnpm exec playwright test e2e/smart-launch.spec.ts --workers=1 --grep 'launches with PKCE' \
+            --output "$RUNNER_TEMP/smart-evidence/launch"
+      - name: Require the wrong PKCE verifier exchange to fail
+        if: ${{ !cancelled() && steps.start.outcome == 'success' }}
+        working-directory: ui
+        run: |
+          pnpm exec playwright test e2e/smart-launch.spec.ts --workers=1 --grep 'wrong PKCE verifier' \
+            --output "$RUNNER_TEMP/smart-evidence/wrong-verifier"
+          grep -E 'a connector code exchange failed.*\(401, invalid_grant\)' "$RUNNER_TEMP/smart-evidence/ownhealth-smart.log"
+      - name: Keep the server log, the screenshots, and the traces of a failed test
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: smart-launcher-evidence
+          path: ${{ runner.temp }}/smart-evidence
+          if-no-files-found: ignore
+          retention-days: 7

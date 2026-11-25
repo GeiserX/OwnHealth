@@ -802,7 +802,7 @@ A benchmark job in CI runs the synthetic family and fails if a target regresses 
 - `ownhealth backup` (also the `backup.run` job, nightly by default): `pg_dump -Fc`, the blob directory, the rule overrides and a manifest (app version, schema revision, rule pack hash, per-table row counts, the backup's `as_of` and each profile's `state_hash` at it, and the imaging inventory when Orthanc is in the backup) into a restic repository. restic and the Postgres client ship in the app image.
 - One consistent cut: the job opens a `repeatable read` transaction, exports its snapshot (`pg_export_snapshot()`), reads the manifest counts inside it, builds each profile's state from the rows it sees (stored snapshots are not copied, so a `state.rebuild` still queued after a re-derivation cannot leave the manifest behind the dump) and runs `pg_dump --snapshot=<id>`, so the dump and the manifest see the same rows. While the job runs it holds an advisory lock that `blob.gc` and the blob step of a hard purge also take, so no blob the dump references is deleted before restic has read it.
 - The restic password is not in the backup. The docs say so on the setup screen: keep it in a password manager, or the backup is useless.
-- `ownhealth verify-restore` (weekly job `backup.verify_restore`): restores the latest snapshot into a scratch database `ownhealth_restore_check` and a temp blob directory, then compares row counts with the manifest, re-hashes every restored blob, rebuilds state for each profile at the manifest's `as_of` and compares `state_hash` with the manifest. When the backup holds Orthanc (from v1.0, `imaging` profile on), the manifest also records the imaging inventory (study, series and instance counts and each instance's hash), and the check starts a scratch Orthanc on the restored index and storage and compares that inventory too. Any difference creates a `restore_check_failed` review item and sets the metric. A backup that was never restored is treated as missing.
+- `ownhealth verify-restore` (weekly job `backup.verify_restore`) takes a session lock on its live database connection. A second check of that database returns an error before changing any database. The check replaces only its reserved scratch database, `<live_db>_restore_check`, and restores the latest snapshot there. That name must fit PostgreSQL's identifier limit, so with the default limit of 63 bytes the live database name can have at most 49 bytes; a longer one is refused before any database changes. It then compares row counts with the manifest, re-hashes every restored blob, rebuilds state for each profile at the manifest's `as_of` and compares `state_hash` with the manifest. When the backup holds Orthanc (from v1.0, `imaging` profile on), the manifest also records the imaging inventory (study, series and instance counts and each instance's hash), and the check starts a scratch Orthanc on the restored index and storage and compares that inventory too. Any difference creates a `restore_check_failed` review item and sets the metric. A backup that was never restored is treated as missing.
 - `ownhealth restore --snapshot <id>` restores into an empty instance.
 - Orthanc storage (profile `imaging`) is added to the same restic run in v1.0.
 
@@ -847,6 +847,10 @@ Every example in the docs, the mockup and the golden tests draws Alex's values f
 | TSH | last 2025-01-20; recency window 12 months, so stale on 2026-11-07 | `src_a05` |
 | Hepatitis C antibody | never measured (rule `infect.hcv.once_adult`) | |
 | LDL-C (13457-7) series, mg/dL | 2021-11-09 163; 2022-09-15 96; 2023-03-21 88; 2023-10-04 92 (direct, 18262-6); 2024-05-22 84 (direct, 18262-6); 2025-01-20 79; 2025-09-08 101; 2026-03-02 118; 2026-09-14 97 | `src_1a0` ... `src_a12` |
+| Total cholesterol, HDL-C | 170 and 53 mg/dL, 2026-09-14 | |
+| Systolic pressure | 126 mmHg, typed in, 2026-09-14 | |
+| Smoking status | never smoked (SNOMED CT 266919005), self-reported, 2026-09-14 | |
+| SCORE2, PREVENT | computed from the rows above; the pressure counts for 12 months, so from 2027-09-14 they read not assessed | |
 | Atorvastatin 20 mg | started 2022-06-20, paused 2025-12-01, restarted 2026-03-10, active | `src_m02` |
 | Cenobamate 50 mg | since 2026-04-01, active; a moderate CYP2C19 inhibitor in the FDA table | `src_m05` |
 | SLCO1B1 | decreased function, `call_state: "alt"`; CPIC actionable with atorvastatin | `src_g31` |
@@ -855,6 +859,8 @@ Every example in the docs, the mockup and the golden tests draws Alex's values f
 | `as_of` for examples | 2026-11-07 | |
 
 Recency windows in the shipped pack: HbA1c 6 months, lipids 12 months, TSH 12 months.
+
+The demo's one family share: Sam lets her labs feed hints in Lucía's profile. Sam's LDL-C of 204 mg/dL on 2025-06-12 shows Lucía's guardians the hint `lab.ldl_fh` (relative MTH). Sam manages that consent on her Family page.
 
 | Layer | What | Gate |
 |---|---|---|

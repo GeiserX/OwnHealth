@@ -177,6 +177,10 @@ pub(crate) fn show(out: &mut Vec<u8>, x: f64, y: f64, bytes: &[u8], font: &str, 
 /// The file around the page content streams. `with_id` adds the trailer `/ID`, the first 16 bytes of
 /// the sha256 of everything before the cross-reference table.
 pub(crate) fn assemble(streams: &[Vec<u8>], with_id: bool) -> Vec<u8> {
+    assemble_sized(streams, with_id, PAGE_W, PAGE_H)
+}
+
+fn assemble_sized(streams: &[Vec<u8>], with_id: bool, width: f64, height: f64) -> Vec<u8> {
     let n = streams.len();
     // objects: 1 catalog, 2 pages, 3 font F1, 4 font F2, then per page: page obj, content obj
     let kids = (0..n)
@@ -193,7 +197,7 @@ pub(crate) fn assemble(streams: &[Vec<u8>], with_id: bool) -> Vec<u8> {
         let content_ref = 6 + 2 * i;
         objs.push(
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W:.0} {PAGE_H:.0}] \
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.0} {height:.0}] \
                  /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_ref} 0 R >>"
             )
             .into_bytes(),
@@ -258,6 +262,8 @@ type PageHook = Box<dyn FnMut(&mut Writer, usize)>;
 /// A document being written, page by page.
 pub struct Writer {
     pages: Vec<Vec<u8>>,
+    width: f64,
+    height: f64,
     open: bool,
     folded: Vec<Folded>,
     hook: Option<PageHook>,
@@ -278,16 +284,23 @@ impl Default for Writer {
 impl Writer {
     /// An empty A4 document with 56 pt margins.
     pub fn new() -> Writer {
+        Self::sized(PAGE_W, PAGE_H, MARGIN)
+    }
+
+    /// A document with the given page size and uniform margin, in points.
+    pub fn sized(width: f64, height: f64, margin: f64) -> Writer {
         Writer {
             pages: Vec::new(),
+            width,
+            height,
             open: false,
             folded: Vec::new(),
             hook: None,
-            y: PAGE_H - MARGIN,
-            left: MARGIN,
-            right: PAGE_W - MARGIN,
-            top: MARGIN,
-            bottom: MARGIN,
+            y: height - margin,
+            left: margin,
+            right: width - margin,
+            top: margin,
+            bottom: margin,
         }
     }
 
@@ -310,7 +323,7 @@ impl Writer {
     pub fn new_page(&mut self) {
         self.pages.push(Vec::new());
         self.open = true;
-        self.y = PAGE_H - self.top;
+        self.y = self.height - self.top;
         if let Some(mut hook) = self.hook.take() {
             let n = self.pages.len();
             hook(self, n);
@@ -366,6 +379,12 @@ impl Writer {
             op.push_str(&format!(" {x:.2} {y:.2} l"));
         }
         op.push_str(" S\n");
+        self.page().extend_from_slice(op.as_bytes());
+    }
+
+    /// Fill a black rectangle with its lower left corner at (`x`, `y`).
+    pub fn fill_rect(&mut self, x: f64, y: f64, width: f64, height: f64) {
+        let op = format!("{x:.3} {y:.3} {width:.3} {height:.3} re f\n");
         self.page().extend_from_slice(op.as_bytes());
     }
 
@@ -465,7 +484,7 @@ impl Writer {
             self.new_page();
         }
         Rendered {
-            pdf: assemble(&self.pages, true),
+            pdf: assemble_sized(&self.pages, true, self.width, self.height),
             folded: self.folded,
         }
     }

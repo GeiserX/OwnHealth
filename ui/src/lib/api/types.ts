@@ -111,6 +111,7 @@ export interface ReviewItem {
 		| 'near_duplicate'
 		| 'encrypted_document'
 		| 'fhir_unmapped_summary'
+		| 'family_proposal'
 		| 'imaging_study';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';
@@ -134,7 +135,7 @@ export interface ReviewItem {
 
 export interface ImportItem {
 	filename: string;
-	kind: 'pdf' | 'image' | 'apple_health_zip' | 'fhir_json' | 'fhir_ndjson' | 'genome_facts' | 'vcf' | 'tbi' | 'fit' | 'fit_gz' | 'libreview_csv' | 'dexcom_clarity_csv';
+	kind: 'pdf' | 'image' | 'apple_health_zip' | 'garmin_zip' | 'fhir_json' | 'fhir_ndjson' | 'genome_facts' | 'vcf' | 'tbi' | 'fit' | 'fit_gz' | 'libreview_csv' | 'dexcom_clarity_csv';
 	sha256: string;
 	document_id?: Uuid;
 	duplicate?: boolean;
@@ -409,6 +410,25 @@ export interface TimelineEvent {
 	/** document events only: the document is its own source */
 	document_id?: Uuid;
 	filename?: UntrustedText | null;
+	/** imaging events only (slice 42): one event per study, its linked report folded in */
+	study_id?: Uuid;
+	study_instance_uid?: string;
+	/** the day the disc names; null when it names none, and `date` is then the report's day or the day it was recorded */
+	study_date?: IsoDate | null;
+	/** the report the import linked to the study, while it is an active document the reader may see */
+	report_document_id?: Uuid | null;
+	/** POST it for a one-hour viewer link; null when Orthanc holds no study for it, or only emergency access reads */
+	viewer_open?: string | null;
+	series?: number | null;
+	instances?: number | null;
+}
+
+/** POST /imaging/import: the stored upload and the job that reads it (follow it with GET /jobs?ids=). */
+export interface ImagingImport {
+	import_id: Uuid;
+	duplicate: boolean;
+	job_id: number | null;
+	files: number;
 }
 
 /** One course of a medicine or the run of a condition: the biomarker chart's annotation shape plus its src. */
@@ -508,6 +528,26 @@ export interface AuditWhoOut {
 	scope: 'everyone' | 'own'; // own: the person only views this profile, so the rows are their own actions
 	items: { actor: string; actor_kind: string; via: string; events: number; first_ts: IsoDateTime; last_ts: IsoDateTime }[];
 }
+
+/** GET /api/mcp/session-report, visible only to the household owner. */
+export interface SessionReportOut {
+	enabled: boolean;
+	sessions: {
+		started_at: string;
+		ended_at: string;
+		tools: {
+			tool: string;
+			calls: number;
+			not_assessed_calls: number;
+			not_assessed_n: number;
+			budget_cuts: number;
+			denied: number;
+			errors: number;
+			arg_bytes: number;
+		}[];
+	}[];
+}
+
 
 export interface TokenUsageDay {
 	calls: number;
@@ -904,12 +944,15 @@ export interface NextDraw {
 export type ShlCategory = 'read:summary' | 'read:labs' | 'read:records';
 /** What a recipient would meet: `paused` while sharing is off on the instance, `revoked` for good. */
 export type ShlState = 'active' | 'paused' | 'revoked' | 'expired' | 'locked_out';
-/** Why: `sharing_off` (paused); `person`, `locked` or `access_changed` (revoked). */
-export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed';
+/** Why: `sharing_off` (paused); `person`, `locked`, `access_changed` or `replaced` (a new
+ *  emergency card ended this one) (revoked). */
+export type ShlReason = 'sharing_off' | 'person' | 'locked' | 'access_changed' | 'replaced';
 
 /** One link in GET /profiles/{p}/shl. */
 export interface ShlLink {
 	id: Uuid;
+	ice?: true;
+	online?: boolean;
 	label: string | null;
 	passcode: boolean;
 	attempts_left: number | null;
@@ -920,7 +963,7 @@ export interface ShlLink {
 	revoked_at: IsoDateTime | null;
 	state: ShlState;
 	reason: ShlReason | null;
-	/** manifests served */
+	/** Manifests served, or direct file reads for an emergency card. */
 	opened: number;
 	last_access_at: IsoDateTime | null;
 }
@@ -1017,6 +1060,73 @@ export interface BreakGlassOwnerView {
 		max_delay_hours: number;
 		allowed: BreakGlassCategory[];
 	};
+}
+/** One profile that named the caller, in GET /break-glass: what they would read, and their last request. */
+export interface BreakGlassNamed {
+	profile: { id: Uuid; slug: string; display_name: string };
+	categories: BreakGlassCategory[];
+	delay_hours: number;
+	request: BreakGlassRequest | null;
+}
+/** The PUT /profiles/{p}/break-glass/contacts/{user} body: what a named contact would read, and after how long. */
+export interface BreakGlassContactIn {
+	categories?: BreakGlassCategory[];
+	delay_hours?: number;
+}
+
+/** notification_outbox.kind (ownhealth_core::break_glass::OUTBOX_KINDS). */
+export type NoticeKind =
+	| 'break_glass.request'
+	| 'break_glass.cancel'
+	| 'break_glass.activate'
+	| 'break_glass.use'
+	| 'break_glass.expire'
+	| 'break_glass.revoke'
+	| 'ice.access';
+/** One in-app notice, in GET /notifications. */
+export interface Notice {
+	id: Uuid;
+	kind: NoticeKind;
+	profile: { id: Uuid; slug: string; display_name: string };
+	request_id: Uuid | null;
+	/** who did it: the contact who asked or read, the owner who cancelled; null for the app's own steps */
+	actor: { user_id: Uuid; display_name: string } | null;
+	/** who asked for the request this notice is about */
+	contact: { user_id: Uuid; display_name: string } | null;
+	created_at: IsoDateTime;
+	read_at: IsoDateTime | null;
+}
+/** The reads through one request, counted over all of them: the list holds only the newest 200 notices. */
+export interface NoticeUses {
+	request_id: Uuid;
+	profile: { id: Uuid; slug: string; display_name: string };
+	contact: { user_id: Uuid; display_name: string };
+	count: number;
+	unread: number;
+	last_at: IsoDateTime;
+}
+/** The opens of one profile's emergency card, counted over all of them (an `ice.access` has no request). */
+export interface NoticeIce {
+	profile: { id: Uuid; slug: string; display_name: string };
+	count: number;
+	unread: number;
+	last_at: IsoDateTime;
+}
+/**
+ * GET /notifications: the 200 newest notices plus every older unread one other than a read, and the
+ * read count of each request that is in the list or has unread reads.
+ */
+export interface Notices {
+	items: Notice[];
+	uses: NoticeUses[];
+	/** the opens of each profile's emergency card that is in the list or has unread opens */
+	ice?: NoticeIce[];
+	unread: number;
+}
+/** GET /break-glass/requests/{id}: one request for the cancel screen, with the profile that holds it. */
+export interface BreakGlassOne {
+	request: BreakGlassRequest;
+	profile: { id: Uuid; slug: string; display_name: string };
 }
 
 // v1.0 the US endpoint directory (routes/brands.rs)

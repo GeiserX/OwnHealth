@@ -598,7 +598,7 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
     let other = b.env.anon().get(made.json["path"].as_str().unwrap_or_default()).await?;
     assert_eq!(other.status, 200);
     let other = String::from_utf8(other.bytes)?;
-    assert!(!other.contains("emergencia"), "{other}");
+    assert!(!other.contains("break-glass"), "{other}");
     assert_eq!(fed().await?, None);
     let text = b.fetch_feed().await?;
     let cal: Calendar = text.parse().map_err(anyhow::Error::msg)?;
@@ -628,8 +628,10 @@ async fn the_owner_feed_shows_the_request_at_once() -> R {
         description.contains(&opens.format("%Y-%m-%d %H:%M UTC").to_string()),
         "{description}"
     );
-    // the cancel page comes with the break-glass screens: until then the event links nowhere
-    assert!(!description.contains("/family/break-glass/"), "{description}");
+    assert!(
+        description.contains(&format!("https://testserver/family/break-glass/{id}")),
+        "{description}"
+    );
     // a generic feed names nobody
     assert!(!description.contains("Carmen"), "{description}");
     assert!(fed().await?.is_some());
@@ -726,6 +728,22 @@ async fn every_step_writes_an_audit_row_and_an_outbox_row() -> R {
         ownhealth_core::break_glass::OUTBOX_KINDS.iter().copied().collect()
     );
     assert!(n.json["unread"].as_i64().unwrap_or_default() > 0);
+    // every notice names who asked, the activation and the expiry too, which have no actor
+    for i in n.json["items"].as_array().into_iter().flatten() {
+        assert_eq!(
+            i["contact"],
+            json!({"user_id": b.carmen_id, "display_name": "Carmen Ortega"}),
+            "{i}"
+        );
+    }
+    // newest first, each with its instant
+    let at: Vec<DateTime<Utc>> = n.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| i["created_at"].as_str().unwrap_or_default().parse())
+        .collect::<Result<_, _>>()?;
+    assert!(at.windows(2).all(|w| w[0] >= w[1]), "{at:?}");
     let read = b.alex.post("/api/notifications/read", &json!({})).await?;
     assert_eq!(read.status, 200, "{:?}", read.json);
     assert_eq!(b.alex.get("/api/notifications").await?.json["unread"], 0);
@@ -2484,4 +2502,127 @@ async fn a_wearable_job_read_through_break_glass_records_a_use() -> R {
 #[tokio::test]
 async fn a_dicom_job_read_through_break_glass_records_a_use() -> R {
     job_read_through_break_glass("import.dicom", "read:records", "filename").await
+}
+
+#[tokio::test]
+async fn the_cancel_screen_reads_one_request_by_its_id_for_an_owner_only() -> R {
+    let mut b = setup().await?;
+    let named = b.name(b.carmen_id, json!({})).await?;
+    assert_eq!(named.status, 200, "{:?}", named.json);
+    let mut carmen = b.carmen().await?;
+    let id = b.ask(&mut carmen).await?;
+    let views = "select count(*) from audit_event where tool = 'break_glass.owner_view' and profile_id = $1";
+    let before = b.count(views, b.alex_id()).await?;
+    let r = b.alex.get(&format!("/api/break-glass/requests/{id}")).await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    assert_eq!(r.json["request"]["id"], json!(id));
+    assert_eq!(r.json["request"]["status"], "requested");
+    assert_eq!(r.json["request"]["contact"]["display_name"], "Carmen Ortega");
+    assert_eq!(
+        r.json["profile"],
+        json!({"id": b.alex_id(), "slug": "alex", "display_name": "Alex Rivera"})
+    );
+    // one owner-view audit row on the profile that holds it, none on any other
+    assert_eq!(b.count(views, b.alex_id()).await?, before + 1);
+    let others = "select count(*) from audit_event where tool = 'break_glass.owner_view' and profile_id <> $1";
+    assert_eq!(b.count(others, b.alex_id()).await?, 0);
+    // who asked, a viewer of the profile and an id that does not exist all get the same 404
+    let mut sam = b.sam().await?;
+    for (who, id) in [(&mut carmen, id), (&mut sam, id), (&mut b.alex, Uuid::nil())] {
+        let r = who.get(&format!("/api/break-glass/requests/{id}")).await?;
+        assert_eq!((r.status.as_u16(), r.code()), (404, "unknown"), "{:?}", r.json);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_owner_s_own_cancel_reaches_their_notices_as_read() -> R {
+    let mut b = setup().await?;
+    let named = b.name(b.carmen_id, json!({})).await?;
+    assert_eq!(named.status, 200, "{:?}", named.json);
+    let mut carmen = b.carmen().await?;
+    let id = b.ask(&mut carmen).await?;
+    let r = b
+        .alex
+        .post0(&format!("/api/profiles/alex/break-glass/requests/{id}/cancel"))
+        .await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let n = b.alex.get("/api/notifications").await?;
+    assert_eq!(n.status, 200, "{:?}", n.json);
+    let read: Vec<(&str, bool)> = n.json["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|i| (i["kind"].as_str().unwrap_or_default(), !i["read_at"].is_null()))
+        .collect();
+    // the request is news to Alex; the cancel Alex made is in the history, read already
+    assert_eq!(read, [("break_glass.cancel", true), ("break_glass.request", false)]);
+    assert_eq!(n.json["unread"], 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_use_count_covers_every_read_and_unread_steps_outlast_the_window() -> R {
+    let mut b = setup().await?;
+    let mut carmen = b.carmen().await?;
+    let request = b.open_for(b.carmen_id, &mut carmen, json!(["read:summary"])).await?;
+    // an unread step older than every read, then more reads than the list holds
+    sqlx::query(
+        "insert into notification_outbox (user_id, profile_id, kind, request_id, created_at)
+         values ($1, $2, 'break_glass.revoke', $3, now() - interval '1 day')",
+    )
+    .bind(b.env.user("alex"))
+    .bind(b.alex_id())
+    .bind(request)
+    .execute(b.env.pool())
+    .await?;
+    sqlx::query(
+        "insert into notification_outbox (user_id, profile_id, kind, request_id, created_at)
+         select $1, $2, 'break_glass.use', $3, now() + i * interval '1 second'
+         from generate_series(1, 220) as i",
+    )
+    .bind(b.env.user("alex"))
+    .bind(b.alex_id())
+    .bind(request)
+    .execute(b.env.pool())
+    .await?;
+    let total = b
+        .count(
+            "select count(*) from notification_outbox where kind = 'break_glass.use' and request_id = $1",
+            request,
+        )
+        .await?;
+    assert!(total >= 220);
+    let r = b.alex.get("/api/notifications").await?;
+    assert_eq!(r.status, 200, "{:?}", r.json);
+    let items = r.json["items"].as_array().expect("notification items array");
+    assert!(items.iter().any(|n| n["kind"] == "break_glass.revoke"), "{items:?}");
+    let last: String = b
+        .text(
+            "select to_char(max(created_at) at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') \
+             from notification_outbox where kind = 'break_glass.use' and request_id = $1",
+            request,
+        )
+        .await?;
+    let uses = r.json["uses"].as_array().expect("uses array");
+    assert_eq!(uses.len(), 1, "{uses:?}");
+    assert_eq!(uses[0]["request_id"], json!(request));
+    assert_eq!(uses[0]["count"], total);
+    assert_eq!(uses[0]["unread"], total);
+    assert!(
+        uses[0]["last_at"].as_str().unwrap_or_default().starts_with(&last),
+        "{uses:?} {last}"
+    );
+    assert_eq!(uses[0]["profile"]["slug"], "alex");
+    assert_eq!(
+        uses[0]["contact"],
+        json!({"user_id": b.carmen_id, "display_name": "Carmen Ortega"})
+    );
+    // once read, the count stays and nothing is news
+    let read = b.alex.post("/api/notifications/read", &json!({})).await?;
+    assert_eq!(read.status, 200, "{:?}", read.json);
+    let r = b.alex.get("/api/notifications").await?;
+    assert_eq!(r.json["uses"][0]["count"], total);
+    assert_eq!(r.json["uses"][0]["unread"], 0);
+    Ok(())
 }

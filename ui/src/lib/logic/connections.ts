@@ -42,6 +42,8 @@ export interface ConnectionRow {
 	open_gaps?: number;
 	/** The server the connection talks to (SMART: the FHIR base URL); null for an inbox. */
 	server?: string | null;
+	/** Distinct Medicare claims received in the latest claim pull. */
+	claim_count?: number;
 }
 
 export type ConnectionState = 'reconsent' | 'expired' | 'grant_soon' | 'off' | 'out' | 'partial' | 'stale' | 'nodata' | 'ok';

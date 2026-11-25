@@ -3,6 +3,7 @@
 //! `demo/hooks/apple_fhir.py` (order 300).
 
 pub mod apple_health;
+pub mod bluebutton;
 pub mod brands;
 pub mod demo;
 pub mod fhir;
@@ -11,6 +12,7 @@ pub mod manual;
 pub mod py;
 pub mod retract;
 pub mod shc;
+pub mod shl_receive;
 pub mod smart;
 pub mod wearables;
 
@@ -28,6 +30,7 @@ pub fn register() {
     });
     ownhealth_core::review::register_accept_handler("fhir_unmapped", fhir::accept_fhir_boxed);
     smart::register();
+    bluebutton::register();
     ownhealth_core::demo::register_demo_hook("apple_fhir", demo::ORDER, demo::seed_boxed);
     brands::register();
 }

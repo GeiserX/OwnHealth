@@ -71,6 +71,10 @@ async fn a_lost_file_audit_is_logged_by_profile_id_with_the_counts_and_no_name()
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
     tracing::callsite::rebuild_interest_cache();
+    // With one dispatcher registered, tracing asks each thread's own default whether a line is wanted, so a
+    // line another test thread reaches first is cached as unwanted for every thread. A second, inert dispatcher
+    // makes it ask all of them.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
 
     let mut me = env.as_user(env.user("alex")).await?;
     let r = me.delete("/api/profiles/alex?confirm=alex").await?;

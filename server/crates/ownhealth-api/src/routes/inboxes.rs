@@ -10,7 +10,7 @@
 //! | `GET /inboxes/{id}/runs?limit=` | recent runs and their errors |
 //! | `POST /inboxes/{id}/token` | a new push token, shown once (step-up) |
 //! | `POST /inboxes/{id}/sync` | poll now |
-//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem, can_manage}]`, plus `created_at, poll_seconds, reconsent_needed_at, grant_expires_at, access_expires_at, open_gaps, server` when `can_manage` |
+//! | `GET /inboxes/health` | `[{id, kind, label, profile_id, enabled, last_run_at, last_success_at, last_error_at, last_error, consecutive_failures, stale, last_run_status, last_run_problems, last_run_problem, can_manage}]`, plus `created_at, poll_seconds, reconsent_needed_at, grant_expires_at, access_expires_at, open_gaps, server` when `can_manage`, and for a Blue Button connection `claim_count` |
 //! | `GET /inboxes/{id}/health` | one source's row; a session, or that source's own `oh_ing_` token |
 //!
 //! Both health routes take `?format=prometheus` and answer in the Prometheus text format, so a
@@ -21,9 +21,11 @@
 //! The Connections screen (v1.0) reads the same rows. `can_manage` is true when the person manages the
 //! source's profile (for a household-wide source: any profile of the household), so the screen lists
 //! and reconnects only those. Only then does the row also carry `created_at` and `poll_seconds`,
-//! `reconsent_needed_at`, `grant_expires_at`, `access_expires_at`, `server`, and the open sync-gap
-//! alerts filed on the source's profile (`open_gaps`): a viewer is sent no more than before v1.0. A
-//! source token gets none of them and no `can_manage`.
+//! `reconsent_needed_at`, `grant_expires_at`, `access_expires_at`, `server`, the open sync-gap
+//! alerts filed on the source's profile (`open_gaps`), and for Blue Button the distinct Medicare
+//! claims the latest pull read (`claim_count`, absent when that pull failed or its claim search did
+//! not answer): a viewer is sent no more than before v1.0. A source token gets none of them and no
+//! `can_manage`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -814,7 +816,21 @@ mod tests {
                 access_expires_at: None,
                 open_gaps: 0,
                 server: Some("https://fhir.labnorte.example/r4".into()),
+                claim_count: (kind == "bluebutton").then_some(42),
             },
+        }
+    }
+
+    #[test]
+    fn claim_count_is_visible_to_the_connection_manager() {
+        for manager in [Some(true), Some(false), None] {
+            let rows = [(row("bluebutton"), manager)];
+            let (json, _) = out(&rows);
+            let value = serde_json::to_value(&json[0]).expect("a JSON source health row");
+            assert_eq!(
+                value.get("claim_count").and_then(Value::as_i64),
+                (manager == Some(true)).then_some(42)
+            );
         }
     }
 

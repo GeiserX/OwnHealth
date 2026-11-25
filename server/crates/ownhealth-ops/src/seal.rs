@@ -124,7 +124,7 @@ fn owner_sql(lock: bool) -> [String; 5] {
                or id in (select document_id from document_page where {}) \
                or id in (select document_id from ocr_run where {}) \
                union all select i.document_id, false from source_item i \
-               where {} and i.profile_id is null and i.document_id is not null \
+               where {} and i.raw_released_at is null and i.profile_id is null and i.document_id is not null \
              ), named as (select id, bool_or(names_blob) as names_blob from matched group by id) \
              select d.id, d.profile_id, n.names_blob from named n join document d using (id) \
              order by d.id{lock_docs}",
@@ -154,7 +154,7 @@ fn owner_sql(lock: bool) -> [String; 5] {
                where r.id = any(q.released_document_ids) and r.profile_id is not null), s.profile_id) \
              from source_item i left join quarantine_item q on q.id = i.quarantine_id \
              left join source s on s.id = i.source_id \
-             where {} order by i.source_id, i.external_id{lock_items}",
+             where {} and i.raw_released_at is null order by i.source_id, i.external_id{lock_items}",
             names("source_item", "i.")
         ),
     ]

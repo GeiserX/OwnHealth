@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The demo computes SCORE2 and PREVENT for Alex, and shows Lucía a family hint from the high LDL her mother shares. The demo's pressure reading is dated 2026-09-14, so from 2027-09-14 its calculators read not assessed.
+- Restore accepts keyless backups from v0.4.0 and earlier. Keyed backups from untagged builds need the build that wrote them if they predate the keyring or list profile UUIDs without key IDs. Restore with that build, then take a new backup with this version.
+
 ## 0.4.0 (2026-11-19)
 
 Insight: the record now answers what matters in a visit, each answer cited and the same on every run. It covers medicines and supplements, calculators, screenings and vaccines due, family history, ClinVar changes and a printed doctor summary. Upgrade in place: take a backup first, then set `admin` and `app` to `drumsergio/ownhealth:0.4.0` and `ocr` to `0.4.0-ocr` ([deploy/README.md](deploy/README.md#upgrades)). Seven new migrations (1100, 1101, 1110, 1111, 1120, 1130, 1131) apply at start. Passwords, passkeys, access tokens and OAuth connections keep working.

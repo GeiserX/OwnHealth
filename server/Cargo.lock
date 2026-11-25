@@ -4059,6 +4059,7 @@ dependencies = [
  "futures",
  "http",
  "icalendar",
+ "image",
  "ipnet",
  "ownhealth-auth",
  "ownhealth-core",
@@ -4072,9 +4073,11 @@ dependencies = [
  "ownhealth-normalize",
  "ownhealth-ops",
  "ownhealth-rules",
+ "p256",
  "proc-macro2",
  "regex",
  "reqwest",
+ "rxing",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -4199,6 +4202,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zip 9.4.2",
 ]
 
 [[package]]
@@ -4451,8 +4455,11 @@ dependencies = [
  "image",
  "ownhealth-auth",
  "ownhealth-core",
+ "ownhealth-ingest-pdf",
  "ownhealth-ingest-structured",
  "ownhealth-rules",
+ "pdfium-render",
+ "qrcode",
  "rand 0.10.3",
  "regex",
  "rust_decimal",
@@ -4463,6 +4470,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
  "zip 9.4.2",
 ]
 
