@@ -9,6 +9,8 @@ mod support;
 #[path = "../../ownhealth-core/tests/connector_fake/mod.rs"]
 mod connector_fake;
 
+use std::time::Duration;
+
 use axum::Extension;
 use axum::http::StatusCode;
 use connector_fake::{CLIENT_ID, CLIENT_SECRET, Fake, REDIRECT, param};
@@ -560,6 +562,81 @@ async fn a_client_that_connections_of_profiles_the_caller_does_not_manage_use_is
     // Alex manages both records, so he still may
     let r = save_healow(&mut alex, &fake, "fake-client-id-2", "fake-client-secret-2-not-real").await?;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    Ok(())
+}
+
+// Return the backend blocked by this test's save or barrier, so the test can order the commits
+// without relying on a delay being long enough for a request to have reached the database.
+async fn blocked_by(env: &Env, blocker: i32) -> anyhow::Result<i32> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(pid) = sqlx::query_scalar(
+                "select pid from pg_stat_activity \
+                 where datname = current_database() and $1 = any(pg_blocking_pids(pid))",
+            )
+            .bind(blocker)
+            .fetch_optional(env.pool())
+            .await?
+            {
+                return Ok(pid);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn a_concurrent_first_save_cannot_replace_a_client_as_its_first_connection_commits() -> R {
+    let env = env().await?;
+    let mut alex = alex(&env).await?;
+    let mut sam = widen(env.as_user(env.user("sam")).await?);
+    // Pause Alex's first save with the client and a source for Alex already inserted. When
+    // released, they become visible together, as if the source committed before Sam's upsert.
+    sqlx::raw_sql(
+        "create function pause_first_client() returns trigger language plpgsql as $$
+         begin
+             insert into source (household_id, profile_id, kind, label, connector_client_id)
+                 select new.household_id, id, 'smart', 'LabNorte', new.id from profile
+                 where household_id = new.household_id and slug = 'alex';
+             perform pg_advisory_xact_lock(19, 2);
+             return null;
+         end;
+         $$;
+         create trigger pause_first_client after insert on connector_client for each row
+         when (new.client_id = 'alex-oracle-app') execute function pause_first_client();",
+    )
+    .execute(env.pool())
+    .await?;
+    let mut barrier = env.pool().begin().await?;
+    let barrier_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await?;
+    sqlx::query("select pg_advisory_xact_lock(19, 2)")
+        .execute(&mut *barrier)
+        .await?;
+
+    let alex_body = json!({"vendor": "oracle", "client_id": "alex-oracle-app"});
+    let (first, second) = tokio::try_join!(alex.post("/api/connectors/clients", &alex_body), async {
+        let first_pid = blocked_by(&env, barrier_pid).await?;
+        let sam_body = json!({"vendor": "oracle", "client_id": "sam-oracle-app"});
+        let (second, ()) = tokio::try_join!(sam.post("/api/connectors/clients", &sam_body), async {
+            blocked_by(&env, first_pid).await?;
+            barrier.commit().await?;
+            anyhow::Ok(())
+        })?;
+        Ok(second)
+    })?;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.json);
+    assert_eq!(refusal(&second), "403 client_in_use", "{}", second.json);
+    let saved: String = sqlx::query_scalar(
+        "select c.client_id from connector_client c join source s on s.connector_client_id = c.id \
+         where s.profile_id = $1",
+    )
+    .bind(env.profile("alex"))
+    .fetch_one(env.pool())
+    .await?;
+    assert_eq!(saved, "alex-oracle-app");
     Ok(())
 }
 

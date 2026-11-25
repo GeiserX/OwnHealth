@@ -672,8 +672,8 @@ const MAX_ISSUER_BYTES: usize = 2048;
 
 /// A saved client that connections of profiles the caller does not manage use is not the caller's to
 /// replace: the new id and secret would break those connections at their next refresh, and their
-/// next reconnect would consent to the caller's vendor app. The client row stays locked until the
-/// save commits, so no connection joins it in between.
+/// next reconnect would consent to the caller's vendor app. The caller holds the advisory lock
+/// for this key. If a row exists, lock it until commit so no new source can reference it in between.
 async fn in_use_elsewhere(
     conn: &mut PgConnection,
     p: &Principal,
@@ -813,6 +813,16 @@ async fn save_client(
             other => other,
         }
     };
+    // Serialize saves for this key even before the client row exists.
+    let key = format!(
+        "ownhealth.connector_client:{household}:{}:{}",
+        vendor.key,
+        issuer.as_deref().unwrap_or_default()
+    );
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
     in_use_elsewhere(&mut tx, &p, household, &vendor.key, issuer.as_deref()).await?;
     let sb = SecretBox::from_settings(&rt.settings)?;
     let secret_id = match secret {
