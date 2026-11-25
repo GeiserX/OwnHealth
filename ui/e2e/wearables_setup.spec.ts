@@ -25,11 +25,13 @@ test('a person follows WHOOP setup and confirms consent through the OwnHealth ca
 	const authorization = new URL((await response.json()).authorization_url);
 	expect(authorization.searchParams.get('redirect_uri')).toBe(callback);
 	await page.goto(authorization.href);
-	await page.getByRole('link', { name: 'Allow WHOOP access' }).click();
+	const consent = page.getByRole('link', { name: 'Allow WHOOP access' });
+	const callbackUrl = await consent.evaluate((link) => (link as HTMLAnchorElement).href);
+	await consent.click();
 	await expect(page).toHaveURL(`${new URL(callback).origin}/ow/api/v1/oauth/success?provider=whoop&user_id=${user}`);
 	expect(JSON.parse((await page.locator('body').innerText()).trim())).toMatchObject({ success: true, provider: 'whoop', user_id: user });
 
-	const replay = await request.get(`${callback}?state=used&code=used`);
+	const replay = await request.get(callbackUrl);
 	expect(replay.url()).toContain('/ow/api/v1/oauth/error?');
 	expect(await replay.json()).toMatchObject({ success: false });
 });
