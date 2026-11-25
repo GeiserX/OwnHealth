@@ -63,6 +63,8 @@ struct Fake {
     repeat_cursor: bool,
     /// Time-series requests for this provider answer 200 with a body that is not a page.
     broken_for: Option<String>,
+    /// Time-series requests for this provider answer 503.
+    unavailable_for: Option<String>,
     /// SQL run once, keyed by route ("put" at the first disable PUT, "scores" at the first score read).
     hooks: HashMap<&'static str, (PgPool, String)>,
     /// Whether each hook's SQL succeeded.
@@ -224,6 +226,12 @@ async fn series(State(s): State<Shared>, Query(q): Query<Vec<(String, String)>>)
     if s.broken_for.as_deref().is_some_and(|p| one(&q, "provider") == Some(p)) {
         return "not a page".into_response();
     }
+    if s.unavailable_for
+        .as_deref()
+        .is_some_and(|p| one(&q, "provider") == Some(p))
+    {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     // Cursors carry characters a query must escape.
     let offset = one(&q, "cursor").map_or(0, |c| {
         c.trim_start_matches("c+")
@@ -338,6 +346,7 @@ impl Env {
             malformed: None,
             repeat_cursor: false,
             broken_for: None,
+            unavailable_for: None,
             hooks: HashMap::new(),
             hooked: vec![],
             asked: vec![],
@@ -1729,6 +1738,136 @@ async fn a_connection_that_never_synced_alerts_once_its_window_passes() -> anyho
         open_gaps(&env, id).await?.len(),
         1,
         "a vendor that never synced is a gap after its window"
+    );
+    Ok(())
+}
+
+/// A later poll keeps the time a never-synced connection was first seen, so the clock does not restart
+/// at every poll.
+#[tokio::test]
+async fn a_never_synced_connection_keeps_its_first_seen_time_across_polls() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    env.fake().connections = json!([["polar", "active", null]]);
+    poll(&env.ctx, &env.base, id).await?;
+    sqlx::query(
+        "update source set cursor = jsonb_set(cursor, '{connections,polar,seen_since}', to_jsonb($2::timestamptz)) where id = $1",
+    )
+    .bind(id)
+    .bind(Utc::now() - Duration::hours(21))
+    .execute(&env.ctx.pool)
+    .await?;
+    poll(&env.ctx, &env.base, id).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    assert_eq!(
+        open_gaps(&env, id).await?.len(),
+        1,
+        "a later poll restarted the never-synced clock"
+    );
+    Ok(())
+}
+
+/// A vendor removed in Open Wearables while it still syncs has no gap to report: it is not kept, and no
+/// alert opens once its window would have passed.
+#[tokio::test]
+async fn a_healthy_vendor_removed_in_open_wearables_raises_no_alert() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let now = Utc::now();
+    env.fake().connections = json!([["polar", "active", now], ["whoop", "active", now]]);
+    poll(&env.ctx, &env.base, id).await?;
+    env.fake().connections = json!([["whoop", "active", now]]);
+    poll(&env.ctx, &env.base, id).await?;
+    for later in [1, 21, 30] {
+        sources::scheduler_tick_at(&env.ctx, now + Duration::hours(later)).await?;
+        assert!(open_gaps(&env, id).await?.is_empty(), "alert at +{later} h");
+    }
+    let kept: Option<Value> = sqlx::query_scalar("select cursor #> '{connections,polar}' from source where id = $1")
+        .bind(id)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert_eq!(kept, None, "a removed healthy vendor stays in the cursor");
+    Ok(())
+}
+
+/// Open Wearables can report a recent sync for a vendor whose data reads fail on every poll, while the
+/// other vendors sync. That vendor stalls, so it alerts once its reads have failed for its window. A
+/// WHOOP success does not clear Polar's failures, and the alert closes when Polar reads again.
+#[tokio::test]
+async fn a_vendor_whose_reads_keep_failing_alerts_while_the_others_sync() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    {
+        let mut fake = env.fake();
+        let now = Utc::now();
+        fake.connections = json!([["polar", "active", now], ["whoop", "active", now]]);
+        fake.unavailable_for = Some("polar".into());
+    }
+    poll(&env.ctx, &env.base, id).await?;
+    assert_eq!(env.mark(id, "polar").await?, None, "polar read nothing");
+    assert!(env.mark(id, "whoop").await?.is_some(), "whoop synced");
+    // the first failure was 21 h ago; polls since have failed too
+    sqlx::query(
+        "update source set cursor = jsonb_set(cursor, '{connections,polar,failing_since}', to_jsonb($2::timestamptz)) where id = $1",
+    )
+    .bind(id)
+    .bind(Utc::now() - Duration::hours(21))
+    .execute(&env.ctx.pool)
+    .await?;
+    env.fake().connections = json!([["polar", "active", Utc::now()], ["whoop", "active", Utc::now()]]);
+    poll(&env.ctx, &env.base, id).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    let open = open_gaps(&env, id).await?;
+    let [item] = open[..] else {
+        anyhow::bail!("one alert expected, got {open:?}");
+    };
+    let message: String = sqlx::query_scalar("select payload #>> '{message,en}' from review_item where id = $1")
+        .bind(item)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert!(message.contains("Polar") && !message.contains("WHOOP"), "{message}");
+
+    env.fake().unavailable_for = None;
+    poll(&env.ctx, &env.base, id).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    assert!(open_gaps(&env, id).await?.is_empty(), "polar reads again");
+    let reason: Option<String> = sqlx::query_scalar("select decision_reason from review_item where id = $1")
+        .bind(item)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert_eq!(reason.as_deref(), Some("sync_recovered"));
+    Ok(())
+}
+
+/// A failed re-read of days a vendor already stored is not stalled progress: the vendor still stores its
+/// newer days, so its failure clock is cleared.
+#[tokio::test]
+async fn a_failing_re_read_of_stored_days_is_not_a_stalled_vendor() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let now = Utc::now();
+    env.fake().connections = json!([["polar", "active", now]]);
+    poll(&env.ctx, &env.base, id).await?;
+    let stored = env.mark(id, "polar").await?.expect("polar stored its days");
+    sqlx::query(
+        "update source set cursor = jsonb_set(cursor, '{connections,polar,failing_since}', to_jsonb($2::timestamptz)) where id = $1",
+    )
+    .bind(id)
+    .bind(now - Duration::hours(21))
+    .execute(&env.ctx.pool)
+    .await?;
+    // only the seven days before the cursor fail
+    env.fake().fail_before = Some(stored);
+    poll(&env.ctx, &env.base, id).await?;
+    assert!(env.mark(id, "polar").await? > Some(stored), "polar moved on");
+    sources::scheduler_tick(&env.ctx).await?;
+    assert!(
+        open_gaps(&env, id).await?.is_empty(),
+        "a re-read failure opened an alert"
     );
     Ok(())
 }

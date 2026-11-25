@@ -769,25 +769,44 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     let mut observed: BTreeMap<String, ConnectionHealth> = connections
         .iter()
         .map(|(vendor, report)| {
-            // Keep the last known health if the sidecar reports a status we do not recognize.
-            // An unknown connection is still excluded from this run's data reads.
-            let mut health = *report;
-            if health.status == Status::Unknown {
-                health = previous.get(vendor).copied().unwrap_or(health);
-            } else if health.status == Status::Active && health.last_synced_at.is_none() {
-                let known = previous.get(vendor);
-                health.last_synced_at = known.and_then(|p| p.last_synced_at);
-                if health.last_synced_at.is_none() {
-                    health.seen_since = Some(known.and_then(|p| p.seen_since).unwrap_or(now));
+            let known = previous.get(vendor);
+            // OwnHealth keeps the clocks of its own; a report never sets them.
+            let mut health = ConnectionHealth {
+                seen_since: None,
+                failing_since: None,
+                ..*report
+            };
+            match health.status {
+                // Keep the last known health if the sidecar reports a status we do not recognize.
+                // An unknown connection is still excluded from this run's data reads.
+                Status::Unknown => health = known.copied().unwrap_or(health),
+                Status::Active => {
+                    if health.last_synced_at.is_none() {
+                        health.last_synced_at = known.and_then(|p| p.last_synced_at);
+                        if health.last_synced_at.is_none() {
+                            health.seen_since = Some(known.and_then(|p| p.seen_since).unwrap_or(now));
+                        }
+                    }
+                    // A vendor whose new days do not read counts from its first such poll, until a
+                    // poll stores newer days for it. Another vendor's success does not clear it.
+                    if failed.iter().any(|(stopped, _)| *stopped == vendor.as_str()) {
+                        let moved = mark(cursor.as_ref(), vendor) != mark(binding.cursor.as_ref(), vendor);
+                        health.failing_since =
+                            Some(known.and_then(|p| p.failing_since).filter(|_| !moved).unwrap_or(now));
+                    }
                 }
+                Status::Expired | Status::Revoked => health.failing_since = known.and_then(|p| p.failing_since),
             }
             (vendor.clone(), health)
         })
         .collect();
-    // A vendor that drops out of the report (its connection deleted in the sidecar) sends no more data:
-    // it has not recovered. Keep its last health, so an open alert stays open and staleness keeps counting.
+    // A vendor that drops out of the report (its connection deleted in the sidecar) sends no more data.
+    // If it was in a gap, it has not recovered: keep its last health, so its alert stays open. A vendor
+    // removed while it synced has nothing to report and is dropped.
     for (vendor, health) in previous {
-        observed.entry(vendor).or_insert(health);
+        if gaps::in_gap(&vendor, health, now) {
+            observed.entry(vendor).or_insert(health);
+        }
     }
     let mut next = cursor.unwrap_or_else(|| json!({}));
     next[gaps::CURSOR_KEY] = json!(observed);

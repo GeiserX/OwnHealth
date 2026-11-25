@@ -76,16 +76,21 @@ pub(crate) struct ConnectionHealth {
     /// from here, so a vendor that never sends data still raises an alert. OwnHealth sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_since: Option<DateTime<Utc>>,
+    /// The first poll whose read of this vendor's new days failed, in the current streak. A failed
+    /// re-read of days already stored does not count. OwnHealth sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing_since: Option<DateTime<Utc>>,
 }
 
 impl ConnectionHealth {
     fn is_gap(self, provider: &Provider, now: DateTime<Utc>) -> bool {
         match self.status {
             Status::Expired | Status::Revoked => true,
-            Status::Active => self
-                .last_synced_at
-                .or(self.seen_since)
-                .is_some_and(|synced| now - synced > Duration::hours(provider.stale_hours)),
+            // Open Wearables may report a recent sync while OwnHealth cannot read that vendor's data.
+            Status::Active => [self.last_synced_at.or(self.seen_since), self.failing_since]
+                .into_iter()
+                .flatten()
+                .any(|since| now - since > Duration::hours(provider.stale_hours)),
             Status::Unknown => false,
         }
     }
@@ -93,6 +98,13 @@ impl ConnectionHealth {
 
 pub(crate) const CURSOR_KEY: &str = "connections";
 pub(crate) type Connections = BTreeMap<String, ConnectionHealth>;
+
+/// Whether a vendor's last known health is a gap at `now`.
+pub(crate) fn in_gap(vendor: &str, health: ConnectionHealth, now: DateTime<Utc>) -> bool {
+    policy()
+        .and_then(|p| p.providers.get(vendor))
+        .is_some_and(|provider| health.is_gap(provider, now))
+}
 
 pub(crate) fn observed_connections(cursor: Option<&Value>) -> Connections {
     cursor
