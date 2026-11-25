@@ -246,7 +246,13 @@ async fn an_inbox_releases_a_refused_strava_archive() -> R {
     let inbox = env.source("folder", Some("lucia"), serde_json::json!({}), None).await?;
     let sha = env.blobs.put_bytes(owner, &archive)?;
     let mut tx = env.db.pool.begin().await?;
-    let job = match arrive(&mut tx, &env.blobs, &inbox_arrival(&env, inbox.id, "refused", &sha, archive.len())).await? {
+    let job = match arrive(
+        &mut tx,
+        &env.blobs,
+        &inbox_arrival(&env, inbox.id, "refused", &sha, archive.len()),
+    )
+    .await?
+    {
         Arrived::Queued {
             kind: "strava_zip",
             job_id: Some(job),

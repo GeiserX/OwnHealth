@@ -616,7 +616,10 @@ mod tests {
         for kind in ["running", "9", "10", "4"] {
             assert_eq!(gpx_distance(kind), [("distance", 1.112)], "type {kind}");
         }
-        assert!(gpx_distance("1").is_empty(), "a ride brings no walking or running distance");
+        assert!(
+            gpx_distance("1").is_empty(),
+            "a ride brings no walking or running distance"
+        );
     }
 
     #[test]
