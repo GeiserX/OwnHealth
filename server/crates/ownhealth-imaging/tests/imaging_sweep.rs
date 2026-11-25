@@ -781,6 +781,57 @@ async fn a_rebuilt_file_orthanc_files_under_another_study_is_taken_back() -> R {
 }
 
 #[tokio::test]
+async fn a_misfiled_rebuilt_file_whose_take_back_failed_goes_at_the_retry() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    e.upload("alex", &study_files(&st, "DICOM")).await?;
+    e.import().await?;
+    let named = e
+        .recorded(U1)
+        .await?
+        .and_then(|r| r.1)
+        .ok_or_else(|| anyhow::anyhow!("U1 is not recorded"))?;
+    e.orthanc.wipe();
+    // the restored Orthanc files the first series under another PatientID: a second study of U1
+    *e.orthanc.misread_patient.lock().expect("test setting") = Some((ALEX.id.into(), "LN-MISREAD".into()));
+    *e.orthanc.misread_except_series.lock().expect("test setting") = Some(st.series_uid(1));
+    // and the first take-back of a misfiled file fails
+    let next = e.orthanc.deletes.load(Ordering::SeqCst) + 1;
+    e.orthanc.fail_delete_at.store(next, Ordering::SeqCst);
+    let swept = e.sweep().await?;
+    assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, _) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "queued", "the rebuild did not retry");
+    assert!(
+        e.orthanc.held().studies.keys().any(|id| *id != named),
+        "the failed take-back left no stray study"
+    );
+    // the retry: Orthanc answers AlreadyStored for the file it kept in the stray study
+    sqlx::query("update job set run_after = now() where kind = $1 and state = 'queued'")
+        .bind(rebuild::JOB)
+        .execute(&e.rt.pool)
+        .await?;
+    assert_eq!(e.run(rebuild::JOB).await?, 1);
+    let (state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(state, "done", "{rebuilt}");
+    let held = e.orthanc.held();
+    assert_eq!(
+        held.studies.keys().cloned().collect::<Vec<_>>(),
+        vec![named.clone()],
+        "a misfiled file stayed in another study of U1"
+    );
+    // the study the record names keeps the series Orthanc filed there
+    let kept: Vec<&(String, String)> = held.instances.values().collect();
+    assert_eq!(kept.len(), st.per_series, "{kept:?}");
+    assert!(
+        kept.iter()
+            .all(|(study, series)| *study == named && *series == st.series_uid(1))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn one_study_orthanc_cannot_delete_neither_stops_the_sweep_nor_passes_unseen() -> R {
     let e = env().await?;
     let client = Orthanc::new(e.orthanc.config())?;

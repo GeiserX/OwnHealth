@@ -17,7 +17,8 @@
 //! under the one StudyInstanceUID lock every Orthanc writer takes
 //! ([`ownhealth_core::orthanc::lock_study`]), after it reads the record again under that lock.
 //! Orthanc files a study by PatientID and UID, so the rebuilt study gets the id the record names; a
-//! file Orthanc files under another study is taken back at once. A retracted study is rebuilt too:
+//! file Orthanc files under another study is taken back at once, and so is one an earlier try left
+//! there (its take-back failed) when no record names that study. A retracted study is rebuilt too:
 //! its row stays, and so do its pixels. The record is not changed. An upload whose zip does not open
 //! (its profile's key was shredded) is counted and left out.
 
@@ -299,9 +300,16 @@ async fn replay(
                     t.sent += 1;
                     kept += 1;
                 }
-                Stored::Kept { id: other, new, .. } => {
-                    // not the study the record names: take back what this send added
-                    if new {
+                Stored::Kept {
+                    id: other,
+                    study: parent,
+                    new,
+                } => {
+                    // Not the study the record names: take back what this send added. A file Orthanc
+                    // had already (a take-back of an earlier try failed) goes too when no record names
+                    // its study either, as the sweep would delete that study; one inside a study a
+                    // record names stays.
+                    if new || !names(&mut tx, &parent).await? {
                         orthanc.delete_instance(&other).await.map_err(retry)?;
                     }
                     t.misfiled += 1;
@@ -323,4 +331,14 @@ async fn replay(
         tx.commit().await?;
     }
     Ok(())
+}
+
+/// Whether a record names Orthanc study `id`.
+async fn names(conn: &mut PgConnection, id: &str) -> Result<bool, JobError> {
+    Ok(
+        sqlx::query_scalar("select exists (select 1 from imaging_study where orthanc_id = $1)")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?,
+    )
 }
