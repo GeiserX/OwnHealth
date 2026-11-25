@@ -41,6 +41,9 @@ const LIMIT: &str = "fitbit_takeout_limit";
 const NO_READINGS: &str = "fitbit_takeout_no_readings";
 const INVALID_CSV: &str = "invalid_csv";
 const INVALID_JSON: &str = "invalid_json";
+/// A damaged member (bad checksum, short data or a method the reader cannot open) is listed and
+/// skipped, as in a Garmin ZIP; the other members still import.
+const DAMAGED: &str = "invalid_member";
 
 // A month of five-second heart rate can exceed MAX_JSON. The byte and input row caps
 // also bound work for archives whose rows collapse to very few output readings.
@@ -538,7 +541,14 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
         let name = hide_email(&path);
         let zone = zones.get(&root).copied().unwrap_or(shared_zone);
         let heart_rate = matches!(kind.metric, Metric::HeartRate);
-        let file = zip.by_index(index).map_err(|e| archive_error(e, UNREADABLE, LIMIT))?;
+        let file = match zip.by_index(index).map_err(|e| archive_error(e, UNREADABLE, LIMIT)) {
+            Ok(file) => file,
+            Err(Error::Upload(code)) if code == UNREADABLE => {
+                report.omit(name, DAMAGED);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let size = file.size();
         let limit = if heart_rate && !kind.json {
             MAX_HEART_RATE_CSV
@@ -577,8 +587,9 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             Ok(())
         };
         let read = if kind.json {
-            let bytes = member_bytes(file, size)?;
-            json_rows(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes), kind.metric, push)
+            member_bytes(file, size).and_then(|bytes| {
+                json_rows(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes), kind.metric, push)
+            })
         } else {
             csv_rows(file, size, kind.metric, push)
         };
@@ -587,6 +598,11 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             Ok(()) => {}
             Err(Error::Upload(code)) if code == invalid => {
                 report.omit(name, invalid);
+                continue;
+            }
+            // Storage errors and limits stay fatal; only this member's staged readings are dropped.
+            Err(Error::Upload(code)) if code == UNREADABLE => {
+                report.omit(name, DAMAGED);
                 continue;
             }
             Err(error) => return Err(error),

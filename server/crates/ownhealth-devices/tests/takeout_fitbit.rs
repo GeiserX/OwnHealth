@@ -980,3 +980,51 @@ async fn a_malformed_profile_does_not_suppress_another_roots_local_readings() ->
     assert_eq!(result["fitbit_takeout"]["rows_left_out"], 1, "{result}");
     assert_readings(&env, result, &[("hrv_rmssd", 43.5, "2024-07-03T23:15:00Z", 120)]).await
 }
+
+/// Members stored without compression, so a test can change their bytes after the CRC is written.
+fn stored_archive(members: &[(&str, &str)]) -> anyhow::Result<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, contents) in members {
+        zip.start_file(*name, stored)?;
+        zip.write_all(contents.as_bytes())?;
+    }
+    Ok(zip.finish()?.into_inner())
+}
+
+/// Change member text in place, so the member fails its CRC check.
+fn damage(bytes: &mut [u8], from: &str, to: &str) {
+    assert_eq!(from.len(), to.len());
+    let at = bytes
+        .windows(from.len())
+        .position(|window| window == from.as_bytes())
+        .expect("member text in the archive");
+    bytes[at..at + from.len()].copy_from_slice(to.as_bytes());
+}
+
+#[tokio::test]
+async fn a_damaged_member_is_listed_and_the_other_members_import() -> R {
+    let env = Env::new().await?;
+    let csv = "Takeout/Fitbit/Google Data/Heart Rate/2024-07.csv";
+    let json = "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-05.json";
+    let mut bytes = stored_archive(&[
+        (csv, "timestamp,bpm\n2024-07-12T08:00:05Z,123\n"),
+        (json, r#"[{"dateTime":"07/05/24 08:10:00","value":{"bpm":91}}]"#),
+        (
+            "Takeout/Google Health/Google Data/Heart Rate/2024-07.csv",
+            "timestamp,bpm\n2024-07-12T09:00:15Z,70\n",
+        ),
+    ])?;
+    damage(&mut bytes, ",123\n", ",124\n");
+    damage(&mut bytes, "\"bpm\":91", "\"bpm\":92");
+    let (state, error, result) = upload_bytes(&env, &bytes).await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(
+        omitted(&result),
+        [
+            (json.to_string(), "invalid_member".to_string()),
+            (csv.to_string(), "invalid_member".to_string()),
+        ]
+    );
+    assert_readings(&env, result, &[("hr", 70.0, "2024-07-12T09:00:00Z", 0)]).await
+}
