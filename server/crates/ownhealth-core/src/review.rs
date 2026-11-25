@@ -686,6 +686,9 @@ pub async fn reject(conn: &mut PgConnection, item_id: Uuid, user_id: Uuid, reaso
 
 pub async fn reopen(conn: &mut PgConnection, item_id: Uuid, _user_id: Uuid) -> Result<()> {
     let item = lock_item(&mut *conn, item_id, "rejected").await?;
+    if item.kind == "source_gap" {
+        return Err(Error::Review("OwnHealth manages this sync alert automatically.".into()));
+    }
     sqlx::query(
         "update review_item set status = 'open', decided_by = null, decided_at = null, decision_reason = null where id = $1",
     )

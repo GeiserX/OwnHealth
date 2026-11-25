@@ -10,7 +10,7 @@
 //! distinct payload once. The sample and score stores compare incoming rows with their current
 //! values. A failed re-read is named and skipped so the vendor's newer days can still be stored.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use ownhealth_core::{
@@ -30,6 +30,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{scores, store};
+
+#[path = "gaps.rs"]
+mod gaps;
+use gaps::{ConnectionHealth, Connections, Status};
 
 const KIND: &str = "openwearables";
 const PURPOSE: &str = "openwearables_api_key";
@@ -423,20 +427,11 @@ async fn binding(pool: &PgPool, source: Uuid) -> Result<Option<Binding>> {
     }))
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ConnectionStatus {
-    Active,
-    Expired,
-    Revoked,
-    #[serde(other)]
-    Unknown,
-}
-
 #[derive(Deserialize)]
 struct Connection {
     provider: String,
-    status: ConnectionStatus,
+    #[serde(flatten)]
+    health: ConnectionHealth,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -678,25 +673,50 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
         to: now,
         remaining: MAX_BYTES_PER_DAY,
     };
-    let mut active = BTreeSet::new();
-    let mut ended = BTreeSet::new();
-    for c in pull.read::<Vec<Connection>>("connections", &[]).await? {
-        if !allowed(&c.provider) {
+    let mut connections = Connections::new();
+    for row in pull.read::<Vec<Connection>>("connections", &[]).await? {
+        if !allowed(&row.provider) {
             continue;
         }
-        match c.status {
-            ConnectionStatus::Active => active.insert(c.provider),
-            ConnectionStatus::Expired | ConnectionStatus::Revoked => ended.insert(c.provider),
-            ConnectionStatus::Unknown => false,
-        };
+        let health = row.health;
+        connections
+            .entry(row.provider)
+            .and_modify(|known| {
+                // A working connection supersedes an ended one for the same vendor.
+                // If both are active, keep the latest reported sync.
+                if health.status == Status::Active {
+                    let last_synced_at = if known.status == Status::Active {
+                        health.last_synced_at.max(known.last_synced_at)
+                    } else {
+                        health.last_synced_at
+                    };
+                    *known = ConnectionHealth {
+                        last_synced_at,
+                        ..health
+                    };
+                } else if known.status == Status::Unknown {
+                    *known = health;
+                }
+            })
+            .or_insert(health);
     }
+    let active: Vec<_> = connections
+        .iter()
+        .filter_map(|(provider, health)| (health.status == Status::Active).then_some(provider.as_str()))
+        .collect();
+    let ended: Vec<_> = connections
+        .iter()
+        .filter_map(|(provider, health)| {
+            matches!(health.status, Status::Revoked | Status::Expired).then_some(provider.as_str())
+        })
+        .collect();
     let mut out = RunOutcome::default();
     let mut cursor = binding.cursor.clone();
     // A vendor whose reads fail stops at its last stored day; the vendors after it are still read.
     let mut failed = Vec::new();
     // A failed re-read of days a vendor already stored: named, and the vendor goes on after its cursor.
     let mut skipped = Vec::new();
-    'vendors: for provider in &active {
+    'vendors: for &provider in &active {
         let stored_until = mark(cursor.as_ref(), provider).map(|t| t.min(now));
         let mut from = stored_until.map_or(now - Duration::days(BACKFILL_DAYS), |t| {
             t - Duration::days(OVERLAP_DAYS)
@@ -721,11 +741,11 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
                     // Days the vendor already stored: go on after them. The next poll's window starts
                     // at the same place, so it tries these days again.
                     if let Some(until) = stored_until.filter(|until| to <= *until) {
-                        skipped.push((provider.as_str(), err));
+                        skipped.push((provider, err));
                         from = until;
                         continue;
                     }
-                    failed.push((provider.as_str(), err));
+                    failed.push((provider, err));
                     continue 'vendors;
                 }
             };
@@ -733,30 +753,52 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
             else {
                 // The binding changed while the day was read (rotated, deleted, switched off). This run
                 // read with the old one, so it must not count as a sync of the new one.
-                return Err(JobError::typed(
-                    "ow_binding_changed",
-                    "The Open Wearables link changed while this poll ran; the next poll uses the new one. / El vínculo con Open Wearables cambió durante esta sincronización; la siguiente usa el nuevo.",
-                ));
+                return Err(binding_changed());
             };
             cursor = Some(next);
             from = to;
         }
     }
-    // A vendor whose connection ended keeps its own cursor and is read from there once it is back.
+    // The connection report is useful even if every data endpoint failed. Save it under the
+    // same binding guard as the data, without changing any vendor's data cursor.
+    let mut tx = ctx.pool.begin().await?;
+    if !lock_live_binding(&mut tx, source, &binding, cursor.as_ref()).await? {
+        return Err(binding_changed());
+    }
+    let previous = gaps::observed_connections(binding.cursor.as_ref());
+    let observed: BTreeMap<_, _> = connections
+        .iter()
+        .map(|(vendor, report)| {
+            // Keep the last known health if the sidecar reports a status we do not recognize.
+            // An unknown connection is still excluded from this run's data reads.
+            let mut health = *report;
+            if health.status == Status::Unknown {
+                health = previous.get(vendor).copied().unwrap_or(health);
+            } else if health.status == Status::Active && health.last_synced_at.is_none() {
+                health.last_synced_at = previous.get(vendor).and_then(|p| p.last_synced_at);
+            }
+            (vendor, health)
+        })
+        .collect();
+    let mut next = cursor.unwrap_or_else(|| json!({}));
+    next[gaps::CURSOR_KEY] = json!(observed);
     sqlx::query(
-        "update source set reconsent_needed_at = case when $2 then coalesce(reconsent_needed_at, now()) else null end
+        "update source set cursor = $3,
+           reconsent_needed_at = case when $2 then coalesce(reconsent_needed_at, now()) else null end
          where id = $1",
     )
     .bind(source)
     .bind(!ended.is_empty())
-    .execute(&ctx.pool)
+    .bind(next)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     let any_ended = !ended.is_empty();
     // The ended vendors come first: the Connections screen reads the first problem.
     if any_ended {
         out.problems.push(RunProblem {
             code: CONNECTION_ENDED.into(),
-            message: ended.into_iter().collect::<Vec<_>>().join(", "),
+            message: ended.join(", "),
         });
     }
     // When every vendor failed, the run failed: nothing of this poll is new, and the job says why.
@@ -779,6 +821,36 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     }
 }
 
+fn binding_changed() -> JobError {
+    JobError::typed(
+        "ow_binding_changed",
+        "The Open Wearables link changed while this poll ran; the next poll uses the new one. / El vínculo con Open Wearables cambió durante esta sincronización; la siguiente usa el nuevo.",
+    )
+}
+
+async fn lock_live_binding(
+    conn: &mut PgConnection,
+    source: Uuid,
+    binding: &Binding,
+    cursor: Option<&Value>,
+) -> Result<bool> {
+    // Serialize with setup and with a reconcile job for this user. Check the binding
+    // after grabbing the lock, so a rotation that just committed invalidates this pull.
+    lock_user(conn, binding.user).await?;
+    Ok(sqlx::query_scalar(
+        "select true from source s join openwearables_user w on w.source_id = s.id
+         where s.id = $1 and s.enabled and s.profile_id = $2 and w.secret_id = $3 and s.cursor is not distinct from $4
+         for update of s",
+    )
+    .bind(source)
+    .bind(binding.profile)
+    .bind(binding.secret)
+    .bind(cursor)
+    .fetch_optional(conn)
+    .await?
+    .unwrap_or(false))
+}
+
 /// Store one vendor's day and move its cursor to `to`, in one transaction. None when the binding
 /// changed since the poll read it: nothing is written then.
 #[allow(clippy::too_many_arguments)]
@@ -793,22 +865,7 @@ async fn store_day(
     out: &mut RunOutcome,
 ) -> Result<Option<Value>> {
     let mut tx = ctx.pool.begin().await?;
-    // Serialize with setup and with a reconcile job for this user. Check the binding
-    // after grabbing the lock, so a rotation that just committed invalidates this pull.
-    lock_user(&mut tx, binding.user).await?;
-    let live: bool = sqlx::query_scalar(
-        "select true from source s join openwearables_user w on w.source_id = s.id
-         where s.id = $1 and s.enabled and s.profile_id = $2 and w.secret_id = $3 and s.cursor is not distinct from $4
-         for update of s",
-    )
-    .bind(source)
-    .bind(binding.profile)
-    .bind(binding.secret)
-    .bind(cursor)
-    .fetch_optional(&mut *tx)
-    .await?
-    .unwrap_or(false);
-    if !live {
+    if !lock_live_binding(&mut tx, source, binding, cursor).await? {
         return Ok(None);
     }
     archive_new_rows(ctx, &mut tx, source, binding.profile, &bundle).await?;
@@ -1198,6 +1255,7 @@ async fn reconcile_job(ctx: &JobContext, base: &Url, job: &Job) -> Result<Option
 }
 
 pub fn register() {
+    gaps::register();
     sources::register_poller(KIND, |ctx, source| {
         Box::pin(async move { poll(&ctx, &internal()?, source.id).await })
     });

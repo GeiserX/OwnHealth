@@ -164,7 +164,8 @@ async fn connections(State(s): State<Shared>, Path(user): Path<Uuid>) -> Json<Ve
             .iter()
             .map(|v| {
                 json!({"user_id": user, "provider": v[0], "status": v[1], "id": Uuid::nil(),
-            "last_synced_at": s.t, "created_at": s.t, "updated_at": s.t})
+            "last_synced_at": v.get(2).cloned().unwrap_or_else(|| json!(s.t)),
+            "created_at": s.t, "updated_at": s.t})
             })
             .collect(),
     )
@@ -1262,4 +1263,231 @@ fn a_base_address_that_is_not_an_http_origin_is_an_error() {
             .as_str(),
         "http://ow-app:8000/api/v1/users/u"
     );
+}
+
+/// Give scripts the same health/run updates as a poll completing on the injected clock.
+async fn record_gap_test_run(env: &Env, source: Uuid, now: DateTime<Utc>, failed: bool) -> anyhow::Result<()> {
+    let mut tx = env.ctx.pool.begin().await?;
+    let run = sources::begin_run(&mut tx, source, "poll", None).await?;
+    let ok = RunOutcome::default();
+    sources::finish_run(&mut tx, run, if failed { Err("vendor unavailable") } else { Ok(&ok) }).await?;
+    sqlx::query("update source_run set started_at = $2, finished_at = $2 where id = $1")
+        .bind(run)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "update source set last_run_at = $2,
+         last_error_at = case when $3 then $2 else last_error_at end,
+         last_success_at = case when $3 then last_success_at else $2 end where id = $1",
+    )
+    .bind(source)
+    .bind(now)
+    .bind(failed)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thirty_days_of_sync_gaps_open_once_and_close_on_recovery() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let ow = env.seed_source().await?;
+    gaps::register();
+    let registered = &env.ctx;
+    let start = instant("2026-01-01T00:00:00Z");
+    let household: Uuid = sqlx::query_scalar("select household_id from source where id = $1")
+        .bind(ow)
+        .fetch_one(&registered.pool)
+        .await?;
+    let mut conn = registered.pool.acquire().await?;
+    let dexcom = sources::create_source(
+        &mut conn,
+        &NewSource {
+            profile_id: Some(env.profile),
+            poll_seconds: Some(900),
+            ..NewSource::new(household, "dexcom", "Dexcom")
+        },
+    )
+    .await?;
+    drop(conn);
+
+    let mut observed = BTreeMap::new();
+    let mut missed = Vec::new();
+    let mut false_alerts = Vec::new();
+    for tick in 0..30 * 24 * 4 {
+        let now = start + Duration::minutes(tick * 15);
+        let hour = tick / 4;
+        let failed = (250 * 4..251 * 4).contains(&tick) || tick == 300 * 4;
+        let dexcom_failed = (360 * 4..361 * 4).contains(&tick);
+        // The sidecar stays up when a vendor stops sending data or needs a new sign-in.
+        if !failed && (tick % 48 == 0 || [126, 127, 198, 251].contains(&hour) && tick % 4 == 0 || tick == 300 * 4 + 1) {
+            let (polar, synced) = match hour {
+                48..72 => ("active", start + Duration::hours(48)),
+                120..126 => ("expired", start + Duration::hours(119)),
+                126 => ("active", start + Duration::hours(105)),
+                _ => ("active", now),
+            };
+            let whoop = if (192..198).contains(&hour) {
+                "revoked"
+            } else {
+                "active"
+            };
+            {
+                let mut fake = env.fake();
+                fake.connections = json!([["polar", polar, synced], ["whoop", whoop, now]]);
+                fake.rows.clear();
+                fake.scores.clear();
+            }
+            poll(registered, &env.base, ow).await?;
+        }
+        if failed || [0, 251 * 4, 300 * 4 + 1].contains(&tick) {
+            record_gap_test_run(&env, ow, now, failed).await?;
+        }
+        if tick % 4 == 0 || (360 * 4..361 * 4).contains(&tick) {
+            // The current Dexcom contract has 1 h or 3 h of sensor lag. A successful pull
+            // with either lag still clears a failed-pull streak.
+            let delay = if hour % 2 == 0 { 1 } else { 3 };
+            sqlx::query("update source set cursor = $2 where id = $1")
+                .bind(dexcom)
+                .bind(json!({"sample_at": now - Duration::hours(delay)}))
+                .execute(&registered.pool)
+                .await?;
+            record_gap_test_run(&env, dexcom, now, dexcom_failed).await?;
+        }
+
+        let expected = if (68 * 4 + 1..72 * 4).contains(&tick)
+            || (120..127).contains(&hour)
+            || (192..198).contains(&hour)
+            || (250 * 4 + 2..251 * 4).contains(&tick)
+        {
+            Some(ow)
+        } else if (360 * 4 + 2..361 * 4).contains(&tick) {
+            Some(dexcom)
+        } else {
+            None
+        };
+        if tick == 68 * 4 + 1 {
+            tokio::try_join!(
+                sources::scheduler_tick_at(registered, now),
+                sources::scheduler_tick_at(registered, now),
+            )?;
+            // A concurrent scheduler may have captured its clock before the alert was due.
+            sources::scheduler_tick_at(registered, now - Duration::minutes(15)).await?;
+        } else {
+            sources::scheduler_tick_at(registered, now).await?;
+        }
+        let rows: Vec<(Uuid, Uuid, Value)> =
+            sqlx::query_as("select ref_id, id, payload from review_item where kind = 'source_gap' and status = 'open'")
+                .fetch_all(&registered.pool)
+                .await?;
+        if let Some(source) = expected
+            && !rows.iter().any(|(id, _, _)| *id == source)
+        {
+            missed.push((hour, tick % 4 * 15));
+        }
+        if rows.len() > usize::from(expected.is_some()) || rows.iter().any(|(id, _, _)| Some(*id) != expected) {
+            false_alerts.push((hour, tick % 4 * 15));
+        }
+        for (source, id, payload) in rows {
+            let expected_name = match hour {
+                192..198 => "WHOOP",
+                250 => "Open Wearables",
+                360 => "Dexcom",
+                _ => "Polar",
+            };
+            for (lang, reconnect) in [("en", "reconnect"), ("es", "volver a conectar")] {
+                let text = payload["message"][lang].as_str().unwrap_or_default();
+                assert!(text.contains(expected_name), "{source} at {now}: {text}");
+                assert!(text.contains(reconnect), "{text}");
+            }
+            observed.entry(id).or_insert(tick);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "{} missed ticks, first {:?}",
+        missed.len(),
+        missed.first()
+    );
+    assert!(
+        false_alerts.is_empty(),
+        "{} false ticks, first {:?}",
+        false_alerts.len(),
+        false_alerts.first()
+    );
+    let mut opened: Vec<_> = observed.into_values().collect();
+    opened.sort();
+    assert_eq!(opened, [68 * 4 + 1, 120 * 4, 192 * 4, 250 * 4 + 2, 360 * 4 + 2]);
+    let decided: Vec<DateTime<Utc>> = sqlx::query_scalar(
+        "select decided_at from review_item where kind = 'source_gap' and status = 'dismissed' order by decided_at",
+    )
+    .fetch_all(&registered.pool)
+    .await?;
+    assert_eq!(
+        decided,
+        [72, 127, 198, 251, 361].map(|hour| start + Duration::hours(hour))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_source_gap_ends_when_a_device_is_disabled_or_deleted() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    env.fake().connections = json!([["polar", "expired"]]);
+    poll(&env.ctx, &env.base, id).await?;
+
+    let open = || async {
+        sqlx::query_scalar::<_, Uuid>(
+            "select id from review_item where kind = 'source_gap' and ref_id = $1 and status = 'open'",
+        )
+        .bind(id)
+        .fetch_one(&env.ctx.pool)
+        .await
+    };
+    sources::scheduler_tick(&env.ctx).await?;
+    let first = open().await?;
+    let mut conn = env.ctx.pool.acquire().await?;
+    let user: Uuid = sqlx::query_scalar(
+        "select u.id from app_user u join source s on s.household_id = u.household_id where s.id = $1 limit 1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    ownhealth_core::review::dismiss(&mut conn, first, user, Some("acknowledged")).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    assert!(
+        matches!(open().await, Err(sqlx::Error::RowNotFound)),
+        "the gap is still in progress"
+    );
+    for enabled in [false, true] {
+        sources::update_source(
+            &mut conn,
+            id,
+            &sources::SourcePatch {
+                enabled: Some(enabled),
+                ..sources::SourcePatch::default()
+            },
+        )
+        .await?;
+        sources::scheduler_tick(&env.ctx).await?;
+        if !enabled {
+            assert!(matches!(open().await, Err(sqlx::Error::RowNotFound)));
+        }
+    }
+    assert_ne!(first, open().await?);
+    assert!(sources::delete_source(&mut conn, id).await?);
+    assert!(matches!(open().await, Err(sqlx::Error::RowNotFound)));
+    let unavailable: i64 = sqlx::query_scalar(
+        "select count(*) from review_item where ref_id = $1 and status = 'dismissed'
+         and (decision_reason = 'source_unavailable' or (decision_reason = 'acknowledged' and payload ? 'ended_at'))",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    assert_eq!(unavailable, 2);
+    Ok(())
 }

@@ -197,12 +197,18 @@ pub async fn update_source(conn: &mut PgConnection, id: Uuid, p: &SourcePatch) -
 }
 
 pub async fn delete_source(conn: &mut PgConnection, id: Uuid) -> Result<bool> {
-    let n = sqlx::query("delete from source where id = $1")
-        .bind(id)
-        .execute(conn)
-        .await?
-        .rows_affected();
-    Ok(n == 1)
+    // A review reference is polymorphic. Close the alert in the same statement that removes
+    // the source, so a disconnected device cannot leave an open review item behind.
+    Ok(sqlx::query_scalar(
+        "with removed as (delete from source where id = $1 returning id, household_id), \
+         closed as (update review_item i set status = 'dismissed', decided_at = now(), \
+           decision_reason = 'source_unavailable' from removed s where i.household_id = s.household_id \
+           and i.kind = 'source_gap' and i.ref_table = 'source' and i.ref_id = s.id and i.status = 'open') \
+         select exists (select 1 from removed)",
+    )
+    .bind(id)
+    .fetch_one(conn)
+    .await?)
 }
 
 /// Save the position a poller reached, in the caller's transaction (connectors.md 6.3 rule 2: in the
@@ -665,12 +671,172 @@ pub async fn enqueue_grant_poll(tx: &mut Transaction<'_, Postgres>, source_id: U
     }
 }
 
-/// One scheduler pass: `add_default_sources`, `schedule_due`, then `sweep_link_files`, so a sweep
-/// that waits on a lock or fails never holds back the due polls. Returns the jobs added.
+/// A connector interprets its cursor and returns localized review payload when a gap is present.
+/// The core supplies whether a pull has been failing for longer than the source's interval.
+pub type GapCheck = fn(Option<&Value>, bool, DateTime<Utc>) -> Option<Value>;
+
+static GAP_CHECKS: LazyLock<RwLock<HashMap<String, GapCheck>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
+
+pub fn register_gap_check(kind: &str, check: GapCheck) {
+    if let Ok(mut m) = GAP_CHECKS.write() {
+        m.insert(kind.into(), check);
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct GapSource {
+    household_id: Uuid,
+    profile_id: Option<Uuid>,
+    kind: String,
+    enabled: bool,
+    cursor: Option<Value>,
+    consecutive_failures: i32,
+    poll_seconds: Option<i32>,
+    last_success_at: Option<DateTime<Utc>>,
+    oauth_grant_id: Option<Uuid>,
+}
+
+async fn pull_failed_for_interval(
+    conn: &mut PgConnection,
+    id: Uuid,
+    source: &GapSource,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let Some(interval) = source.poll_seconds.filter(|_| source.consecutive_failures > 0) else {
+        return Ok(false);
+    };
+    // Measure from the first recorded failure of the current streak. Retries cannot postpone the
+    // alert, and one late failure after a long interval does not immediately raise it.
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from source_run where source_id = $1 \
+         and oauth_grant_id is not distinct from $2 and trigger in ('poll', 'manual') and status = 'error' \
+         and finished_at < $3 and ($4::timestamptz is null or finished_at > $4))",
+    )
+    .bind(id)
+    .bind(source.oauth_grant_id)
+    .bind(now - chrono::Duration::seconds(i64::from(interval)))
+    .bind(source.last_success_at)
+    .fetch_one(conn)
+    .await?)
+}
+
+async fn reconcile_gap(
+    conn: &mut PgConnection,
+    id: Uuid,
+    checks: &HashMap<String, GapCheck>,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    // The source row serializes schedulers and health writers. Read the run and review rows in
+    // separate statements after acquiring the lock so they include any writer we waited for.
+    let mut tx = sqlx::Connection::begin(conn).await?;
+    let source: Option<GapSource> = sqlx::query_as(
+        "select household_id, profile_id, kind, enabled, cursor, consecutive_failures, poll_seconds, \
+         last_success_at, oauth_grant_id from source where id = $1 for no key update",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(source) = source else {
+        return Ok(());
+    };
+    let payload = match (checks.get(&source.kind), source.enabled, source.profile_id) {
+        (Some(check), true, Some(_)) => {
+            let failed = pull_failed_for_interval(&mut tx, id, &source, now).await?;
+            check(source.cursor.as_ref(), failed, now)
+        }
+        _ => None,
+    };
+    // A dismissed or rejected alert still belongs to this gap until the source recovers.
+    // Keep the person's decision and end the episode so a later gap can open a new item.
+    sqlx::query(
+        "update review_item set payload = jsonb_set(payload, '{ended_at}', to_jsonb($3::timestamptz)), \
+         decided_at = coalesce(decided_at, $3), \
+         decision_reason = case when status <> 'open' then decision_reason \
+           when $4::uuid is distinct from profile_id or not $5 then 'source_unavailable' \
+           else 'sync_recovered' end, \
+         status = case when status = 'open' then 'dismissed' else status end \
+         where household_id = $2 and kind = 'source_gap' and ref_table = 'source' and ref_id = $1 \
+         and payload->>'ended_at' is null and (status = 'open' or decided_by is not null) \
+         and created_at <= $3 and ($4::uuid is distinct from profile_id or not $6)",
+    )
+    .bind(id)
+    .bind(source.household_id)
+    .bind(now)
+    .bind(source.profile_id)
+    .bind(source.enabled)
+    .bind(payload.is_some())
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(payload) = payload {
+        let current: Option<(Uuid, bool, Value)> = sqlx::query_as(
+            "select id, status = 'open', payload from review_item where household_id = $1 and profile_id = $2 \
+             and kind = 'source_gap' and ref_table = 'source' and ref_id = $3 and payload->>'ended_at' is null \
+             and (status = 'open' or decided_by is not null) order by created_at desc, id desc limit 1",
+        )
+        .bind(source.household_id)
+        .bind(source.profile_id)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match current {
+            Some((item, true, previous)) if previous != payload => {
+                sqlx::query("update review_item set payload = $2 where id = $1 and status = 'open'")
+                    .bind(item)
+                    .bind(payload)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            None => {
+                sqlx::query(
+                    "insert into review_item (household_id, profile_id, kind, ref_table, ref_id, payload, created_at) \
+                     values ($1, $2, 'source_gap', 'source', $3, $4, $5)",
+                )
+                .bind(source.household_id)
+                .bind(source.profile_id)
+                .bind(id)
+                .bind(payload)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+            _ => {}
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn check_source_gaps(conn: &mut PgConnection, now: DateTime<Utc>) -> Result<()> {
+    let checks = GAP_CHECKS.read().map(|m| m.clone()).unwrap_or_default();
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let kinds: Vec<&str> = checks.keys().map(String::as_str).collect();
+    let sources: Vec<Uuid> = sqlx::query_scalar("select id from source where kind = any($1) order by id")
+        .bind(&kinds)
+        .fetch_all(&mut *conn)
+        .await?;
+    for id in sources {
+        reconcile_gap(conn, id, &checks, now).await?;
+    }
+    Ok(())
+}
+
+/// Queue due polls before reconciling sync-gap alerts and sweeping expired share files.
+/// Returns the jobs added.
 pub async fn scheduler_tick(ctx: &JobContext) -> Result<Vec<i64>> {
+    scheduler_tick_at(ctx, Utc::now()).await
+}
+
+/// The scheduler pass with an explicit clock for sync-gap alerts.
+pub async fn scheduler_tick_at(ctx: &JobContext, now: DateTime<Utc>) -> Result<Vec<i64>> {
     add_default_sources(ctx).await?;
     let mut conn = ctx.pool.acquire().await?;
     let added = schedule_due(&mut conn).await?;
+    if let Err(error) = check_source_gaps(&mut conn, now).await {
+        tracing::warn!(%error, "source sync-gap check failed");
+    }
     sweep_link_files(&mut conn).await?;
     Ok(added)
 }
