@@ -941,6 +941,40 @@ async fn a_rebuild_retries_when_the_stored_zip_returns() -> R {
 }
 
 #[tokio::test]
+async fn a_rebuild_that_exhausts_its_retries_holds_back_the_next_sweeps() -> R {
+    let e = env().await?;
+    let files = study_files(&Study::new(U1, ALEX), "DICOM");
+    let (_, sha) = e.upload("alex", &files).await?;
+    e.import().await?;
+    e.orthanc.wipe();
+    assert!(e.rt.blobs.delete(BlobOwner::Profile(e.fam.profile("alex")), &sha)?);
+
+    let first = e.sweep().await?;
+    assert_eq!(first["rebuilds_queued"], 1, "{first}");
+    for _ in 0..5 {
+        sqlx::query("update job set run_after = now() where kind = $1 and state = 'queued'")
+            .bind(rebuild::JOB)
+            .execute(&e.rt.pool)
+            .await?;
+        assert_eq!(e.run(rebuild::JOB).await?, 1);
+    }
+    assert_eq!(e.result(rebuild::JOB).await?.0, "dead");
+
+    for _ in 0..2 {
+        let swept = e.sweep().await?;
+        assert_eq!(swept["rebuild_profiles"], 1, "{swept}");
+        assert_eq!(swept["rebuilds_queued"], 0, "{swept}");
+        assert_eq!(e.run(rebuild::JOB).await?, 0);
+    }
+    assert_eq!(
+        e.count("select count(*) from review_item where kind = 'job_failed' and payload->>'kind' = 'imaging.rebuild'")
+            .await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_reupload_of_the_same_zip_racing_the_removal_keeps_the_upload_and_its_zip() -> R {
     let e = env().await?;
     let alex = e.fam.profile("alex");

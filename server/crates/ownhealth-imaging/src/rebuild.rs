@@ -48,14 +48,15 @@ fn this_run() -> &'static str {
 
 /// Queues a rebuild of `profile_id`'s studies, unless one is queued or running, or one that this run
 /// of the app queued finished in the last day and could not bring every study back (the sweep runs
-/// every hour: without this it would read the same zips again each time). A rebuild that hits a
-/// retryable ZIP read failure while restoring a study stays out of this cooldown. A rebuild of an
-/// earlier app run does not count. Orthanc may have changed after a restart or restore.
+/// every hour: without this it would read the same zips again each time). A retryable ZIP read
+/// failure uses the job's own retries before the cooldown applies. A rebuild of an earlier app run
+/// does not count. Orthanc may have changed after a restart or restore.
 pub async fn enqueue(conn: &mut PgConnection, profile_id: Uuid) -> sqlx::Result<Option<i64>> {
     let key = format!("{JOB}:{profile_id}");
     let stuck: bool = sqlx::query_scalar(
-        "select exists (select 1 from job where dedupe_key = $1 and state = 'done' and payload->>'run' = $2 \
-         and finished_at > now() - interval '1 day' and coalesce((result->>'missing')::int, 0) > 0)",
+        "select exists (select 1 from job where dedupe_key = $1 and payload->>'run' = $2 \
+         and finished_at > now() - interval '1 day' \
+         and (state = 'dead' or (state = 'done' and coalesce((result->>'missing')::int, 0) > 0)))",
     )
     .bind(&key)
     .bind(this_run())
