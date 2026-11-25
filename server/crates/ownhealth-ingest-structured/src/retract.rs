@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use uuid::Uuid;
 
-use crate::wearables;
+use crate::wearables::{self, STAGED_SAMPLES, StagingAccess};
 
 /// Returns `{"observations": [ids], "records": {table: [ids]}, "wearable_samples": n, "documents": [ids]}`.
 /// `documents` are the child documents the import created (an Apple Health export's ECGs), retracted
@@ -83,15 +83,22 @@ pub fn retract_document_facts<'c>(
         .await?;
         // The live DELETE holds the parent's lock, so staging cannot disappear between this
         // privilege check and the DELETE. Both kinds of samples can feed the same rollup.
-        if wearables::can_use_staging(&mut samples, true).await? {
-            let staged: Vec<(Uuid, String, i16)> = sqlx::query_as(AssertSqlSafe(format!(
-                "delete from {} where document_id = $1 returning profile_id, metric, source_id",
-                wearables::STAGED_SAMPLES
-            )))
-            .bind(document_id)
-            .fetch_all(&mut *samples)
-            .await?;
-            gone.extend(staged);
+        match wearables::staging_access(&mut samples, true).await? {
+            StagingAccess::Absent => {}
+            StagingAccess::Usable => {
+                let staged: Vec<(Uuid, String, i16)> = sqlx::query_as(AssertSqlSafe(format!(
+                    "delete from {STAGED_SAMPLES} where document_id = $1 returning profile_id, metric, source_id"
+                )))
+                .bind(document_id)
+                .fetch_all(&mut *samples)
+                .await?;
+                gone.extend(staged);
+            }
+            StagingAccess::Denied => {
+                return Err(ownhealth_core::Error::PartitionState(format!(
+                    "cannot retract wearable samples without SELECT and DELETE on {STAGED_SAMPLES}"
+                )));
+            }
         }
         let mut touched: BTreeMap<Uuid, (BTreeSet<String>, BTreeSet<i16>)> = BTreeMap::new();
         for (p, metric, source) in &gone {

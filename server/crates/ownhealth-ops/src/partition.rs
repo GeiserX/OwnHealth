@@ -260,10 +260,11 @@ type Dropped = (uuid::Uuid, String, i16, i64, DateTime<Utc>, DateTime<Utc>);
 /// samples set aside.
 async fn drop_pushed_locked(conn: &mut PgConnection, since: DateTime<Utc>) -> Result<Option<Value>> {
     let mut tx = conn.begin().await?;
-    let staged = exists(&mut tx, AHEAD).await?;
-    if staged && !wearables::can_use_staging(&mut tx, true).await? {
-        return Ok(None);
-    }
+    let staged = match wearables::staging_access(&mut tx, true).await? {
+        wearables::StagingAccess::Absent => false,
+        wearables::StagingAccess::Usable => true,
+        wearables::StagingAccess::Denied => return Ok(None),
+    };
     let mut gone: Vec<Dropped> = Vec::new();
     let mut set_aside = 0;
     for table in [TABLE, AHEAD] {

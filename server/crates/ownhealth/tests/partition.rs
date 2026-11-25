@@ -1170,6 +1170,94 @@ impl Drop for TestLogin {
     }
 }
 
+/// A document with one live sample and one staged sample, both included in its rollups.
+async fn staged_export(d: &Demo) -> anyhow::Result<Uuid> {
+    let doc = document(d, b"a watch export with one sample ahead", "application/x-sqlite3").await?;
+    let now = Utc::now();
+    let mut conn = d.db.pool.acquire().await?;
+    let source = watch(&mut conn, d.alex).await?;
+    store::write(
+        &mut conn,
+        d.alex,
+        Some(doc),
+        vec![hr(now, 60.0, source), hr(cutoff_for(now), 80.0, source)],
+        Conflict::Keep,
+    )
+    .await?;
+    drop(conn);
+    assert_eq!(partition::prepare(&d.db.pool, &opts(now)).await?["held_aside"], 1);
+    Ok(doc)
+}
+
+#[tokio::test]
+async fn retraction_refuses_when_the_app_role_cannot_delete_staged_samples() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let role = TestLogin::new(&d.db, None).await?;
+    role.grant_app_rights(&d.db).await?;
+    let doc = staged_export(&d).await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "revoke delete on wearable_sample_ahead from {}",
+        role.name
+    )))
+    .execute(pool)
+    .await?;
+    let before = rollups(pool).await?;
+    let app = role.connect(&d.db).await?;
+    let mut tx = app.begin().await?;
+    let outcome = retract_document_facts(&mut tx, doc, "wrong file").await;
+    if outcome.is_ok() {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    app.close().await;
+
+    let counts: (i64, i64) = sqlx::query_as(
+        "select (select count(*) from wearable_sample where document_id = $1), +         (select count(*) from wearable_sample_ahead where document_id = $1)",
+    )
+    .bind(doc)
+    .fetch_one(pool)
+    .await?;
+    let after = rollups(pool).await?;
+    assert!(
+        outcome.is_err(),
+        "retraction must fail with live/staged counts {counts:?}: {outcome:?}"
+    );
+    assert_eq!(counts, (1, 1));
+    assert_eq!(after, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rollup_rebuild_refuses_when_the_app_role_cannot_read_staged_samples() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let role = TestLogin::new(&d.db, None).await?;
+    role.grant_app_rights(&d.db).await?;
+    staged_export(&d).await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "revoke select on wearable_sample_ahead from {}",
+        role.name
+    )))
+    .execute(pool)
+    .await?;
+    let before = rollups(pool).await?;
+    let app = role.connect(&d.db).await?;
+    let mut conn = app.acquire().await?;
+    let outcome = wearables::recompute_rollups(&mut conn, d.alex, None, None).await;
+    drop(conn);
+    app.close().await;
+
+    let after = rollups(pool).await?;
+    assert!(
+        outcome.is_err(),
+        "the rebuild must fail when staged samples are unreadable: {outcome:?}"
+    );
+    assert_eq!(after, before);
+    Ok(())
+}
+
 #[tokio::test]
 async fn partition_login_is_removed_after_an_error_or_panic() -> R {
     let db = std::sync::Arc::new(TestDb::empty().await?);

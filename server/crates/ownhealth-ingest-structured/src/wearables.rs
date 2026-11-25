@@ -281,17 +281,29 @@ pub const STAGED_SAMPLE_IS_ACTIVE: &str = "exists (select 1 from profile p where
  and (h.document_id is null or exists (select 1 from document d where d.id = h.document_id \
  and d.profile_id = h.profile_id and d.status = 'active'))";
 
-/// Whether this role may read (and with `write`, delete from) the staged samples, when they exist.
-pub async fn can_use_staging(conn: &mut PgConnection, write: bool) -> Result<bool> {
-    Ok(sqlx::query_scalar(
-        "select coalesce(has_table_privilege(oid, 'SELECT') and \
-         (not $2 or has_table_privilege(oid, 'DELETE')), false) \
+/// Access to samples held aside during partition preparation.
+pub enum StagingAccess {
+    Absent,
+    Usable,
+    Denied,
+}
+
+/// Check for staging and whether the role has SELECT and, if requested, DELETE access.
+pub async fn staging_access(conn: &mut PgConnection, write: bool) -> Result<StagingAccess> {
+    let allowed: Option<bool> = sqlx::query_scalar(
+        "select case when oid is not null then has_table_privilege(oid, 'SELECT') and \
+         (not $2 or has_table_privilege(oid, 'DELETE')) end \
          from (select to_regclass($1) as oid) stage",
     )
     .bind(STAGED_SAMPLES)
     .bind(write)
     .fetch_one(conn)
-    .await?)
+    .await?;
+    Ok(match allowed {
+        None => StagingAccess::Absent,
+        Some(true) => StagingAccess::Usable,
+        Some(false) => StagingAccess::Denied,
+    })
 }
 
 // The instant a sample counts at (`s.at`, with its offset `s.off`): sleep on waking, everything else
@@ -376,16 +388,22 @@ pub async fn recompute_rollups_between(
     sqlx::query("lock table only wearable_sample in access share mode")
         .execute(&mut *tx)
         .await?;
-    let from = if can_use_staging(&mut tx, false).await? {
-        let live = cols("w");
-        let staged = cols("h");
-        let table = format!(
-            "(select {live} from wearable_sample w union all \
-             select {staged} from {STAGED_SAMPLES} h where {STAGED_SAMPLE_IS_ACTIVE})"
-        );
-        samples(&table, sel, plain)
-    } else {
-        samples("wearable_sample", sel, plain)
+    let from = match staging_access(&mut tx, false).await? {
+        StagingAccess::Absent => samples("wearable_sample", sel, plain),
+        StagingAccess::Usable => {
+            let live = cols("w");
+            let staged = cols("h");
+            let table = format!(
+                "(select {live} from wearable_sample w union all \
+                 select {staged} from {STAGED_SAMPLES} h where {STAGED_SAMPLE_IS_ACTIVE})"
+            );
+            samples(&table, sel, plain)
+        }
+        StagingAccess::Denied => {
+            return Err(ownhealth_core::Error::PartitionState(format!(
+                "cannot rebuild wearable rollups without SELECT on {STAGED_SAMPLES}"
+            )));
+        }
     };
     let sleep: Vec<String> = SLEEP_METRICS.iter().map(|s| s.to_string()).collect();
     let daily = daily_metrics();
