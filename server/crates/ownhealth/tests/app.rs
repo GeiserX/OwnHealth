@@ -356,7 +356,16 @@ async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R 
                     "<script>alert(1)</script>",
                 )
             })
-            .head(|| async { StatusCode::NO_CONTENT }),
+            .head(|uri: Uri| async move {
+                if uri.query() == Some("redirect-probe=1") {
+                    return (
+                        StatusCode::SEE_OTHER,
+                        [(header::LOCATION, "/api/v1/oauth/success?provider=withings")],
+                    )
+                        .into_response();
+                }
+                StatusCode::NO_CONTENT.into_response()
+            }),
         )
         .fallback(|| async { StatusCode::IM_A_TEAPOT });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -429,6 +438,11 @@ async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R 
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(body.is_empty());
     assert_eq!(cache.as_deref(), Some("no-store"));
+    let redirect_probe = Request::head("/ow/api/v1/oauth/withings/callback?redirect-probe=1").body(Body::empty())?;
+    let res = app.clone().oneshot(redirect_probe).await?;
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    assert!(!res.headers().contains_key(header::LOCATION));
+
     // HEAD stays refused everywhere else
     for (path, want) in [
         (
