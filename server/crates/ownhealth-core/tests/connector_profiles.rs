@@ -342,3 +342,38 @@ async fn a_vendor_the_file_does_not_name_keeps_the_answers_own_dates() -> R {
     assert_eq!(renamed.dates(id).await?.1, None);
     Ok(())
 }
+
+#[tokio::test]
+async fn the_answers_own_expires_in_beats_the_documented_lifetime() -> R {
+    // Oracle documents 570 seconds; this answer says 300, and the vendor's word on this token wins
+    let oracle = vendor("oracle").await?;
+    oracle.fake.set(|b| {
+        for r in [b.code_reply.as_mut(), b.refresh_reply.as_mut()].into_iter().flatten() {
+            if let Some(m) = r.as_object_mut() {
+                m.insert("expires_in".into(), Value::from(300));
+            }
+        }
+    });
+    let id = oracle.connect(t0()).await?;
+    assert_eq!(oracle.dates(id).await?.0, Some(t0() + Duration::seconds(300)));
+    let t1 = t0() + Duration::hours(1);
+    oracle.refresh(id, t1).await?;
+    assert_eq!(oracle.dates(id).await?.0, Some(t1 + Duration::seconds(300)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sign_in_without_a_refresh_token_gets_no_unused_expiry() -> R {
+    // the VA's 42 days are the life of an unused refresh token: an answer with none has nothing to end
+    let va = vendor("va").await?;
+    assert_eq!(va.profile.refresh.unused_expiry_days, Some(42));
+    va.fake.set(|b| {
+        if let Some(m) = b.code_reply.as_mut().and_then(Value::as_object_mut) {
+            m.shift_remove("refresh_token");
+        }
+    });
+    let id = va.connect(t0()).await?;
+    assert_eq!(va.held(id).await?, None);
+    assert_eq!(va.dates(id).await?.1, None, "no refresh token, no grant date");
+    Ok(())
+}

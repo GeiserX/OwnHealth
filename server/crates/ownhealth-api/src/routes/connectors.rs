@@ -4,13 +4,13 @@
 //!
 //! | Route | What |
 //! |---|---|
-//! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie |
+//! | `POST /connectors/launch/{kind}` | `{profile_id, client_id, issuer?, label?}`: `{authorize_url}` and the binder cookie; 502 `not_a_smart_server` when the address has no SMART configuration (no such name, or no document) |
 //! | `GET /connectors/callback?state=&code=` | where the vendor sends the browser back: 302 to `/connections?connected=<id>` or `/connections?connector_error=<code>`; a connect or reconnect of a polled kind queues its first pull |
 //! | `POST /connectors/{id}/reconnect` | `{authorize_url}` for a new grant on the same source; clears the reconsent flag on return |
 //! | `DELETE /connectors/{id}` | revoke at the vendor when it offers it, then delete the tokens and the cursor: `{id, revocation, revoke_page}`; `revoke_page` is the vendor's own page when the revocation failed or is not offered, and always for Blue Button |
 //! | `GET /connectors/profiles` | the add wizard's vendors (`data/connectors/connectors.yaml`) and this instance's redirect URI: `{redirect_uri, vendors}` |
 //! | `GET /connectors/clients` | the household's registered vendor clients, never a secret: `{clients}` |
-//! | `POST /connectors/clients` | `{vendor, client_id, client_secret?, issuer?}`: save the household's client for that vendor and server, the secret sealed; 201 `{client, replaced: false}`, or 200 `{client, replaced: true}` when it replaced the one saved for the same vendor and server |
+//! | `POST /connectors/clients` | `{vendor, client_id, client_secret?, issuer?}`: save the household's client for that vendor and server, the secret sealed; 201 `{client, replaced: false}`, or 200 `{client, replaced: true}` when it replaced the one saved for the same vendor and server; 403 `client_in_use` when connections of profiles the caller does not manage use that one |
 //!
 //! An owner or guardian of the household who manages the profile. The callback counts only in the
 //! browser and the session that started the launch, for a profile that person still manages. No
@@ -38,7 +38,7 @@ use ownhealth_core::access::{Principal, accessible_profiles};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::connector_oauth::{self as oauth, OAuthError, Revocation};
 use ownhealth_core::connector_profiles::{self as profiles, ClientType};
-use ownhealth_core::net::Egress;
+use ownhealth_core::net::{Egress, NetError};
 use ownhealth_core::secrets::{self, SecretBox, SecretString};
 use ownhealth_core::sources;
 use ownhealth_core::{Error, Runtime};
@@ -220,7 +220,10 @@ fn binder_cookie(rt: &Runtime, state: &str, binder: &str) -> String {
 
 /// Send the browser to the vendor's sign-in: one launch, its binder in this browser.
 async fn start(rt: &Runtime, p: &Principal, l: Started<'_>, egress: &Egress) -> R {
-    let endpoints = oauth::resolve(&l.spec, l.issuer, egress).await.map_err(fail)?;
+    let first = l.source_id.is_none();
+    let endpoints = oauth::resolve(&l.spec, l.issuer, egress)
+        .await
+        .map_err(|e| if first { not_smart(e) } else { fail(e) })?;
     let binder = token_urlsafe(32);
     let mut tx = rt.pool.begin().await?;
     let begun = oauth::begin(
@@ -245,6 +248,25 @@ async fn start(rt: &Runtime, p: &Principal, l: Started<'_>, egress: &Egress) -> 
         json!({"authorize_url": begun.url}),
         &[binder_cookie(rt, &begun.state, &binder)],
     ))
+}
+
+/// A first launch at an address with no SMART configuration (no such name, or no document at
+/// `.well-known/smart-configuration`): most likely a wrong address, typed in the wizard, so it says
+/// that and not "try again later". A reconnect keeps `vendor_unreachable`: its address worked before.
+fn not_smart(e: OAuthError) -> Fail {
+    match e {
+        OAuthError::Vendor { ref code, .. } if code == "discovery_failed" => {}
+        OAuthError::Net(NetError::Resolve(_)) => {}
+        other => return fail(other),
+    }
+    ApiError::new(
+        StatusCode::BAD_GATEWAY,
+        "not_a_smart_server",
+        format!(
+            "This address does not answer as a SMART server ({e}). Check the FHIR base address the facility gives."
+        ),
+    )
+    .into()
 }
 
 struct Started<'a> {
@@ -625,6 +647,55 @@ fn unfit(code: &str, message: &str) -> Fail {
     ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, code, message).into()
 }
 
+/// The longest server address a client is saved for.
+const MAX_ISSUER_BYTES: usize = 2048;
+
+/// A saved client that connections of profiles the caller does not manage use is not the caller's to
+/// replace: the new id and secret would break those connections at their next refresh, and their
+/// next reconnect would consent to the caller's vendor app. The client row stays locked until the
+/// save commits, so no connection joins it in between.
+async fn in_use_elsewhere(
+    conn: &mut PgConnection,
+    p: &Principal,
+    household: Uuid,
+    vendor: &str,
+    issuer: Option<&str>,
+) -> R<()> {
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "select id from connector_client where household_id = $1 and vendor = $2 \
+         and issuer is not distinct from $3 for update",
+    )
+    .bind(household)
+    .bind(vendor)
+    .bind(issuer)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(client) = existing else { return Ok(()) };
+    let mine: Vec<Uuid> = accessible_profiles(&mut *conn, p)
+        .await?
+        .iter()
+        .filter(|perm| perm.profile.household_id == household && can_manage(perm))
+        .map(|perm| perm.profile.id)
+        .collect();
+    let theirs: i64 = sqlx::query_scalar(
+        "select count(*) from source where connector_client_id = $1 \
+         and (profile_id is null or profile_id <> all($2))",
+    )
+    .bind(client)
+    .bind(&mine)
+    .fetch_one(&mut *conn)
+    .await?;
+    if theirs > 0 {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "client_in_use",
+            "Connections of profiles you do not manage use this client. Only someone who manages them can replace it.",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// A pasted value: trimmed, 1 to `max` characters, no control character.
 fn pasted(value: &str, max: usize) -> Option<&str> {
     let v = value.trim();
@@ -684,6 +755,13 @@ async fn save_client(
         .map(|i| i.trim().trim_end_matches('/'))
         .filter(|i| !i.is_empty())
         .map(String::from);
+    // the issuer is part of the client's unique key, and an index row has room for about 2.7 KB
+    if given.as_ref().is_some_and(|i| i.len() > MAX_ISSUER_BYTES) {
+        return Err(unfit(
+            "bad_issuer",
+            "The server address is too long: at most 2048 bytes.",
+        ));
+    }
     let issuer = if vendor.kind == "bluebutton" {
         // production unless the sandbox (or a test's loopback v3 base) is named
         let spec =
@@ -715,6 +793,7 @@ async fn save_client(
             other => other,
         }
     };
+    in_use_elsewhere(&mut tx, &p, household, &vendor.key, issuer.as_deref()).await?;
     let sb = SecretBox::from_settings(&rt.settings)?;
     let secret_id = match secret {
         Some(s) => Some(

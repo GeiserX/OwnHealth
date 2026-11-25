@@ -184,7 +184,7 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
     assert_eq!(
         count(
             &env,
-            "select count(*) from audit_event where action = 'connector.client'"
+            "select count(*) from audit_event where action = 'connector.client' and args_summary = 'vendor=healow replaced=false'"
         )
         .await?,
         1
@@ -251,6 +251,19 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
         (Some(true), Some(id.to_string().as_str()))
     );
     assert_eq!(again.json["client"]["client_id"], "fake-client-id-2");
+    for (summary, want) in [("vendor=healow replaced=false", 1), ("vendor=healow replaced=true", 1)] {
+        assert_eq!(
+            count(
+                &env,
+                &format!(
+                    "select count(*) from audit_event where action = 'connector.client' and args_summary = '{summary}'"
+                )
+            )
+            .await?,
+            want,
+            "{summary}"
+        );
+    }
     assert_eq!(
         count(&env, &format!("select count(*) from secret where id = '{old}'")).await?,
         0
@@ -264,6 +277,16 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
         1
     );
     Ok(())
+}
+
+/// `n` random hex characters.
+fn noise(n: usize) -> String {
+    let mut s = String::new();
+    while s.len() < n {
+        s.push_str(&Uuid::new_v4().simple().to_string());
+    }
+    s.truncate(n);
+    s
 }
 
 /// The code of a refused save.
@@ -280,7 +303,9 @@ async fn each_vendor_takes_the_credential_and_the_server_its_profile_names() -> 
     let env = env().await?;
     let mut c = alex(&env).await?;
     let secret = "s3cret-pasted-by-mistake-not-real";
-    let cases: [(Value, &str); 10] = [
+    // random, so Postgres cannot compress it under the index row limit (a run of one letter fits)
+    let long_issuer = format!("https://fhir.labnorte.example/{}", noise(6000));
+    let cases: Vec<(Value, &str)> = vec![
         // Oracle's apps are public: a pasted secret is refused, never stored
         (
             json!({"vendor": "oracle", "client_id": CLIENT_ID, "client_secret": secret}),
@@ -316,23 +341,57 @@ async fn each_vendor_takes_the_credential_and_the_server_its_profile_names() -> 
             json!({"vendor": "bluebutton", "client_id": CLIENT_ID, "client_secret": secret, "issuer": "https://bluebutton.labnorte.example/v3/fhir"}),
             "422 bad_issuer",
         ),
+        // the server address, the client id and the secret each have a cap
+        (
+            json!({"vendor": "healow", "client_id": CLIENT_ID, "client_secret": secret, "issuer": long_issuer}),
+            "422 bad_issuer",
+        ),
+        (
+            json!({"vendor": "oracle", "client_id": CLIENT_ID, "issuer": long_issuer}),
+            "422 bad_issuer",
+        ),
+        (
+            json!({"vendor": "oracle", "client_id": "c".repeat(201)}),
+            "422 bad_client_id",
+        ),
+        (
+            json!({"vendor": "healow", "client_id": CLIENT_ID, "client_secret": "s".repeat(1001), "issuer": "https://fhir.labnorte.example/r4"}),
+            "422 bad_client_secret",
+        ),
         // a body of the wrong shape answers 422 without repeating the secret it carried
         (
             json!({"vendor": "healow", "client_id": 7, "client_secret": secret}),
             "422 -",
         ),
     ];
+    // every case runs, and the failure names each one that answered otherwise
+    let mut wrong = Vec::new();
     for (body, want) in cases {
         let r = c.post("/api/connectors/clients", &body).await?;
-        assert_eq!(refusal(&r), want, "{body}: {}", r.json);
+        if refusal(&r) != want {
+            let shown: String = body.to_string().chars().take(160).collect();
+            wrong.push(format!("{shown}: want {want}, got {} {}", refusal(&r), r.json));
+        }
         no_secret("a refusal", &r.json.to_string(), &[secret]);
     }
+    assert!(wrong.is_empty(), "{wrong:#?}");
     assert_eq!(
         count(&env, "select count(*) from secret").await?,
         0,
         "no refusal kept a secret"
     );
     assert_eq!(count(&env, "select count(*) from connector_client").await?, 0);
+
+    // the caps themselves are allowed
+    let r = c
+        .post(
+            "/api/connectors/clients",
+            &json!({"vendor": "healow", "client_id": "c".repeat(200), "client_secret": "s".repeat(1000),
+                    "issuer": format!("https://fhir.labnorte.example/{}", noise(2048 - 30))}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
+    sqlx::query("delete from connector_client").execute(env.pool()).await?;
 
     // Oracle with no server: one client id for every Oracle server
     let r = c
@@ -366,5 +425,155 @@ async fn each_vendor_takes_the_credential_and_the_server_its_profile_names() -> 
         assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
         assert_eq!(r.json["client"]["issuer"], want);
     }
+    Ok(())
+}
+
+/// Save the household's healow client at the fake vendor, as `c`.
+async fn save_healow(c: &mut Client, fake: &Fake, client_id: &str, secret: &str) -> anyhow::Result<support::Resp> {
+    c.post(
+        "/api/connectors/clients",
+        &json!({"vendor": "healow", "client_id": client_id, "client_secret": secret, "issuer": fake.issuer()}),
+    )
+    .await
+}
+
+/// Connect `profile`'s record at the fake vendor with the saved client `id`, as `c`.
+async fn connect(env: &Env, c: &mut Client, fake: &Fake, id: &str, profile: &str) -> R {
+    let launch = c
+        .post(
+            "/api/connectors/launch/smart",
+            &json!({"profile_id": env.profile(profile), "client_id": id, "issuer": fake.issuer(), "label": format!("LabNorte {profile}")}),
+        )
+        .await?;
+    assert_eq!(launch.status, StatusCode::OK, "{}", launch.json);
+    let url = launch.json["authorize_url"].as_str().unwrap_or_default().to_string();
+    let code = fake.consent(&url);
+    let state = param(&url, "state").unwrap_or_default();
+    let back = c
+        .get(&format!("/api/connectors/callback?state={state}&code={code}"))
+        .await?;
+    assert!(
+        back.location().starts_with("/connections?connected="),
+        "{}",
+        back.location()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_household_lists_none_of_these_clients_and_saves_its_own() -> R {
+    let env = env().await?;
+    let fake = Fake::recorded("healow").await;
+    let mut c = alex(&env).await?;
+    let first = save_healow(&mut c, &fake, CLIENT_ID, CLIENT_SECRET).await?;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.json);
+
+    let mut conn = env.pool().acquire().await?;
+    let other =
+        ownhealth_core::demo::create_rivera_family(&mut conn, &format!("Rivera {}", ownhealth_core::ids::token_hex(3)))
+            .await?;
+    drop(conn);
+    let mut alex2 = widen(env.as_user(other.user("alex")).await?);
+    let listed = alex2.get("/api/connectors/clients").await?;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.json);
+    assert_eq!(
+        listed.json["clients"],
+        json!([]),
+        "another household's clients stay hidden"
+    );
+
+    // the same vendor and server in the other household is its own client, not a replace
+    let theirs = save_healow(&mut alex2, &fake, "rivera-2-app", "rivera-2-secret-not-real").await?;
+    assert_eq!(theirs.status, StatusCode::CREATED, "{}", theirs.json);
+    assert_eq!(theirs.json["replaced"], false);
+    assert_ne!(theirs.json["client"]["id"], first.json["client"]["id"]);
+    let mine = c.get("/api/connectors/clients").await?;
+    assert_eq!(mine.json["clients"].as_array().map(Vec::len), Some(1), "{}", mine.json);
+    assert_eq!(mine.json["clients"][0]["client_id"], CLIENT_ID);
+    assert_eq!(count(&env, "select count(*) from connector_client").await?, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_client_that_connections_of_profiles_the_caller_does_not_manage_use_is_not_theirs_to_replace() -> R {
+    let env = env().await?;
+    let fake = Fake::recorded("healow").await;
+    let mut alex = alex(&env).await?;
+    // Sam owns Sam, is a guardian of Lucía, and only views Alex
+    let mut sam = widen(env.as_user(env.user("sam")).await?);
+    let saved = save_healow(&mut alex, &fake, CLIENT_ID, CLIENT_SECRET).await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", saved.json);
+    let id = saved.json["client"]["id"].as_str().unwrap_or_default().to_string();
+
+    // while only Lucía's record uses it, Sam manages every connection on it and may replace it
+    connect(&env, &mut alex, &fake, &id, "lucia").await?;
+    let r = save_healow(&mut sam, &fake, CLIENT_ID, CLIENT_SECRET).await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["replaced"], true);
+
+    // once Alex's own record uses it too, Sam's replace is refused and the client stays as it was
+    connect(&env, &mut alex, &fake, &id, "alex").await?;
+    let before: (String, Option<Uuid>) =
+        sqlx::query_as("select client_id, client_secret_id from connector_client where id = $1::uuid")
+            .bind(&id)
+            .fetch_one(env.pool())
+            .await?;
+    let r = save_healow(&mut sam, &fake, "sam-own-healow-app", "sam-own-secret-not-real").await?;
+    assert_eq!(refusal(&r), "403 client_in_use", "{}", r.json);
+    let after: (String, Option<Uuid>) =
+        sqlx::query_as("select client_id, client_secret_id from connector_client where id = $1::uuid")
+            .bind(&id)
+            .fetch_one(env.pool())
+            .await?;
+    assert_eq!(after, before);
+    assert_eq!(
+        count(
+            &env,
+            "select count(*) from secret where purpose = 'connector_client_secret'"
+        )
+        .await?,
+        1,
+        "the refused secret is not kept"
+    );
+    // Alex manages both records, so he still may
+    let r = save_healow(&mut alex, &fake, "fake-client-id-2", "fake-client-secret-2-not-real").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_first_launch_at_an_address_with_no_smart_configuration_says_so() -> R {
+    let env = env().await?;
+    let fake = Fake::recorded("oracle").await;
+    let mut c = alex(&env).await?;
+    let saved = c
+        .post(
+            "/api/connectors/clients",
+            &json!({"vendor": "oracle", "client_id": CLIENT_ID}),
+        )
+        .await?;
+    assert_eq!(saved.status, StatusCode::CREATED, "{}", saved.json);
+    let id = saved.json["client"]["id"].clone();
+    // a path with no SMART document, and a name that does not resolve
+    for issuer in [
+        format!("{}/es", fake.issuer()),
+        "https://fhir.nowhere.invalid/r4".to_string(),
+    ] {
+        let r = c
+            .post(
+                "/api/connectors/launch/smart",
+                &json!({"profile_id": env.profile("alex"), "client_id": id, "issuer": issuer}),
+            )
+            .await?;
+        assert_eq!(refusal(&r), "502 not_a_smart_server", "{issuer}: {}", r.json);
+    }
+    // the right address still launches
+    let r = c
+        .post(
+            "/api/connectors/launch/smart",
+            &json!({"profile_id": env.profile("alex"), "client_id": id, "issuer": fake.issuer()}),
+        )
+        .await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     Ok(())
 }
