@@ -283,7 +283,7 @@ async fn google_csv_keeps_explicit_offsets_and_projects_rmssd() -> R {
         &env,
         result,
         &[
-            ("hr", 74.0, "2024-07-04T06:10:15Z", 120),
+            ("hr", 74.0, "2024-07-04T06:10:00Z", 120),
             ("hr_resting", 54.0, "2024-07-04T00:00:00Z", 0),
             ("hrv_rmssd", 44.1, "2024-07-04T01:15:00Z", 0),
             ("spo2", 96.6, "2024-07-04T02:00:00Z", 0),
@@ -528,4 +528,67 @@ async fn a_zip_with_both_account_folders_reads_both_and_keeps_one_copy() -> R {
         ],
     )
     .await
+}
+
+#[tokio::test]
+async fn heart_rate_is_kept_as_one_reading_per_minute() -> R {
+    let env = Env::new().await?;
+    // Fitbit records heart rate every few seconds. As with a FIT file, each minute keeps the mean
+    // of its readings, rounded to a whole beat.
+    let (state, error, result) = upload(
+        &env,
+        &[(
+            "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json",
+            r#"[{"dateTime":"07/04/24 08:10:05","value":{"bpm":70}},{"dateTime":"07/04/24 08:10:25","value":{"bpm":71}},
+                {"dateTime":"07/04/24 08:10:45","value":{"bpm":73}},{"dateTime":"07/04/24 08:11:00","value":{"bpm":80}}]"#,
+        )],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_readings(
+        &env,
+        result,
+        &[
+            ("hr", 71.0, "2024-07-04T08:10:00Z", 0),
+            ("hr", 80.0, "2024-07-04T08:11:00Z", 0),
+        ],
+    )
+    .await
+}
+
+/// A Google Data heart rate CSV with `per_minute` rows in each of `minutes` minutes.
+fn heart_rate_csv(minutes: i64, per_minute: i64) -> String {
+    use std::fmt::Write as _;
+    let start = chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z")
+        .expect("start")
+        .to_utc();
+    let mut rows = String::from("timestamp,beats per minute\n");
+    for minute in 0..minutes {
+        for second in 0..per_minute {
+            let t = start + chrono::Duration::seconds(minute * 60 + second * 5);
+            writeln!(rows, "{},70", t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).expect("row");
+        }
+    }
+    rows
+}
+
+#[tokio::test]
+async fn the_reading_limit_counts_minutes_so_a_long_history_fits() -> R {
+    let env = Env::new().await?;
+    let member = "Takeout/Fitbit/Physical Activity_GoogleData/Heart Rate/heart_rate_2023-01-01.csv";
+    // 500,010 rows, more than the limit, in 50,001 minutes.
+    let (state, error, result) = upload(&env, &[(member, &heart_rate_csv(50_001, 10))]).await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(result["accepted"], 50_001, "{result}");
+    // 500,001 minutes, one more than the limit, refuse the ZIP before anything is written.
+    let (state, error, _) = upload(&env, &[(member, &heart_rate_csv(500_001, 1))]).await?;
+    assert_eq!(
+        (state.as_str(), error.as_str()),
+        ("dead", "PermanentJobError: fitbit_takeout_limit")
+    );
+    let count: i64 = sqlx::query_scalar("select count(*) from wearable_sample")
+        .fetch_one(&env.db.pool)
+        .await?;
+    assert_eq!(count, 50_001);
+    Ok(())
 }

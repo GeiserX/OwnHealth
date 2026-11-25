@@ -11,6 +11,7 @@
 //! A row whose time cannot be read or placed (no zone, or a clock change) is left out and counted;
 //! the rest of the archive still imports.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
@@ -297,7 +298,7 @@ fn when(raw: &str, member: Member, zone: Option<Tz>) -> Option<(DateTime<Utc>, i
 }
 
 /// Each row with a value: its raw time (None when the row has none) and the value.
-fn json_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64) -> Result<()>) -> Result<()> {
+fn json_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64)) -> Result<()> {
     let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|_| refuse(UNREADABLE))?;
     for row in rows {
         if let Some(v) = metric.json_value(&row) {
@@ -305,13 +306,13 @@ fn json_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f6
                 .as_str()
                 .or_else(|| row["timestamp"].as_str())
                 .or_else(|| row["date"].as_str());
-            push(time, v)?;
+            push(time, v);
         }
     }
     Ok(())
 }
 
-fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64) -> Result<()>) -> Result<()> {
+fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64)) -> Result<()> {
     let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).from_reader(bytes);
     let headers: Vec<_> = reader
         .headers()
@@ -329,10 +330,32 @@ fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64
     for record in reader.records() {
         let record = record.map_err(|_| refuse(UNREADABLE))?;
         if let Some(v) = record.get(value).and_then(|v| v.parse().ok()) {
-            push(record.get(time), v)?;
+            push(record.get(time), v);
         }
     }
     Ok(())
+}
+
+/// Heart rate arrives every few seconds. As from a FIT file, each minute keeps the mean of its
+/// readings, rounded to a whole beat, so about a year of history fits the reading limit.
+fn per_minute(samples: Vec<Sample>) -> Vec<Sample> {
+    let mut minutes: BTreeMap<i64, (Sample, f64, u32)> = BTreeMap::new();
+    for sample in samples {
+        let (minute, v) = (sample.t.timestamp().div_euclid(60), sample.v);
+        let (_, sum, n) = minutes.entry(minute).or_insert((sample, 0.0, 0));
+        *sum += v;
+        *n += 1;
+    }
+    minutes
+        .into_iter()
+        .filter_map(|(minute, (first, sum, n))| {
+            Some(Sample {
+                t: DateTime::from_timestamp(minute * 60, 0)?,
+                v: (sum / f64::from(n)).round(),
+                ..first
+            })
+        })
+        .collect()
 }
 
 fn member_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, index: usize, expanded: &mut u64) -> Result<Vec<u8>> {
@@ -412,35 +435,26 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
         let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
         let mut samples = Vec::new();
         let mut left_out = 0;
-        let before = count;
-        let push = |raw: Option<&str>, v| {
-            let Some((t, offset)) = raw.and_then(|raw| when(raw, member, zone)) else {
-                left_out += 1;
-                return Ok(());
-            };
-            if let Some(sample) = member.metric.sample(t, offset, v, latest) {
-                count += 1;
-                if count > MAX_READINGS {
-                    return Err(refuse(LIMIT));
-                }
-                samples.push(sample);
-            }
-            Ok(())
+        let push = |raw: Option<&str>, v| match raw.and_then(|raw| when(raw, member, zone)) {
+            Some((t, offset)) => samples.extend(member.metric.sample(t, offset, v, latest)),
+            None => left_out += 1,
         };
         let read = if member.json {
             json_rows(bytes, member.metric, push)
         } else {
             csv_rows(bytes, member.metric, push)
         };
-        match read {
-            Ok(()) => {}
-            // A file that is not the JSON or CSV it should be is listed; the others still import.
-            Err(Error::Upload(code)) if code == UNREADABLE => {
-                count = before;
-                report.omit(name, if member.json { "invalid_json" } else { "invalid_csv" });
-                continue;
-            }
-            Err(error) => return Err(error),
+        // A file that is not the JSON or CSV it should be is listed; the others still import.
+        if read.is_err() {
+            report.omit(name, if member.json { "invalid_json" } else { "invalid_csv" });
+            continue;
+        }
+        if matches!(member.metric, Metric::HeartRate) {
+            samples = per_minute(samples);
+        }
+        count += samples.len();
+        if count > MAX_READINGS {
+            return Err(refuse(LIMIT));
         }
         report.rows_left_out += left_out;
         if samples.is_empty() {
