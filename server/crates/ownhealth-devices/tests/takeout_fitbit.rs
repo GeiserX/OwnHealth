@@ -803,3 +803,28 @@ async fn the_committed_fixtures_import_four_readings_each() -> R {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn two_profiles_that_name_different_zones_place_no_local_time() -> R {
+    let env = Env::new().await?;
+    let (madrid, new_york) = (profile("Europe/Madrid"), profile("America/New_York"));
+    let (state, error, result) = upload(
+        &env,
+        &[
+            ("Takeout/Fitbit/Your Profile/Profile.csv", &madrid),
+            ("Takeout/Google Health/Your Profile/Profile.csv", &new_york),
+            (
+                "Takeout/Fitbit/Heart Rate Variability/Heart Rate Variability Details - 2024-07-04.csv",
+                "timestamp,rmssd,coverage,low_frequency,high_frequency\n2024-07-04T01:15:00,43.5,0.9,1,1\n",
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json",
+                r#"[{"dateTime":"07/04/24 08:10:00","value":{"bpm":72}}]"#,
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(result["fitbit_takeout"]["rows_left_out"], 1, "{result}");
+    assert_readings(&env, result, &[("hr", 72.0, "2024-07-04T08:10:00Z", 0)]).await
+}
