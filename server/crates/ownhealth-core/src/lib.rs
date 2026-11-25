@@ -18,6 +18,7 @@ pub mod documents;
 pub mod error;
 pub mod family;
 pub mod fhir;
+pub mod gedcom;
 pub mod ids;
 pub mod ingest;
 pub mod jobs;
@@ -44,6 +45,7 @@ pub mod sources;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod text;
+pub mod zip_directory;
 
 pub use error::{Error, Result};
 pub use runtime::Runtime;

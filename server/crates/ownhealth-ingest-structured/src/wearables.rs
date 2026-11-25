@@ -27,7 +27,7 @@ pub use ownhealth_core::providers::Reader;
 use ownhealth_core::providers::require_ingest;
 use ownhealth_core::pyjson::{f32_json, py_isoformat_utc, pydantic_datetime_utc};
 use serde_json::{Value, json};
-use sqlx::{AssertSqlSafe, PgConnection};
+use sqlx::{AssertSqlSafe, Connection, PgConnection};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +271,41 @@ pub async fn set_priority(conn: &mut PgConnection, profile_id: Uuid, metric: &st
 
 // ------------------------------------------------------------------- rollups ----
 
+/// The partition job's temporary store for samples past the prepared cutoff.
+pub const STAGED_SAMPLES: &str = "wearable_sample_ahead";
+
+/// Staged rows may outlive a document move, retraction, or deletion on an older preparation.
+/// The partition job and rollup rebuild use the same rule for which rows to keep.
+pub const STAGED_SAMPLE_IS_ACTIVE: &str = "exists (select 1 from profile p where p.id = h.profile_id) \
+ and exists (select 1 from wearable_source ws where ws.id = h.source_id) \
+ and (h.document_id is null or exists (select 1 from document d where d.id = h.document_id \
+ and d.profile_id = h.profile_id and d.status = 'active'))";
+
+/// Access to samples held aside during partition preparation.
+pub enum StagingAccess {
+    Absent,
+    Usable,
+    Denied,
+}
+
+/// Check for staging and whether the role has SELECT and, if requested, DELETE access.
+pub async fn staging_access(conn: &mut PgConnection, write: bool) -> Result<StagingAccess> {
+    let allowed: Option<bool> = sqlx::query_scalar(
+        "select case when oid is not null then has_table_privilege(oid, 'SELECT') and \
+         (not $2 or has_table_privilege(oid, 'DELETE')) end \
+         from (select to_regclass($1) as oid) stage",
+    )
+    .bind(STAGED_SAMPLES)
+    .bind(write)
+    .fetch_one(conn)
+    .await?;
+    Ok(match allowed {
+        None => StagingAccess::Absent,
+        Some(true) => StagingAccess::Usable,
+        Some(false) => StagingAccess::Denied,
+    })
+}
+
 // The instant a sample counts at (`s.at`, with its offset `s.off`): sleep on waking, everything else
 // at its start. A Watch writes a night as many short stages, so a sleep stage counts at the end of its
 // session: stages less than SLEEP_GAP apart are one session (one night), dated by the local date of
@@ -286,10 +321,10 @@ fn cols(a: &str) -> String {
 
 /// wearable_sample rows matching `sel` (on alias w), with `at` and `off` added. `plain` narrows the
 /// metrics that are not sleep only (sleep sessions are always read whole).
-fn samples(sel: &str, plain: &str) -> String {
+fn samples(table: &str, sel: &str, plain: &str) -> String {
     let part = |a: &str| format!("partition by {a}.profile_id, {a}.metric, {a}.source_id");
     format!(
-        "(select {w}, w.t as at, w.tz_offset_min as off from wearable_sample w where {sel} \
+        "(select {w}, w.t as at, w.tz_offset_min as off from {table} w where {sel} \
          and not w.metric = any(cast($4 as text[])) and {plain} \
          union all \
          select {z}, max(coalesce(z.t_end, z.t)) over ({pz}, z.sess), \
@@ -297,7 +332,7 @@ fn samples(sel: &str, plain: &str) -> String {
          from (select y.*, sum(y.brk) over ({py} order by y.t rows unbounded preceding) \
          as sess from (select {w}, case when w.t <= max(coalesce(w.t_end, w.t)) over \
          ({pw} order by w.t rows between unbounded preceding and 1 preceding) \
-         + interval '{SLEEP_GAP}' then 0 else 1 end as brk from wearable_sample w where {sel} \
+         + interval '{SLEEP_GAP}' then 0 else 1 end as brk from {table} w where {sel} \
          and w.metric = any(cast($4 as text[]))) y) z) s",
         w = cols("w"),
         z = cols("z"),
@@ -347,7 +382,29 @@ pub async fn recompute_rollups_between(
                and (cast($3 as smallint[]) is null or w.source_id = any(cast($3 as smallint[])))";
     let plain = "(cast($6 as timestamptz) is null or (w.t >= cast($6 as timestamptz) - interval '2 days' \
                  and w.t < cast($7 as timestamptz) + interval '2 days'))";
-    let from = samples(sel, plain);
+    // Hold the parent's lock across the catalog check and the rebuild. The switch can only
+    // replace the live table or remove staging after this transaction releases the lock.
+    let mut tx = conn.begin().await?;
+    sqlx::query("lock table only wearable_sample in access share mode")
+        .execute(&mut *tx)
+        .await?;
+    let from = match staging_access(&mut tx, false).await? {
+        StagingAccess::Absent => samples("wearable_sample", sel, plain),
+        StagingAccess::Usable => {
+            let live = cols("w");
+            let staged = cols("h");
+            let table = format!(
+                "(select {live} from wearable_sample w union all \
+                 select {staged} from {STAGED_SAMPLES} h where {STAGED_SAMPLE_IS_ACTIVE})"
+            );
+            samples(&table, sel, plain)
+        }
+        StagingAccess::Denied => {
+            return Err(ownhealth_core::Error::PartitionState(format!(
+                "cannot rebuild wearable rollups without SELECT on {STAGED_SAMPLES}"
+            )));
+        }
+    };
     let sleep: Vec<String> = SLEEP_METRICS.iter().map(|s| s.to_string()).collect();
     let daily = daily_metrics();
     sqlx::query(
@@ -363,7 +420,7 @@ pub async fn recompute_rollups_between(
     .bind(&sleep)
     .bind(lo)
     .bind(hi)
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
     let insert = |bucket: &str, t: &str, coverage: String| {
         format!(
@@ -390,10 +447,11 @@ pub async fn recompute_rollups_between(
             .bind(&daily)
             .bind(lo)
             .bind(hi)
-            .execute(&mut *conn)
+            .execute(&mut *tx)
             .await?;
         written += done.rows_affected() as i64;
     }
+    tx.commit().await?;
     Ok(written)
 }
 

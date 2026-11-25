@@ -17,6 +17,7 @@ import type {
 	PasskeyOut,
 	RecordOut,
 	Role,
+	SessionReportOut,
 	Scope,
 	TokenOut,
 	TokenUsage,
@@ -72,6 +73,9 @@ export const getTokenUsage = (id: Uuid) => get<TokenUsage>(`/tokens/${id}/usage`
 export const listAudit = (q: { profile?: string; limit?: number; before?: number; via?: string } = {}) => get<{ items: AuditOut[] }>('/audit', q);
 export const getAuditChain = () => get<AuditChainOut>('/audit/chain');
 export const listAuditWho = (profile: string) => get<AuditWhoOut>('/audit/who', { profile });
+
+export const getSessionReport = () => get<SessionReportOut>('/mcp/session-report');
+export const setSessionReportConsent = (enabled: boolean) => put<{ enabled: boolean }>('/mcp/session-report/consent', { enabled });
 
 export const getHousehold = () => get<Household>('/household');
 // People (backend api/family.py): a profile without a login, an invite for a new login, deleting a profile.

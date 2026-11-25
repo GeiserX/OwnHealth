@@ -19,6 +19,7 @@ pub mod family;
 pub mod family_history;
 pub mod gaps;
 pub mod genome;
+pub mod ice;
 pub mod ics;
 pub mod imaging;
 pub mod imaging_proxy;
@@ -32,6 +33,7 @@ pub mod oauth;
 pub mod observations;
 pub mod records;
 pub mod review;
+pub mod session_report;
 pub mod shc;
 pub mod shl;
 pub mod status;
@@ -61,6 +63,7 @@ pub fn all() -> Router<Runtime> {
         .merge(genome::router())
         .merge(genome::couple::router())
         .merge(genome::events::router())
+        .merge(ice::router())
         .merge(ics::router())
         .merge(imaging::router())
         .merge(imaging_proxy::router())
@@ -74,6 +77,7 @@ pub fn all() -> Router<Runtime> {
         .merge(observations::router())
         .merge(records::router())
         .merge(review::router())
+        .merge(session_report::router())
         .merge(shc::router())
         .merge(shl::router())
         .merge(status::router())

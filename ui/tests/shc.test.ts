@@ -3,7 +3,26 @@
 // or verified.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SHC_DETAILS, SHC_REASONS, detailKey, identityWarning, refusalKey, refusalVars, shcCards } from '../src/lib/logic/shc.ts';
+import {
+	SHC_DETAILS,
+	SHC_REASONS,
+	SHL_NOT_IMPORTED,
+	SHL_REASONS,
+	declinedKey,
+	detailKey,
+	identityWarning,
+	isLink,
+	linkRefusalKey,
+	linkRefusalVars,
+	linkWarning,
+	notImportedKey,
+	passcodeRetry,
+	receivedBefore,
+	countsFromFirstImport,
+	refusalKey,
+	refusalVars,
+	shcCards
+} from '../src/lib/logic/shc.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
 
 const tables = dict as unknown as Record<string, Record<string, string>>;
@@ -84,4 +103,94 @@ test('the receiver says who signed a card, never that the signer is trusted or v
 	}
 	assert.equal(tables.en.shc_signed_by, 'Signed by');
 	assert.equal(tables.es.shc_signed_by, 'Firmada por');
+});
+
+// SMART Health Link receive (slice 23)
+
+test('every link refusal and every not-imported reason has an es and an en sentence', () => {
+	for (const lang of ['en', 'es']) {
+		for (const r of SHL_REASONS) assert.ok(tables[lang][linkRefusalKey(r, '1')], `${lang} ${r}`);
+		for (const r of SHL_NOT_IMPORTED) assert.ok(tables[lang][notImportedKey(r)], `${lang} ${r}`);
+		assert.ok(tables[lang][linkRefusalKey('passcode', null)], lang);
+		assert.ok(tables[lang].shlr_r_other, lang);
+	}
+	assert.equal(linkRefusalKey('something_new', null), 'shlr_r_other');
+	assert.equal(notImportedKey('something_new'), 'shlr_ni_unknown_type');
+});
+
+test('a wrong passcode says how many attempts are left, and a fetch detail never shows server text', () => {
+	const en = words('en');
+	assert.equal(
+		fill(tables.en[linkRefusalKey('passcode', '3')], linkRefusalVars('passcode', '3', en)),
+		'Not imported. The passcode is not right. The link allows 3 more attempts.'
+	);
+	assert.equal(fill(tables.es[linkRefusalKey('passcode', '3')], linkRefusalVars('passcode', '3', words('es'))), 'No importado. El código no es correcto. El enlace admite 3 intentos más.');
+	assert.equal(linkRefusalKey('passcode', null), 'shlr_r_passcode_nocount');
+	assert.match(linkRefusalVars('fetch', 'http_502', en).detail, /502/);
+	assert.equal(linkRefusalVars('fetch', 'dns', en).detail, tables.en.shlr_d_dns);
+	assert.equal(linkRefusalVars('fetch', 'shl.example does not resolve', en).detail, tables.en.shc_d_other);
+});
+
+test('a link is told from a card, alone or after a viewer URL', () => {
+	assert.ok(isLink('shlink:/eyJ1cmwiOiJodHRwczovL3NobC5leGFtcGxlIn0'));
+	assert.ok(isLink('https://viewer.example.org/#shlink:/eyJ1cmwiOiJ4In0'));
+	assert.ok(!isLink('shc:/5676290952432060346029243740446031'));
+	// a card envelope (JSON) stays a card even when one of its strings holds a link
+	assert.ok(!isLink('{"verifiableCredential": ["a.b.c"], "note": "shlink:/eyJ1cmwiOiJ4In0"}'));
+	assert.ok(!isLink('\n  {"verifiableCredential": [], "note": "shlink:/x"}'));
+});
+
+test('the attempts left read right for one and for none, and none closes the question', () => {
+	const sentence = (lang: string, left: string) => fill(tables[lang][linkRefusalKey('passcode', left)], linkRefusalVars('passcode', left, words(lang)));
+	assert.equal(sentence('en', '1'), 'Not imported. The passcode is not right. The link allows 1 more attempt.');
+	assert.equal(sentence('es', '1'), 'No importado. El código no es correcto. El enlace admite 1 intento más.');
+	assert.equal(sentence('en', '0'), 'Not imported. The passcode is not right, and the link allows no more attempts, so it is closed now. Ask the sender for a new link.');
+	assert.equal(sentence('es', '0'), 'No importado. El código no es correcto y el enlace ya no admite más intentos, así que ahora está cerrado. Pide un enlace nuevo a quien lo envió.');
+	assert.equal(sentence('en', '2'), 'Not imported. The passcode is not right. The link allows 2 more attempts.');
+	// the question and its passcode field stay for another try while the link is open
+	assert.ok(passcodeRetry('passcode', '2'));
+	assert.ok(passcodeRetry('passcode', null));
+	assert.ok(!passcodeRetry('passcode', '0'));
+	assert.ok(!passcodeRetry('inactive', null));
+});
+
+test('a link warns only about files it imported, and a file for someone else says so', () => {
+	const fhir = [{ content_type: 'application/fhir+json' }];
+	assert.equal(linkWarning('missing', [], [], 'Alex Rivera'), null, 'nothing was imported');
+	assert.equal(linkWarning('matched', [], fhir, 'Alex Rivera'), null);
+	const other = linkWarning('mismatch', [], fhir, 'Alex Rivera');
+	assert.equal(other && fill(tables.en[other.key], other.vars), 'A file of this link names someone other than Alex Rivera. Its rows wait in review. If the link is for another person, open it from their profile.');
+	assert.equal(other && fill(tables.es[other.key], other.vars), 'Un archivo de este enlace es de otra persona, no de Alex Rivera. Sus filas esperan en revisión. Si el enlace es para otra persona, ábrelo desde su perfil.');
+	const unsure = linkWarning('hinted', [], fhir, 'Alex Rivera');
+	assert.equal(unsure?.key, 'shlr_w_unsure');
+	// a link of cards alone names the card, as a pasted card does
+	const carmen = { name: 'Carmen Ortega', birth_date: '1955-01-30' };
+	assert.equal(linkWarning('mismatch', [carmen], [{ content_type: 'application/smart-health-card' }], 'Alex Rivera')?.key, 'shc_w_other');
+	// cards beside a FHIR file: one result for all the files, so no card is named
+	assert.equal(linkWarning('mismatch', [carmen], [...fhir, { content_type: 'application/smart-health-card' }], 'Alex Rivera')?.key, 'shlr_w_other');
+});
+
+test('declining an issuer after the link was received says the link files stay stored', () => {
+	assert.equal(declinedKey(0), 'shc_declined');
+	const key = declinedKey(1);
+	assert.equal(fill(tables.en[key], { host: 'issuer.labnorte.example' }), "Not imported. You declined issuer.labnorte.example, so nothing was fetched from it and nothing was imported. The link's files were already received: they stay stored with this profile, encrypted.");
+	assert.equal(fill(tables.es[key], { host: 'issuer.labnorte.example' }), 'No se ha importado. Rechazaste issuer.labnorte.example, así que no se descargó nada de allí y no se importó nada. Los archivos del enlace ya se habían recibido: quedan guardados con este perfil, cifrados.');
+});
+
+test('a link whose files were all received before says nothing new was added', () => {
+	assert.ok(receivedBefore([{ created: false }, { created: false }]));
+	assert.ok(!receivedBefore([{ created: false }, { created: true }]));
+	assert.ok(!receivedBefore([]));
+	assert.ok(!receivedBefore(undefined));
+	assert.equal(tables.en.shlr_again, 'These files were received before, so nothing new was added.');
+	assert.equal(tables.es.shlr_again, 'Estos archivos ya se habían recibido, así que no se añadió nada nuevo.');
+	// a card file received again is checked and imported again: its counts are this run's
+	const fhir = { created: false, content_type: 'application/fhir+json' };
+	const card = { created: false, content_type: 'application/smart-health-card' };
+	assert.ok(countsFromFirstImport([fhir, fhir]));
+	assert.ok(!countsFromFirstImport([fhir, card]));
+	assert.ok(!countsFromFirstImport([card]));
+	assert.ok(!countsFromFirstImport([{ ...fhir, created: true }]));
+	assert.ok(!countsFromFirstImport(undefined));
+	assert.ok(tables.en.shlr_again_first && tables.es.shlr_again_first);
 });

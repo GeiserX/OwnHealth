@@ -174,11 +174,18 @@ pub async fn insert(
              or wearable_sample.v is distinct from excluded.v"
         }
     };
+    // `inserted`: the row was not there before this statement (its snapshot does not see the rows the
+    // statement itself writes). Not `xmax = 0`: a partitioned wearable_sample (ownhealth-ops
+    // partition.rs) cannot return a system column. One race differs from `xmax = 0`: a row another
+    // transaction committed after this statement's snapshot, which ON CONFLICT DO UPDATE then updates,
+    // counts as new instead of refreshed. Only the Written counts move; the rows are the same.
     let sql = format!(
         "insert into wearable_sample (profile_id, metric, t, t_end, v, tz_offset_min, source_id, document_id) \
          select $1, x.m, x.t, x.te, x.v, x.tz, x.s, $2 from unnest(cast($3 as text[]), cast($4 as timestamptz[]), \
          cast($5 as timestamptz[]), cast($6 as real[]), cast($7 as smallint[]), cast($8 as smallint[])) \
-         as x(m, t, te, v, tz, s) {on_conflict} returning (xmax = 0) as inserted, metric, source_id, t"
+         as x(m, t, te, v, tz, s) {on_conflict} returning not exists (select 1 from wearable_sample o \
+         where o.profile_id = wearable_sample.profile_id and o.metric = wearable_sample.metric \
+         and o.source_id = wearable_sample.source_id and o.t = wearable_sample.t) as inserted, metric, source_id, t"
     );
     for chunk in rows.chunks(CHUNK) {
         let metrics: Vec<&str> = chunk.iter().map(|s| s.metric).collect();

@@ -222,7 +222,9 @@ impl<W: Write + Seek> Writer<W> {
     }
 }
 
-/// (tables with a FHIR column, other tables) among those with a profile_id column.
+/// (tables with a FHIR column, other tables) among those with a profile_id column. A partition
+/// (`wearable_sample` past OWNHEALTH_PARTITION_ROWS, ownhealth-ops partition.rs) is read through its
+/// parent, never as a file of its own.
 async fn tables(conn: &mut PgConnection) -> Result<(Vec<String>, Vec<String>)> {
     let rows: Vec<(String, bool)> = sqlx::query_as(
         "select c.table_name::text, bool_or(f.column_name is not null) as has_fhir from information_schema.columns c \
@@ -230,6 +232,8 @@ async fn tables(conn: &mut PgConnection) -> Result<(Vec<String>, Vec<String>)> {
          left join information_schema.columns f on f.table_schema = c.table_schema \
           and f.table_name = c.table_name and f.column_name = 'fhir' \
          where c.table_schema = current_schema() and c.column_name = 'profile_id' and t.table_type = 'BASE TABLE' \
+         and not exists (select 1 from pg_catalog.pg_class k where k.relispartition \
+          and k.oid = to_regclass(format('%I.%I', c.table_schema, c.table_name))) \
          group by c.table_name order by c.table_name",
     )
     .fetch_all(&mut *conn)

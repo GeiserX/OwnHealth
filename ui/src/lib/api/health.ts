@@ -3,7 +3,7 @@
 import { del, get, p, post, request, requestBlob } from './core';
 import type { DueAnswer, DueDecisionIn, DueDoc } from '../logic/due';
 import type { Lang } from '../i18n/langs';
-import type { Calculators, Dashboard, Gaps, NextDraw, ObservationOut, Status, Timeline, Trend, TrendPoint } from './types';
+import type { Calculators, Dashboard, Gaps, ImagingImport, NextDraw, ObservationOut, Status, Timeline, Trend, TrendPoint } from './types';
 
 export type Units = 'si' | 'conventional' | 'as_reported';
 
@@ -22,6 +22,18 @@ export const getTrend = (profile: string, code: string, window = 'P10Y', units: 
 
 export const getTimeline = (profile: string, q: { types?: string; from?: string; to?: string; as_of?: string; lang?: string } = {}) =>
 	get<Timeline>(`${p(profile)}/timeline`, q);
+
+// v1.0 imaging (slices 40 to 42): a hospital CD into Orthanc, and one study into the viewer.
+/** One zip, or the files of a CD folder, each named by its path inside the folder. */
+export function importImaging(profile: string, files: File[]): Promise<ImagingImport> {
+	const form = new FormData();
+	form.set('profile', profile); // before the files: the server checks the profile first
+	for (const f of files) form.append('files', f, f.webkitRelativePath || f.name);
+	return request('POST', '/imaging/import', { body: form });
+}
+/** A one-hour viewer link for one study, for a person in the browser. */
+export const openStudy = (profile: string, uid: string) =>
+	post<{ viewer_url: string; expires_in: number }>(`${p(profile)}/imaging/studies/${encodeURIComponent(uid)}/open`);
 
 /** A trend point may carry the status word lane E computed for it (requested in .lanes/H-ui-1-requests.md). */
 export type TrendPointStatus = TrendPoint & { status?: Status };

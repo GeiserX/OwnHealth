@@ -4059,6 +4059,7 @@ dependencies = [
  "futures",
  "http",
  "icalendar",
+ "image",
  "ipnet",
  "ownhealth-auth",
  "ownhealth-core",
@@ -4072,9 +4073,11 @@ dependencies = [
  "ownhealth-normalize",
  "ownhealth-ops",
  "ownhealth-rules",
+ "p256",
  "proc-macro2",
  "regex",
  "reqwest",
+ "rxing",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -4203,6 +4206,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zip 9.4.2",
 ]
 
 [[package]]
@@ -4332,6 +4336,7 @@ dependencies = [
  "p256",
  "qrcode",
  "quick-xml",
+ "roxmltree",
  "rust_decimal",
  "rxing",
  "serde",
@@ -4455,7 +4460,11 @@ dependencies = [
  "image",
  "ownhealth-auth",
  "ownhealth-core",
+ "ownhealth-ingest-pdf",
+ "ownhealth-ingest-structured",
  "ownhealth-rules",
+ "pdfium-render",
+ "qrcode",
  "rand 0.10.3",
  "regex",
  "rust_decimal",
@@ -4466,6 +4475,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
  "zip 9.4.2",
 ]
 
@@ -5442,6 +5452,15 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

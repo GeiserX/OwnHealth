@@ -337,6 +337,7 @@ pub async fn begin_run(conn: &mut PgConnection, source_id: Uuid, trigger: &str, 
 /// 500 characters). Updates the source's health and cursor only if the grant still matches.
 /// A run with problems where something still arrived is `partial` and counts as a success for "last successful sync"; a run where every item it
 /// saw failed is an `error` (nothing arrived, and the cursor stays so the items are retried).
+/// The run row and the source row commit together, so a health read never sees one without the other.
 pub async fn finish_run(
     conn: &mut PgConnection,
     run_id: i64,
@@ -364,6 +365,14 @@ pub async fn finish_run(
     };
     let d = RunOutcome::default();
     let o = outcome.unwrap_or(&d);
+    let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+    // Lock the source before its run, in the order a source delete takes them (the source, then its
+    // runs by cascade) and begin_run writes them, so a delete never waits on this run while it waits on
+    // the source.
+    sqlx::query("select 1 from source where id = (select source_id from source_run where id = $1) for no key update")
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
     let (source_id, grant_id): (Uuid, Option<Uuid>) = sqlx::query_as(
         "update source_run set finished_at = now(), status = $2, items_seen = $3, items_new = $4, \
          items_duplicate = $5, items_quarantined = $6, errors = $7, error = $8, skipped = $9 where id = $1 \
@@ -378,7 +387,7 @@ pub async fn finish_run(
     .bind(serde_json::to_value(&o.problems)?)
     .bind(&error)
     .bind(serde_json::to_value(&o.skipped)?)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut *tx)
     .await?;
     if let Some(e) = &error {
         sqlx::query(
@@ -388,7 +397,7 @@ pub async fn finish_run(
         .bind(source_id)
         .bind(e)
         .bind(grant_id)
-        .execute(conn)
+        .execute(&mut *tx)
         .await?;
     } else {
         sqlx::query(
@@ -398,9 +407,10 @@ pub async fn finish_run(
         .bind(source_id)
         .bind(&o.cursor)
         .bind(grant_id)
-        .execute(conn)
+        .execute(&mut *tx)
         .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -463,6 +473,10 @@ pub struct ManagedHealth {
     pub open_gaps: i32,
     /// The server a connection talks to (`config.endpoints.issuer`; SMART: the FHIR base URL).
     pub server: Option<String>,
+    /// Distinct claims the latest Blue Button pull read; absent when that pull failed or its claim
+    /// search did not answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_count: Option<i32>,
 }
 
 pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Result<Vec<SourceHealth>> {
@@ -478,7 +492,9 @@ pub async fn source_health(conn: &mut PgConnection, household_id: Uuid) -> Resul
          (select count(*)::int4 from review_item g where g.household_id = s.household_id and g.status = 'open' \
            and g.kind = 'source_gap' and g.ref_table = 'source' and g.ref_id = s.id \
            and g.profile_id is not distinct from s.profile_id) as open_gaps, \
-         s.config -> 'endpoints' ->> 'issuer' as server \
+         s.config -> 'endpoints' ->> 'issuer' as server, \
+         case when s.kind = 'bluebutton' and r.status is distinct from 'error' \
+           then (s.cursor->>'claim_count')::int4 end as claim_count \
          from source s left join lateral (select status, errors, error from source_run \
            where source_id = s.id and oauth_grant_id is not distinct from s.oauth_grant_id \
            and finished_at is not null order by started_at desc, id desc limit 1) r on true \

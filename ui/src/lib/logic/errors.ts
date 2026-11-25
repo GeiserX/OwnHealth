@@ -17,12 +17,23 @@ const PATTERNS: [RegExp, string][] = [
 	[/already on the list/i, 'err_sender_dup'],
 	[/already reads this folder/i, 'err_folder_overlap'],
 	[/not a PDF, image/i, 'err_unsupported_file'],
+	[/^garmin_zip_unreadable$/i, 'err_garmin_zip_unreadable'],
+	[/ZIP could not be read/i, 'err_zip_unreadable'],
+	[/ZIP holds too many files to import/i, 'err_zip_too_many'],
+	[/^garmin_zip_limit$/i, 'err_garmin_zip_limit'],
 	[/^not a readable LibreView or Dexcom Clarity export/i, 'err_cgm_unreadable'],
 	[/^the export holds more than \d+ readings/i, 'err_cgm_too_many'],
 	[/^the export is larger than \d+ MB/i, 'err_cgm_too_large'],
 	[/^the export names more than \d+ sensors/i, 'err_cgm_too_many_sensors'],
 	[/^this file is already stored on this profile as another kind of document/i, 'err_cgm_other_type'],
 	[/^this file was read in the time zone .*, which this database does not know/i, 'err_cgm_zone_unknown'],
+	// a C-CDA file the import refused (slice 20): saved as UTF-16, a body with no coded sections, then
+	// broken, too large, a DOCTYPE or too deep
+	[/^not a readable C-CDA document: the file is saved as UTF-16/i, 'err_ccda_utf16'],
+	[/^not a readable C-CDA document: the body is a nonXMLBody/i, 'err_ccda_unstructured'],
+	[/^not a readable C-CDA document: the file carries more than \d+ different security labels/i, 'err_ccda_too_many_labels'],
+	[/^not a readable C-CDA document: the file's records would carry more than \d+ security labels in all/i, 'err_ccda_too_many_label_copies'],
+	[/^not a readable C-CDA document/i, 'err_ccda_unreadable'],
 	[/^not a decimal|^the value is not a number/i, 'err_decimal'],
 	[/^the date is in the future/i, 'err_future_date'],
 	[/^the birth date is in the future/i, 'err_birth_future'],
@@ -37,7 +48,9 @@ const PATTERNS: [RegExp, string][] = [
 	[/^not a readable FIT file: it is cut short/i, 'err_fit_cut'],
 	[/^not a readable FIT file/i, 'err_fit_damaged'],
 	[/^the FIT file holds no activity/i, 'err_fit_empty'],
-	[/^the FIT file is larger than/i, 'err_fit_too_big']
+	[/^the FIT file is larger than/i, 'err_fit_too_big'],
+	// an import that waits for the monthly split of the wearable samples (server partition job, slice 65)
+	[/^some samples are dated on or after the day the wearable samples are being split by month/i, 'err_wearable_split_wait']
 ];
 
 // The browser's WebAuthn refusals (a DOMException name), which it words in its own language.

@@ -575,7 +575,7 @@ Sources: https://github.com/medplum/medplum https://www.medplum.com/docs/self-ho
 
 ### 6.4 Wearable volume
 
-At full resolution an Apple Watch export holds about 5k to 30k samples per person per day (estimate, not measured). A family of four over 10 years is 70M to 400M rows. v0.1 uses one `wearable_sample` table. Once it passes about 50M rows, a migration converts it to monthly range partitions on `t` with a BRIN index; the job loop creates next month's partition ahead of time. MCP tools and charts read `wearable_rollup` by default and fetch raw samples only for a bounded window.
+At full resolution an Apple Watch export holds about 5k to 30k samples per person per day (estimate, not measured). A family of four over 10 years is 70M to 400M rows. v0.1 uses one `wearable_sample` table. Once it holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50M), a job, never a migration, converts it to monthly range partitions on `t` (`ownhealth partition`, ownhealth-ops `partition.rs`). The old table becomes the partition of everything before a cutoff through ATTACH, with no row copied; a DEFAULT partition takes what no month holds; BRIN on `t` and a btree on `document_id` serve the time windows and retractions; each later run creates next month's partition ahead of time. A migration that touches `wearable_sample` must work on both forms: a unique index must include `t`, and `create index concurrently` is not available on the partitioned form. MCP tools and charts read `wearable_rollup` by default and fetch raw samples only for a bounded window.
 
 ## 7. Blob store
 
@@ -847,6 +847,10 @@ Every example in the docs, the mockup and the golden tests draws Alex's values f
 | TSH | last 2025-01-20; recency window 12 months, so stale on 2026-11-07 | `src_a05` |
 | Hepatitis C antibody | never measured (rule `infect.hcv.once_adult`) | |
 | LDL-C (13457-7) series, mg/dL | 2021-11-09 163; 2022-09-15 96; 2023-03-21 88; 2023-10-04 92 (direct, 18262-6); 2024-05-22 84 (direct, 18262-6); 2025-01-20 79; 2025-09-08 101; 2026-03-02 118; 2026-09-14 97 | `src_1a0` ... `src_a12` |
+| Total cholesterol, HDL-C | 170 and 53 mg/dL, 2026-09-14 | |
+| Systolic pressure | 126 mmHg, typed in, 2026-09-14 | |
+| Smoking status | never smoked (SNOMED CT 266919005), self-reported, 2026-09-14 | |
+| SCORE2, PREVENT | computed from the rows above; the pressure counts for 12 months, so from 2027-09-14 they read not assessed | |
 | Atorvastatin 20 mg | started 2022-06-20, paused 2025-12-01, restarted 2026-03-10, active | `src_m02` |
 | Cenobamate 50 mg | since 2026-04-01, active; a moderate CYP2C19 inhibitor in the FDA table | `src_m05` |
 | SLCO1B1 | decreased function, `call_state: "alt"`; CPIC actionable with atorvastatin | `src_g31` |
@@ -855,6 +859,8 @@ Every example in the docs, the mockup and the golden tests draws Alex's values f
 | `as_of` for examples | 2026-11-07 | |
 
 Recency windows in the shipped pack: HbA1c 6 months, lipids 12 months, TSH 12 months.
+
+The demo's one family share: Sam lets her labs feed hints in Lucía's profile. Sam's LDL-C of 204 mg/dL on 2025-06-12 shows Lucía's guardians the hint `lab.ldl_fh` (relative MTH). Sam manages that consent on her Family page.
 
 | Layer | What | Gate |
 |---|---|---|

@@ -7,7 +7,7 @@
 //!
 //! - The file is the profile's International Patient Summary ([`crate::ips::build`]) under the
 //!   categories the link carries, so it says what the printed doctor summary says.
-//! - The manifest id and the key are 32 random bytes each, base64url. Both go into the link and
+//! - The manifest id and the key are 32 random bytes each, base64url. For ordinary share links, both go into the link and
 //!   nowhere else: the server keeps the sha256 of the id ([`sha256`]) and never the key.
 
 use base64::Engine as _;

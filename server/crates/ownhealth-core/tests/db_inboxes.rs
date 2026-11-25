@@ -619,3 +619,111 @@ async fn two_date_only_facts_a_day_apart_are_two_draws() -> R {
     );
     Ok(())
 }
+
+/// The run's status and the source's cursor commit together: when the second write fails, the run
+/// stays open and the cursor keeps its old value, so a health read never pairs one with the other.
+#[tokio::test]
+async fn a_failed_cursor_write_leaves_the_run_open() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let id = sources::create_source(
+        &mut c,
+        &NewSource {
+            poll_seconds: Some(300),
+            ..NewSource::new(f.household_id, "gadgetbridge", "Pulsera de Alex")
+        },
+    )
+    .await?;
+    sqlx::query("update source set cursor = '{\"uid\": 1}' where id = $1")
+        .bind(id)
+        .execute(&mut *c)
+        .await?;
+    let run = begin_run(&mut c, id, "poll", None).await?;
+    // a failure after the run row is written: every later write to the source fails
+    sqlx::raw_sql(
+        "create function fail_source_write() returns trigger language plpgsql as \
+         $$ begin raise exception 'injected failure'; end $$; \
+         create trigger fail_source_write before update on source \
+         for each row execute function fail_source_write();",
+    )
+    .execute(&mut *c)
+    .await?;
+    let done = RunOutcome {
+        cursor: Some(json!({"uid": 2})),
+        ..RunOutcome::default()
+    };
+    // both completions fail on the injected source write, not on an earlier statement
+    for result in [Ok(&done), Err("mailbox unreachable")] {
+        let failed = finish_run(&mut c, run, result)
+            .await
+            .expect_err("the source write fails");
+        assert_eq!(failed.db_message().as_deref(), Some("injected failure"), "{failed}");
+    }
+    sqlx::raw_sql("drop trigger fail_source_write on source")
+        .execute(&mut *c)
+        .await?;
+    let open: bool =
+        sqlx::query_scalar("select finished_at is null and status = 'running' from source_run where id = $1")
+            .bind(run)
+            .fetch_one(&mut *c)
+            .await?;
+    assert!(open, "the run was closed although its source write failed");
+    let source = sources::get_source(&mut c, id).await?.expect("source");
+    assert_eq!(source.cursor, Some(json!({"uid": 1})));
+    assert_eq!(source.consecutive_failures, 0);
+    Ok(())
+}
+
+/// finish_run locks the source before its run, the order a source delete takes them (the source, then
+/// the runs by cascade). A delete that holds the source while finish_run waits for it goes through, and
+/// neither side is stopped as a deadlock.
+#[tokio::test]
+async fn a_source_delete_while_a_run_finishes_is_not_a_deadlock() -> R {
+    let db = TestDb::new().await?;
+    let mut c = db.pool.acquire().await?;
+    let f = family(&mut c).await?;
+    let id = sources::create_source(
+        &mut c,
+        &NewSource::new(f.household_id, "gadgetbridge", "Pulsera de Alex"),
+    )
+    .await?;
+    let run = begin_run(&mut c, id, "poll", None).await?;
+    // the delete has taken the source row and has not reached the runs yet
+    let mut delete = db.pool.begin().await?;
+    sqlx::query("select 1 from source where id = $1 for update")
+        .bind(id)
+        .execute(&mut *delete)
+        .await?;
+    let mut finisher = db.pool.acquire().await?;
+    let pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *finisher)
+        .await?;
+    let finishing = tokio::spawn(async move { finish_run(&mut finisher, run, Ok(&RunOutcome::default())).await });
+    let mut waiting = false;
+    for _ in 0..200 {
+        waiting =
+            sqlx::query_scalar("select coalesce(wait_event_type = 'Lock', false) from pg_stat_activity where pid = $1")
+                .bind(pid)
+                .fetch_one(&mut *c)
+                .await?;
+        if waiting {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(waiting, "finish_run never waited for the source lock");
+    let deleted = sqlx::query("delete from source where id = $1")
+        .bind(id)
+        .execute(&mut *delete)
+        .await;
+    assert!(deleted.is_ok(), "the delete was stopped: {deleted:?}");
+    delete.commit().await?;
+    // the run went with its source, so the finish finds nothing to close
+    let finished = finishing.await?;
+    assert!(
+        matches!(finished, Err(Error::Db(sqlx::Error::RowNotFound))),
+        "{finished:?}"
+    );
+    Ok(())
+}

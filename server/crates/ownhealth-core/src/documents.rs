@@ -5,7 +5,7 @@
 //! handles it.
 
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -18,7 +18,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | zip_directory_limit | ccda | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -28,10 +28,12 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
         "pdf" => "import.pdf",
         "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
+        "garmin_zip" => "import.garmin_zip",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
         "gadgetbridge_db" => "import.gadgetbridge",
         "libreview_csv" | "dexcom_clarity_csv" => "import.cgm_csv",
+        "ccda" => "import.ccda",
         _ => return None,
     })
 }
@@ -43,20 +45,91 @@ pub fn mime(kind: &str) -> Option<&'static str> {
         "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
-        "apple_health_zip" => "application/zip",
+        "apple_health_zip" | "garmin_zip" => "application/zip",
         "genome_facts" => "application/json",
         "vcf" => "application/gzip",
         "tbi" => "application/octet-stream",
         "gadgetbridge_db" => "application/vnd.sqlite3",
         "libreview_csv" | "dexcom_clarity_csv" => "text/csv",
+        "ccda" => "application/hl7-cda+xml",
         _ => return None,
     })
 }
 
-fn zip_has_export_xml(path: &Path) -> Option<bool> {
-    let file = std::fs::File::open(path).ok()?;
-    let archive = zip::ZipArchive::new(file).ok()?;
-    Some(archive.file_names().any(|n| n.is_ok_and(|n| n.ends_with("export.xml"))))
+/// The mime of the document a Garmin export's import stores: its readings as JSON lines, not the zip.
+pub const GARMIN_READINGS_MIME: &str = "application/x-ndjson";
+
+/// The mime of the document an upload kind's import stores: the upload's own, except a Garmin export,
+/// whose document holds the readings it read from the zip.
+pub fn stored_mime(kind: &str) -> Option<&'static str> {
+    if kind == "garmin_zip" {
+        return Some(GARMIN_READINGS_MIME);
+    }
+    mime(kind)
+}
+
+/// Recognized outer members of a Garmin account export. The leading directories vary between
+/// exports and can also change when the person repacks the archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GarminMember {
+    Daily,
+    Sleep,
+    Weight,
+    BloodPressure,
+    Hrv,
+    FitZip,
+}
+
+impl GarminMember {
+    pub fn from_name(name: &str) -> Option<Self> {
+        let base = name.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+        let (stem, ext) = base.rsplit_once('.')?;
+        let named = |tag: &str| {
+            stem == tag
+                || stem.strip_prefix(tag).is_some_and(|rest| rest.starts_with('_'))
+                || stem.strip_suffix(tag).is_some_and(|rest| rest.ends_with('_'))
+        };
+        Some(match ext {
+            "zip" if named("uploadedfiles") => Self::FitZip,
+            "json" if named("udsfile") => Self::Daily,
+            "json" if named("sleepdata") => Self::Sleep,
+            "json" if named("userbiometrics") => Self::Weight,
+            "json" if named("bloodpressurefile") => Self::BloodPressure,
+            "json" if named("healthstatusdata") => Self::Hrv,
+            _ => return None,
+        })
+    }
+}
+
+/// Serialize import, replay, retraction and move for a profile's exports of this kind.
+pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str) -> Result<()> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("ownhealth:exports:{flag}:{profile_id}"))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// A zip whose member list cannot be read (a download cut short) is `broken_zip`, so the refusal can say so.
+fn classify_zip(reader: impl Read + Seek) -> UploadKind {
+    let archive = match crate::zip_directory::open(reader) {
+        Ok(archive) => archive,
+        Err(zip::result::ZipError::UnsupportedArchive(crate::zip_directory::DIRECTORY_LIMIT)) => {
+            return "zip_directory_limit";
+        }
+        Err(_) => return "broken_zip",
+    };
+    let mut kind = "unknown";
+    for name in archive.file_names().flatten() {
+        // Preserve Apple Health's existing marker and precedence.
+        if name.ends_with("export.xml") {
+            return "apple_health_zip";
+        }
+        if GarminMember::from_name(&name).is_some() {
+            kind = "garmin_zip";
+        }
+    }
+    kind
 }
 
 /// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.
@@ -77,6 +150,14 @@ fn gzip_holds_fit(head: &[u8]) -> bool {
 
 /// Classify an upload from its name and first bytes (and, for zips, its member list).
 pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKind {
+    sniff_with_zip(filename, head, || {
+        blob_path
+            .and_then(|path| std::fs::File::open(path).ok())
+            .map_or("unknown", classify_zip)
+    })
+}
+
+fn sniff_with_zip(filename: &str, head: &[u8], zip_kind: impl FnOnce() -> UploadKind) -> UploadKind {
     let name = filename.to_lowercase();
     if head.starts_with(b"%PDF-") {
         return "pdf";
@@ -92,11 +173,7 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
         return "gadgetbridge_db";
     }
     if is_zip(head) {
-        // Truncated or corrupt: refused like any unknown file.
-        return match blob_path.and_then(zip_has_export_xml) {
-            Some(true) => "apple_health_zip",
-            _ => "unknown",
-        };
+        return zip_kind();
     }
     if name.ends_with(".tbi") {
         return "tbi";
@@ -130,11 +207,74 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
             return "fhir_json";
         }
     }
+    // a C-CDA document (slice 20): XML whose root element is a ClinicalDocument, before the CSV rule so
+    // a comment that quotes a CGM header line does not make it a CSV. One saved as UTF-16 goes to the
+    // importer too, which refuses it with what to do.
+    if is_clinical_document(head) || utf16_text(head).is_some_and(|t| is_clinical_document(t.as_bytes())) {
+        return "ccda";
+    }
     // csv (slice 28): a CGM export, by the text of its header row
     if let Some(kind) = sniff_cgm_csv(head) {
         return kind;
     }
     "unknown"
+}
+
+/// The text of `head` when it starts with a UTF-16 byte order mark (either order); a unit cut at the
+/// end is dropped.
+fn utf16_text(head: &[u8]) -> Option<String> {
+    let le = head.starts_with(b"\xff\xfe");
+    if !le && !head.starts_with(b"\xfe\xff") {
+        return None;
+    }
+    let units = head[2..].as_chunks::<2>().0.iter().map(|pair| {
+        if le {
+            u16::from_le_bytes(*pair)
+        } else {
+            u16::from_be_bytes(*pair)
+        }
+    });
+    Some(
+        char::decode_utf16(units)
+            .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+    )
+}
+
+/// Whether `head` is XML whose root element is `ClinicalDocument`, with or without a prefix. A byte
+/// order mark, the XML declaration, processing instructions and comments may come first. A DOCTYPE
+/// is not read past: when a `ClinicalDocument` follows it anywhere in `head`, the file goes to the
+/// importer, which refuses every DOCTYPE with its reason.
+fn is_clinical_document(head: &[u8]) -> bool {
+    fn after(rest: &[u8], from: usize, end: &[u8]) -> Option<usize> {
+        let at = rest.get(from..)?.windows(end.len()).position(|w| w == end)?;
+        Some(from + at + end.len())
+    }
+    let mut rest = head.strip_prefix(b"\xef\xbb\xbf").unwrap_or(head);
+    loop {
+        let start = rest.iter().position(|b| !b" \t\r\n".contains(b)).unwrap_or(rest.len());
+        rest = &rest[start..];
+        let skip = if rest.starts_with(b"<?") {
+            after(rest, 2, b"?>")
+        } else if rest.starts_with(b"<!--") {
+            after(rest, 4, b"-->")
+        } else if rest.starts_with(b"<!DOCTYPE") {
+            // its internal subset may quote `]` and `>`, so it is not parsed here
+            return rest.windows(16).any(|w| w == b"ClinicalDocument");
+        } else {
+            break;
+        };
+        let Some(skip) = skip else { return false };
+        rest = &rest[skip..];
+    }
+    let Some(tag) = rest.strip_prefix(b"<") else {
+        return false;
+    };
+    let Some(end) = tag.iter().position(|b| b" \t\r\n/>".contains(b)) else {
+        return false;
+    };
+    let name = &tag[..end];
+    name.rsplit(|b| *b == b':').next() == Some(b"ClinicalDocument".as_slice())
 }
 
 /// The header cells that name a CGM export, in English, German and Spanish, as `header_key` writes
@@ -501,13 +641,13 @@ pub async fn dispatch_upload_in_zone(
             f.sha256.clone(),
             f.filename.clone(),
         );
-        // off the runtime: a plain file of an older install is hashed once when it opens, and a zip is
-        // decrypted whole into a local copy
+        // Off the runtime: a plain file of an older install is hashed once when it opens.
+        // ZIP classification only needs the central directory, even for a sealed blob.
         let kind = tokio::task::spawn_blocking(move || -> Result<UploadKind> {
             let mut head = Vec::with_capacity(4096);
-            store.open_seek(owner, &sha)?.take(4096).read_to_end(&mut head)?;
-            let copy = is_zip(&head).then(|| store.with_local_copy(owner, &sha)).transpose()?;
-            Ok(sniff(&name, &head, copy.as_ref().map(|c| c.path())))
+            let mut reader = store.open_seek(owner, &sha)?;
+            (&mut reader).take(4096).read_to_end(&mut head)?;
+            Ok(sniff_with_zip(&name, &head, || classify_zip(reader)))
         })
         .await
         .map_err(std::io::Error::other)??;
@@ -524,6 +664,18 @@ pub async fn dispatch_upload_in_zone(
             "unknown" => {
                 return Err(Error::Upload(format!(
                     "{}: not a PDF, image, Apple Health export, FHIR bundle or genome facts file",
+                    f.filename
+                )));
+            }
+            "zip_directory_limit" => {
+                return Err(Error::Upload(format!(
+                    "{}: this ZIP holds too many files to import",
+                    f.filename
+                )));
+            }
+            "broken_zip" => {
+                return Err(Error::Upload(format!(
+                    "{}: this ZIP could not be read; it may be incomplete",
                     f.filename
                 )));
             }
@@ -791,6 +943,25 @@ pub async fn rekey_document(
 mod tests {
     use super::*;
 
+    /// An end record alone whose central directory is one byte over the upload budget.
+    fn end_record_over_the_directory_budget() -> Vec<u8> {
+        let mut end = b"PK\x05\x06".to_vec();
+        for field in [0u16, 0, 1, 1] {
+            end.extend(field.to_le_bytes());
+        }
+        let size = u32::try_from(crate::zip_directory::MAX_DIRECTORY_BYTES + 1).expect("budget fits a ZIP32 size");
+        end.extend(size.to_le_bytes());
+        end.extend(0u32.to_le_bytes());
+        end.extend(0u16.to_le_bytes());
+        end
+    }
+
+    #[test]
+    fn upload_sniff_refuses_a_zip_directory_over_the_budget() {
+        let zip = std::io::Cursor::new(end_record_over_the_directory_budget());
+        assert_eq!(classify_zip(zip), "zip_directory_limit");
+    }
+
     #[test]
     fn upload_sniff_keeps_the_blocking_task_error_typed() {
         let function = include_str!("documents.rs")
@@ -905,6 +1076,85 @@ mod tests {
     }
 
     #[test]
+    fn a_clinical_document_root_is_sniffed_as_ccda() {
+        let cases: [&[u8]; 5] = [
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">",
+            b"\xef\xbb\xbf<?xml version=\"1.0\"?><?xml-stylesheet type=\"text/xsl\" href=\"CDA.xsl\"?>\n<!-- a sample -->\n<ClinicalDocument>",
+            b"  <cda:ClinicalDocument xmlns:cda=\"urn:hl7-org:v3\">",
+            // a DOCTYPE goes to the importer, which refuses it with a reason
+            b"<?xml version=\"1.0\"?><!DOCTYPE lolz [<!ENTITY lol \"lol\">]><ClinicalDocument>",
+            b"<ClinicalDocument\n  xmlns=\"urn:hl7-org:v3\">",
+        ];
+        for head in cases {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "ccda",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+        for head in [
+            b"<?xml version=\"1.0\"?><HealthData locale=\"en_US\">".as_slice(),
+            b"<ClinicalDocumentX>",
+            b"<!-- <ClinicalDocument> -->",
+            b"<?xml version=\"1.0\"?><!-- never closed",
+            b"ClinicalDocument",
+        ] {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "unknown",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+        assert_eq!(job_kind("ccda"), Some("import.ccda"));
+        assert_eq!(mime("ccda"), Some("application/hl7-cda+xml"));
+    }
+
+    /// Round 3 (CR3, CR4, CR5): a DOCTYPE whose internal subset quotes a `]`, a comment that holds a
+    /// CGM header line, and a C-CDA document saved as UTF-16 (either byte order) all reach the C-CDA
+    /// importer, which refuses the first and the last with their own reason.
+    #[test]
+    fn a_quoted_bracket_a_csv_comment_or_utf16_still_sniffs_as_ccda() {
+        let quoted: &[u8] = b"<?xml version=\"1.0\"?><!DOCTYPE ClinicalDocument [<!ENTITY a \"]>\">]>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">";
+        let comment: &[u8] = b"<?xml version=\"1.0\"?>\n<!--\nDevice,Device Timestamp,Record Type\n-->\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">";
+        // the comment's line alone is a LibreView header
+        assert_eq!(
+            sniff("x.csv", b"Device,Device Timestamp,Record Type\n", None),
+            "libreview_csv"
+        );
+        let utf16 = |text: &str, le: bool| -> Vec<u8> {
+            let bom: &[u8] = if le { b"\xff\xfe" } else { b"\xfe\xff" };
+            let units = text
+                .encode_utf16()
+                .flat_map(|u| if le { u.to_le_bytes() } else { u.to_be_bytes() });
+            bom.iter().copied().chain(units).collect()
+        };
+        let cda = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\">";
+        let (le, be) = (utf16(cda, true), utf16(cda, false));
+        for head in [quoted, comment, le.as_slice(), be.as_slice()] {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "ccda",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+        // other UTF-16 text, and other XML with a DOCTYPE, stay unknown
+        let health = utf16("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<HealthData>", true);
+        let doctype: &[u8] =
+            b"<?xml version=\"1.0\"?><!DOCTYPE HealthData [<!ATTLIST HealthData a CDATA \"]\">]><HealthData>";
+        for head in [health.as_slice(), doctype] {
+            assert_eq!(
+                sniff("record.xml", head, None),
+                "unknown",
+                "{}",
+                String::from_utf8_lossy(head)
+            );
+        }
+    }
+
+    #[test]
     fn sniff_reads_the_zip_member_list() -> anyhow::Result<()> {
         use std::io::Write;
         let dir = tempfile::tempdir()?;
@@ -919,7 +1169,7 @@ mod tests {
         assert_eq!(sniff("export.zip", b"PK\x03\x04", Some(&path)), "apple_health_zip");
         let bad = dir.path().join("bad.zip");
         std::fs::write(&bad, b"PK\x03\x04truncated")?;
-        assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "unknown");
+        assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "broken_zip");
         Ok(())
     }
 

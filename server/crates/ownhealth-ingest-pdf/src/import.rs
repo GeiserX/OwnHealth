@@ -1049,7 +1049,7 @@ pub(crate) async fn accept_identity(
 
 /// Structured files run their own import again; everything else (PDF, image) the PDF one. A CGM export
 /// (`cgm`: its flags hold `cgm_csv`) runs the CGM import of the stored document, which reads the file in
-/// the zone it keeps.
+/// the zone it keeps. A Garmin export's document holds its readings, which its import reads again.
 fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
     if cgm {
         return "import.cgm_csv";
@@ -1057,6 +1057,8 @@ fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
     match mime {
         "application/fhir+json" | "application/fhir+ndjson" => "import.fhir_bundle",
         "application/zip" => "import.apple_health",
+        ownhealth_ingest_structured::ccda::MIME => ownhealth_ingest_structured::ccda::JOB,
+        ownhealth_core::documents::GARMIN_READINGS_MIME => "import.garmin_zip",
         _ => "import.pdf",
     }
 }
@@ -1077,8 +1079,8 @@ pub async fn assign_document(
     user_id: Uuid,
     skip_item: Option<Uuid>,
 ) -> Result<Option<i64>> {
-    // a CGM export's lock before its row (a running import of it holds the lock, then writes the row);
-    // a caller that locked the row already took this lock before it, as the assign route does
+    // Take the CGM or Garmin export lock before the document row. A caller that locked the row
+    // already holds the export lock, as the assign route does.
     ownhealth_ingest_structured::retract::lock_export_of(&mut *conn, document_id).await?;
     let doc = lock_document(&mut *conn, document_id)
         .await?

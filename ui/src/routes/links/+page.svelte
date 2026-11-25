@@ -7,7 +7,9 @@
 	// Each link says its state, who opened it, and can be revoked.
 	// The PIN input has no name, so no form submit can ever put it in a URL; it is cleared once used.
 	// What the form offers is what the server will accept: the list answer's `open` categories.
-	import { tick } from 'svelte';
+	import { onMount, tick } from 'svelte';
+	import { afterNavigate } from '$app/navigation';
+	import { page } from '$app/state';
 	import '#lib/components/pages2/pages2.css';
 	import { ApiError } from '#lib/api/core';
 	import type { ShlAccess, ShlCreateIn, ShlCreated, ShlLink, ShlList } from '#lib/api/types';
@@ -21,10 +23,22 @@
 	import { i18n, t } from '#lib/i18n/index.svelte';
 	import { LANGS, type Lang } from '#lib/i18n/langs';
 	import { copyText } from '#lib/logic/inbox';
-	import { currentProfile } from '#lib/state/app.svelte';
+	import { app, currentProfile, setProfile } from '#lib/state/app.svelte';
 	import { createLink, linkAccess, listLinks, revokeLink } from './api';
-	import { DAYS, DEFAULT_DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, revocable, shownCategories, stateOf } from './logic';
+	import { DAYS, DEFAULT_DAYS, PICKS, accessKey, canShare, categoriesFor, expiryKey, mayShare, pinProblem, profileForLinks, revocable, shownCategories, stateOf } from './logic';
 	import { qrOf } from './qr';
+
+	function selectProfile(profileId: string | null) {
+		const current = currentProfile()?.slug ?? null;
+		const next = profileForLinks(profileId, app.me?.profiles ?? [], current);
+		if (next && next !== current) setProfile(next);
+	}
+	// The shell mounts this page after /me arrives. Handle that first URL and later navigations
+	// while the page is mounted, including another click on the same notice.
+	onMount(() => selectProfile(page.url.searchParams.get('profile')));
+	afterNavigate(({ to }) => {
+		if (to) selectProfile(to.url.searchParams.get('profile'));
+	});
 
 	const prof = $derived(currentProfile());
 	const slug = $derived(prof?.slug ?? '');
@@ -149,9 +163,9 @@
 			if (fresh?.id === x.id) fresh = null;
 			load();
 			if (logOf === x.id) openLog(x.id);
-			// the Revoke button is gone: keep the keyboard on the same row
+			// the Revoke button is gone: keep the keyboard on the same row, on its access log when it has one
 			await tick();
-			document.getElementById(`shl-log-${x.id}`)?.focus();
+			(document.getElementById(`shl-log-${x.id}`) ?? document.getElementById(`shl-row-${x.id}`))?.focus();
 		} catch (e) {
 			if (slug === s) rowError = { id: x.id, text: errText(e), raw: errRaw(e) };
 		} finally {
@@ -169,18 +183,19 @@
 		// the feedback is for the link that was copied: another one may be on screen by now
 		if (fresh?.id === f.id) copied = ok;
 	}
-	const title = (x: { label: string | null }) => x.label ?? t('shl_nolabel');
+	const title = (x: ShlLink) => x.ice ? t('ice_title') : x.label ?? t('shl_nolabel');
 	const madeTitle = (x: { label: string | null }) => (x.label ? tf('shl_made', { label: x.label }) : t('shl_made0'));
 	const cat = (c: string) => t('shl_c_' + c.replace('read:', ''));
 	// One line of what a link carries, one of its dates and use.
 	function carries(x: ShlLink): string {
+		if (x.ice) return t(x.online ? 'ice_link_online' : 'ice_link_offline');
 		const parts = shownCategories(x.categories).map((c) => t('shl_s_' + c.replace('read:', '')));
 		if (x.passcode) parts.push(x.attempts_left !== null && revocable(x, now) ? `${t('shl_pin_on')} (${tp('shl_tries', x.attempts_left)})` : t('shl_pin_on'));
 		return parts.join(' · ');
 	}
 	function when(x: ShlLink): string {
 		const parts = [`${t('shl_created')} ${day(x.created_at)}`, `${t(expiryKey(x, now))} ${day(x.expires_at)}`];
-		parts.push(x.opened ? tp('shl_opened', x.opened) : t('shl_opened0'));
+		if (!x.ice || x.online) parts.push(x.opened ? tp('shl_opened', x.opened) : t('shl_opened0'));
 		if (x.last_access_at) parts.push(`${t('shl_last')} ${ago(x.last_access_at)}`);
 		return parts.join(' · ');
 	}
@@ -282,7 +297,7 @@
 				<ul class="sl-list">
 					{#each links.data.items as x (x.id)}
 						{@const st = stateOf(x, now)}
-						<li data-testid="shl-row">
+						<li data-testid="shl-row" id="shl-row-{x.id}" tabindex="-1">
 							<div class="sl-row">
 								<div class="sl-main">
 									<div class="sl-top">
@@ -294,14 +309,14 @@
 									<div class="dim sl-small">{when(x)}</div>
 								</div>
 								<div class="sl-acts">
-									<button class="btn sm" id="shl-log-{x.id}" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>
+									{#if !x.ice || x.online}<button class="btn sm" id="shl-log-{x.id}" aria-expanded={logOf === x.id} aria-label="{t('shl_log')} · {title(x)}" onclick={() => (logOf === x.id ? (logOf = null) : openLog(x.id))}>{t('shl_log')}</button>{/if}
 									{#if revocable(x, now)}
 										<button class="btn sm no" disabled={busy} aria-expanded={confirming === x.id} aria-label="{t('i2_revoke')} · {title(x)}" onclick={() => (confirming = x.id)}>{t('i2_revoke')}</button>
 									{/if}
 								</div>
 							</div>
 							{#if confirming === x.id}
-								<ConfirmRow text={t('shl_revoke_d')} confirmLabel={t('i2_revoke')} {busy} onconfirm={() => revoke(x)} oncancel={() => (confirming = null)} />
+								<ConfirmRow text={t(x.ice ? 'ice_revoke_d' : 'shl_revoke_d')} confirmLabel={t('i2_revoke')} {busy} onconfirm={() => revoke(x)} oncancel={() => (confirming = null)} />
 							{/if}
 							{#if rowError?.id === x.id}<div class="p2err" role="alert" title={rowError.raw}>{rowError.text}</div>{/if}
 							{#if logOf === x.id}

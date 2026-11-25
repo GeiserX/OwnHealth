@@ -211,9 +211,9 @@ For a family member who is hospitalised, unconscious or dead.
 
 1. The owner pre-designates emergency contacts (`break_glass_contact`) and what they would see (default: summary, records, labs; never `read:sensitive`, genome raw or a write). Designating a contact needs an active calendar feed.
 2. A contact requests access with a reason (`break_glass_request`, status `requested`).
-3. The in-app notice appears as soon as the contact asks. The owner's calendar client sees the request and when access would open on the next feed fetch. The request stays pending until the delay has passed and the feed has served the request. The owner can cancel while it is pending. The delay defaults to 48 hours and can be set from 12 to 168 hours. Access stays active for 14 days unless revoked.
+3. The in-app notice appears as soon as the contact asks. The owner's calendar client sees the request and its cancel link on the next feed fetch. The link opens the app's cancel screen, behind the owner's login. Cancelling only narrows access, so it needs no step-up. The request stays pending until the delay has passed and the feed has served the request. The owner can cancel while it is pending. The delay defaults to 48 hours and can be set from 12 to 168 hours. Access stays active for 14 days unless revoked.
 4. While active, the request adds read scopes to an existing browser permission or supplies a temporary viewer permission. Neither path creates or changes a grant row. Every sensitive fact requires its category scope and `read:sensitive` from the same permission source. Emergency requests cannot supply `read:sensitive`, so both scopes must come from the grant. Tokens, OAuth consents, calendar feeds, exports, and the imaging viewer use ordinary access. Share links are unavailable to the contact while the request is active.
-5. Each request step and each successful read that uses emergency access adds an audit row and an owner notice. The server records both before returning emergency data. Unread request and activation notices remain visible even when newer use notices fill the recent list.
+5. Each request step and each successful read that uses emergency access adds an audit row and an owner notice. The server records both before returning emergency data. Unread request and activation notices remain visible even when newer use notices fill the recent list. The app shows the owner's unread notices at the next login, grouped per request, with a badge until they are read.
 
 ```mermaid
 stateDiagram-v2
@@ -301,7 +301,7 @@ What we do on our side:
 **SMART Health Links, UI only, v1.0.**
 
 - The user selects what to share (IPS summary, chosen labs, chosen documents) in the UI, with step-up auth.
-- The app builds the FHIR bundle, encrypts it locally (JWE `dir` + `A256GCM`, 32-byte random key) and stores only ciphertext, which the instance serves itself. The key lives in the URL `#fragment`, which never reaches the server.
+- The app builds the FHIR bundle and encrypts it with a random 32-byte key (JWE `dir` and `A256GCM`). For ordinary share links, the instance stores the ciphertext. The key exists only in the link payload.
 - The project runs no share host and no relay. The instance serves its own links. The reverse proxy's link-only site block filters the paths, and the tunnel (Tailscale Funnel, Cloudflare Tunnel) points at that site block's port, never at the app port. A static or S3 host is not used in 1.0: it cannot count passcode attempts or keep the access log.
 - Default expiry 7 days; optional passcode (flag `P`) with an attempt limit; revocation deletes the object. The instance counts the passcode attempts.
 - Whether we also publish a reference share-host component for users to run is open (section 15).
@@ -309,10 +309,10 @@ What we do on our side:
 
 **ICE card, v1.0.**
 
-- A printable and lock-screen card with fields the owner chooses: blood group, allergies, critical conditions, current medications, emergency contacts, generation date.
-- Its QR holds the same minimal plain text, readable by any phone camera offline.
-- An optional second QR is an SHL with flag `U` pointing to an IPS bundle, long-lived with rotation.
-- The PWA caches only the ICE card offline, never the record.
+- The owner creates a wallet PDF and a lock-screen PNG after step-up. The offline QR holds current allergies, conditions, medicines, and the contacts entered for that card. It includes a sensitive record only when the owner selects it individually. The owner can leave any record off the card, so a long record still fits one wallet-size QR.
+- Anyone with a copy can read the offline QR. The printed expiry tells a reader when to stop relying on the card. Revocation and expiry cannot erase copies already saved or printed.
+- The optional second QR carries a SMART Health Link with flags `LU`. Opening it builds the current IPS under the original categories, which exclude sensitive records. Every file served adds an entry to the access log, the audit log, and the owners' notification outbox.
+- The live ICE key is the sole exception to the rule that a key exists only in the link. The server seals it under the profile DEK, bound to the profile and card IDs. Each file uses the same key with a fresh JWE nonce. Revocation and expiry end access and remove the sealed key. Reissue retires the old QR and creates a new URL and key.
 
 https://build.fhir.org/ig/HL7/smart-health-cards-and-links/links-specification.html
 

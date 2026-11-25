@@ -132,8 +132,10 @@ async fn profile_references_slug_me_and_uuid() -> anyhow::Result<()> {
 #[ignore = "needs a running backend: contract-tests/run.sh rust"]
 async fn filters_of_the_list_reads() -> anyhow::Result<()> {
     let c = Client::new()?;
-    let (_, v) = body(&c, "/api/profiles/alex/observations?category=vital-signs").await?;
-    assert_eq!(v, json!({"items": []}));
+    let (status, v) = body(&c, "/api/profiles/alex/observations?category=vital-signs").await?;
+    assert_eq!(status, 200);
+    assert_eq!(v["items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(v["items"][0]["alias_group"], "bp_systolic");
     let (_, v) = body(
         &c,
         "/api/profiles/alex/observations?from=2026-09-01&to=2026-09-30",

@@ -1554,11 +1554,15 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
     let t = "Y9xwkUdtmN9wwoJoN3ffJIhX2UGvCL1JnlPVNL3kDWM";
     let m = format!("/api/shl/{id}");
     let f = format!("/api/shl/{id}/file/{t}");
+    let ice = format!("{m}/ice");
+    let direct = format!("{ice}?recipient=LabNorte");
     // (method, raw path, the request line the app must get)
     let mut through: Vec<(&str, String, String)> = vec![
         ("POST", m.clone(), format!("POST {m}")),
         ("OPTIONS", m.clone(), format!("OPTIONS {m}")),
         ("GET", f.clone(), format!("GET {f}")),
+        ("GET", direct.clone(), format!("GET {direct}")),
+        ("GET", format!("/x/..{direct}"), format!("GET {direct}")),
         ("GET", format!("{f}?x=1"), format!("GET {f}")),
         ("POST", format!("{m}?x=1"), format!("POST {m}")),
         ("POST", format!("//api/shl/{id}"), format!("POST {m}")),
@@ -1630,6 +1634,7 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
     }
     for method in ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         refused.push((method, f.clone()));
+        refused.push((method, ice.clone()));
     }
     let (_c, addr) = caddy(&image)?;
     for (method, path, line) in &through {

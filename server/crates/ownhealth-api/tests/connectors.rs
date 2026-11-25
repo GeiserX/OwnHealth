@@ -354,7 +354,7 @@ async fn a_launch_for_another_household_or_a_profile_the_caller_does_not_manage_
     let r = t.launch(&mut sam, t.env.profile("alex")).await?;
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.json);
     // a kind no slice serves yet, and a kind that is not a connection
-    for kind in ["bluebutton", "dexcom", "email", "nope"] {
+    for kind in ["dexcom", "email", "nope"] {
         let r = a
             .post(
                 &format!("/api/connectors/launch/{kind}"),
@@ -884,6 +884,10 @@ async fn no_log_line_carries_a_token_on_the_happy_or_the_failing_paths() -> R {
         .with_ansi(false)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
+    // With one dispatcher registered, tracing asks each thread's own default whether a line is wanted, so a
+    // line another test thread reaches first is cached as unwanted for every thread. A second, inert dispatcher
+    // makes it ask all of them.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let t = setup().await?;
     let mut a = t.browser("alex").await?;
     let id = t.connect(&mut a, t.env.profile("alex")).await?;

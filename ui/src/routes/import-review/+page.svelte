@@ -4,6 +4,7 @@
 	import '#lib/components/pages2/pages2.css';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { tick } from 'svelte';
 	import {
 		acceptReview,
 		getMe,
@@ -23,7 +24,7 @@
 	import type { InboxSource } from '#lib/api/inbox';
 	import AgentContext from '#lib/components/inbox/AgentContext.svelte';
 	import ProposalRows from '#lib/components/inbox/ProposalRows.svelte';
-	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedSummary } from '#lib/logic/inbox';
+	import { FHIR_ITEM_KINDS, fhirTileSource, inboxSummary, latestJob, nearDuplicateOf, othersGrouped, paperlessLink, proposalRows, rowGrounding, unmappedKeys, unmappedSummary } from '#lib/logic/inbox';
 	import { ApiError } from '#lib/api/core';
 	import ConfirmRow from '#lib/components/ConfirmRow.svelte';
 	import PageHeader from '#lib/components/PageHeader.svelte';
@@ -38,7 +39,11 @@
 	import { shcCards } from '#lib/logic/shc';
 	import { cgmDoc, type CgmLine } from '#lib/logic/cgm_import';
 	import { fitDocLines } from '#lib/logic/fit_import';
+	import { proposalTitle, type FamilyProposal } from '#lib/logic/gedcom';
+	import { focusOrder } from '#lib/logic/imaging';
 	import FitResult from '#lib/components/pages2/FitResult.svelte';
+	import GarminResult from '#lib/components/pages2/GarminResult.svelte';
+	import { garminSummary } from '#lib/logic/garmin_import';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
 	import { day, plain } from '#lib/components/pages2/fmt';
 	import { fmtNum, i18n, t } from '#lib/i18n/index.svelte';
@@ -78,10 +83,10 @@
 		return d ? docLabel(d) : '';
 	};
 
-	function load() {
+	function load(): Promise<void> {
 		const slug = prof?.slug;
-		if (!slug) return;
-		queue.run(async () => {
+		if (!slug) return Promise.resolve();
+		return queue.run(async () => {
 			const [r, d, f, j, s] = await Promise.all([
 				listReview({ status: 'open', profile: slug }),
 				listDocuments(slug).catch(() => ({ items: [] as DocumentSummary[] })),
@@ -172,6 +177,7 @@
 	const cgmText = (l: CgmLine) => (l.n != null ? tp(l.key, l.n, l.vars) : tf(l.key, l.vars ?? {}));
 	// a FIT activity file: what it holds, and that its route was not stored
 	const fitDoc = $derived(fitDocLines(doc.data?.flags));
+	const garminDoc = $derived(garminSummary(doc.data?.flags?.garmin));
 	const boxes = $derived<Box[]>([
 		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
@@ -216,6 +222,7 @@
 
 	// `inRow`: the caller shows the error next to its own control, so the failure is thrown back to it.
 	async function act(fn: () => Promise<unknown>, inRow = false) {
+		const plan = focusPlan();
 		busy = true;
 		actionError = null;
 		notice = null;
@@ -226,9 +233,47 @@
 			actionError = { text: errText(e), raw: errRaw(e) };
 		} finally {
 			busy = false;
-			// Also after a failure: a batch that failed at row N already accepted rows 1 to N-1.
-			load();
 			refreshReviewTotal();
+			// Also after a failure: a batch that failed at row N already accepted rows 1 to N-1.
+			load().then(async () => {
+				await tick();
+				refocus(plan);
+			});
+		}
+	}
+	// Focus after a decision (Accept, Dismiss, Reject…). The pressed button is disabled while the request
+	// runs and then goes away with its row, so focus would fall to the page body. It goes to the next row
+	// instead: the same control again when the row stays (the decision failed), else the first control of
+	// the nearest row below, else above (logic/imaging.ts focusOrder). Rows carry `data-row`; a row's
+	// confirm step sits in a sub-row that carries `data-row-of`, and a decision there counts as the row's.
+	type FocusPlan = { rows: string[]; index: number };
+	const focusables = (row: HTMLElement) =>
+		[...row.querySelectorAll<HTMLElement>('button, a[href], input, select, textarea')].filter((el) => !(el as HTMLButtonElement).disabled);
+	function focusPlan(): FocusPlan | null {
+		const el = document.activeElement;
+		const row = el instanceof HTMLElement ? el.closest<HTMLElement>('[data-row], [data-row-of]') : null;
+		const id = row?.dataset.row ?? row?.dataset.rowOf;
+		if (!el || !row || !id) return null;
+		const order = [...document.querySelectorAll<HTMLElement>('[data-row]')].map((r) => r.dataset.row ?? '');
+		// from a sub-row, a row that stays gets focus on its first control
+		const index = row.dataset.row ? focusables(row).indexOf(el as HTMLElement) : -1;
+		return { rows: focusOrder(order, id), index };
+	}
+	function refocus(plan: FocusPlan | null) {
+		const at = document.activeElement;
+		// focus that is still on a control (the person moved on, or it never left) stays where it is
+		if (!plan || (at && at !== document.body && at.isConnected)) return;
+		for (const [i, id] of plan.rows.entries()) {
+			const row = document.querySelector<HTMLElement>(`[data-row="${CSS.escape(id)}"]`);
+			if (!row) continue;
+			const controls = focusables(row);
+			const target = (i === 0 ? controls[plan.index] : undefined) ?? controls[0];
+			if (target) target.focus();
+			else {
+				row.tabIndex = -1;
+				row.focus();
+			}
+			return;
 		}
 	}
 	// The top bar and the sidebar show the household total; refresh it from /me after every decision.
@@ -309,15 +354,17 @@
 			const label = (p.src as { label?: string } | undefined)?.label;
 			if (label) return String(label);
 		}
-		// A connector pull's resources of one type we do not show yet: one line with their count.
+		// A connector pull's resources of one type we do not show yet, or a C-CDA upload's section left
+		// unread: one line with their count.
 		const grouped = unmappedSummary(i);
-		if (grouped) return tp('i2_fus_t', grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
+		if (grouped) return tp(unmappedKeys(grouped).title, grouped.count, { type: grouped.type, source: grouped.source || '—', n: fmtNum(grouped.count) });
 		// A DICOM study the import did not send: what it is, and whom the disc names.
 		if (i.kind === 'imaging_study') {
 			const what = [p.description, p.modality, p.study_date].filter(Boolean).map(String).join(' · ') || t('i2_kind_imaging_study');
 			return p.patient_name ? tf('i2_img_t', { what, who: String(p.patient_name) }) : what;
 		}
 		// A scan's chip already says what it is; the line names the file.
+		if (i.kind === 'family_proposal') return proposalTitle(p as FamilyProposal, i18n.lang, (k, v) => (v ? tf(k, v) : t(k)));
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
 	}
@@ -455,6 +502,8 @@
 				<div class="note" style="margin-top:6px">{t('i2_no_pages_image')}</div>
 			{:else if doc.data && docId && doc.data.id === docId && fitDoc}
 				<FitResult lines={fitDoc} label={plain(doc.data.filename)} />
+			{:else if doc.data && docId && doc.data.id === docId && garminDoc}
+				<GarminResult summary={garminDoc} />
 			{:else if doc.data && !doc.data.pages_info.length}
 				<div class="empty">{t('i2_no_pages')}</div>
 			{:else}
@@ -529,7 +578,7 @@
 				{#if !docProposals.length}<div class="empty">{docFailed ? t('i2_doc_failed_rows') : cgm ? t('i2_doc_cgm_rows') : t('i2_doc_done')}</div>{/if}
 			{/each}
 			{#each docProposals as p (p.item.id)}
-				<div class="prop">
+				<div class="prop" data-row={p.item.id}>
 					<div style="font-size:12px"><span class="chip" style="color:var(--accent);border-color:rgba(60,186,221,.5)">{t('i2_agent_chip')}</span> ◆ {otherTitle(p.item)}</div>
 					<ProposalRows rows={p.rows} {busy} onaccept={(edits) => act(() => acceptReview(p.item.id, edits))} onreject={() => act(() => rejectReview(p.item.id, 'rejected in review'))} />
 					<AgentContext item={p.item} docName={docNameOf} />
@@ -559,7 +608,7 @@
 				{#each others as line (line.item.id)}
 					{@const it = line.item}
 					{@const prows = proposalRows(it)}
-					<tr class:agent={it.kind === 'agent_proposal'} id="oi-{it.id.slice(0, 8)}">
+					<tr class:agent={it.kind === 'agent_proposal'} id="oi-{it.id.slice(0, 8)}" data-row={it.id}>
 						<td class="kindcol" style="width:1%"><span class="chip" title={it.kind} style={it.kind === 'agent_proposal' ? 'color:var(--accent);border-color:rgba(60,186,221,.5)' : ''}>{t('i2_kind_' + it.kind)}</span></td>
 						<td class="mtxt">
 							{#if line.rows}
@@ -569,7 +618,8 @@
 								<div>{it.kind === 'agent_proposal' ? '◆ ' : ''}{otherTitle(it)}</div>
 								{#if (it.kind === 'fhir_unmapped' || it.kind === 'imaging_study') && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
 								{#if it.kind === 'imaging_study' && imagingAcceptable(it)}<div class="dim" style="font-size:11.5px">{t('i2_img_accept_d')}</div>{/if}
-								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
+								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t(unmappedKeys(unmappedSummary(it) ?? {}).note)}</div>{/if}
+								{#if it.kind === 'family_proposal'}<div class="dim" style="font-size:11.5px">{t('i2_fp_d')}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
@@ -591,11 +641,14 @@
 								<button class="btn sm no" onclick={() => (confirmDismiss = it.id)} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if it.kind === 'fhir_unmapped_summary'}
 								<!-- the pulled bundle, through the document route that checks this profile like the queue does -->
-								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t('i2_fus_open')}</a>{/if}
+								{#if it.document_id}<a class="btn sm" href={documentFileUrl(it.document_id)} target="_blank" rel="noopener">{t(unmappedKeys(unmappedSummary(it) ?? {}).open)}</a>{/if}
 								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
+							{:else if it.kind === 'family_proposal'}
+								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if it.kind === 'imaging_study'}
 								<!-- a patient who is not the profile's, or one of several on the disc, can still be added; a UID that another record or patient holds cannot -->
 								{#if imagingAcceptable(it)}<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>{/if}
@@ -606,7 +659,7 @@
 						</td>
 					</tr>
 					{#if confirmDismiss === it.id}
-						<tr class="sub"><td colspan="4">
+						<tr class="sub" data-row-of={it.id}><td colspan="4">
 							<ConfirmRow text={t('i2_scan_dismiss_d')} confirmLabel={t('i2_dismiss')} {busy} onconfirm={() => act(async () => { await dismissReview(it.id); enter(null); })} oncancel={() => (confirmDismiss = null)} />
 						</td></tr>
 					{/if}

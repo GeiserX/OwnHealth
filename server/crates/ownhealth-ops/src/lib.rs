@@ -5,6 +5,8 @@
 //!   and the state_hash of every profile.
 //! - `seal::seal_legacy`: the operator's job that seals the files and refresh tokens an install
 //!   stored before profile keys.
+//! - `partition::run`: the job that turns `wearable_sample` into monthly partitions once it passes
+//!   `OWNHEALTH_PARTITION_ROWS`, then makes next month's partition ahead of time.
 //! - `export::export_profile`: the full export of one profile (FHIR NDJSON plus the original files,
 //!   one zip), for the step-up-protected REST route.
 //! - `summary_pdf::render`: the printed doctor summary, two A4 pages through `pdfwrite`.
@@ -17,9 +19,11 @@
 mod backup;
 mod demo_base;
 pub mod export;
+pub mod ice;
 pub mod ips;
 pub mod letter_pdf;
 pub mod next_draw_pdf;
+pub mod partition;
 pub mod seal;
 pub mod shl;
 pub mod summary_pdf;
@@ -33,10 +37,12 @@ pub use seal::seal_legacy;
 
 use ownhealth_core::demo;
 
-/// Register lane H's demo hooks: `base` (order 0, the port of `demo/base.py`), then `family` and
-/// `supplements` (v0.3, after every other hook).
+/// Register the base demo first, then the family, supplements and lab share.
 pub fn register() {
     demo::register_demo_hook("base", 0, |conn, ctx| Box::pin(seed_base(conn, ctx)));
     demo::register_demo_hook("family", 1100, |conn, ctx| Box::pin(seed_family(conn, ctx)));
     demo::register_demo_hook("supplements", 1101, |conn, ctx| Box::pin(seed_supplements(conn, ctx)));
+    demo::register_demo_hook("family_share", 1111, |conn, ctx| {
+        Box::pin(demo_base::seed_family_share(conn, ctx))
+    });
 }

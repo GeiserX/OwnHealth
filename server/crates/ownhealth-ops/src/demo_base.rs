@@ -27,6 +27,7 @@ use ownhealth_core::pyrandom::{PyRandom, round1};
 const LAB: &str = "LabNorte";
 const DERIVATION: &str = "demo-seed";
 const TITLE: &str = "Informe de resultados de laboratorio";
+const ALEX_LIPID_DRAW: &str = "2026-09-14";
 
 struct Analyte {
     group: &'static str,
@@ -69,7 +70,7 @@ const fn a(
 }
 
 /// In the Python dict's order: a row's place on its page follows this list.
-const ANALYTES: [Analyte; 17] = [
+const ANALYTES: [Analyte; 19] = [
     a(
         "hemoglobin",
         "718-7",
@@ -215,6 +216,30 @@ const ANALYTES: [Analyte; 17] = [
         "serum",
     ),
     a(
+        "total_cholesterol",
+        "2093-3",
+        "Colesterol total",
+        "mg/dL",
+        "mg/dL",
+        "< 200",
+        None,
+        Some("200"),
+        2,
+        "serum",
+    ),
+    a(
+        "hdl_c",
+        "2085-9",
+        "Colesterol HDL",
+        "mg/dL",
+        "mg/dL",
+        "40 - 100",
+        Some("40"),
+        Some("100"),
+        2,
+        "serum",
+    ),
+    a(
         "lpa",
         "43583-4",
         "Lipoproteína (a)",
@@ -290,9 +315,11 @@ const ALEX_SERIES: Series = &[
             ("2025-01-20", "79"),
             ("2025-09-08", "101"),
             ("2026-03-02", "118"),
-            ("2026-09-14", "97"),
+            (ALEX_LIPID_DRAW, "97"),
         ],
     ),
+    ("total_cholesterol", &[(ALEX_LIPID_DRAW, "170")]),
+    ("hdl_c", &[(ALEX_LIPID_DRAW, "53")]),
     ("lpa", &[("2023-03-21", "138"), ("2025-09-08", "142")]),
     (
         "hba1c",
@@ -457,7 +484,8 @@ const OTHER_SERIES: [(&str, Series); 3] = [
     (
         "sam",
         &[
-            ("ldl_c", &[("2026-06-10", "122")]),
+            // the 2025 value, 190 mg/dL or more, feeds the hint Sam shares with Lucía (seed_family_share)
+            ("ldl_c", &[("2025-06-12", "204"), ("2026-06-10", "122")]),
             ("hba1c", &[("2026-06-10", "5.2")]),
             ("vitamin_d_25oh", &[("2026-06-10", "41")]),
             ("tsh", &[("2026-06-10", "1.6")]),
@@ -761,6 +789,44 @@ async fn record(conn: &mut PgConnection, kind: &str, body: Value, src: SrcRef) -
     )
     .await?;
     Ok(done.src_id)
+}
+
+async fn seed_cardio_inputs(conn: &mut PgConnection, ctx: &DemoContext) -> Result<()> {
+    let profile_id = ctx.family.profile("alex");
+    let user = ctx.family.user("alex");
+    let measured = dt(ALEX_LIPID_DRAW, 8)?.to_rfc3339();
+    let pressure = ObservationIn::from_json(json!({
+        "profile_id": profile_id,
+        "category": "vital-signs",
+        "printed_name": "Presión arterial sistólica",
+        "printed_value": "126",
+        "printed_unit": "mmHg",
+        "value_num": "126",
+        "alias_group": "bp_systolic",
+        "loinc": "8480-6",
+        "unit_ucum": "mm[Hg]",
+        "value_canonical": "126",
+        "unit_canonical": "mm[Hg]",
+        "derivation_version": DERIVATION,
+        "effective_at": measured,
+    }))?;
+    let smoking = ObservationIn::from_json(json!({
+        "profile_id": profile_id,
+        "category": "survey",
+        "source_kind": "self_reported",
+        "printed_name": "Tabaquismo",
+        "printed_value": "Nunca ha fumado",
+        "value_code": "266919005",
+        "alias_group": "smoking_status",
+        "loinc": "72166-2",
+        "derivation_version": DERIVATION,
+        "effective_at": measured,
+    }))?;
+    for obs in [pressure, smoking] {
+        let src = manual(conn, user, None, "manual").await?;
+        commit_observation(conn, &obs, &src, CommitOptions::new("person")).await?;
+    }
+    Ok(())
 }
 
 async fn seed_records(conn: &mut PgConnection, ctx: &DemoContext, assigned: &mut Assigned) -> Result<()> {
@@ -1165,6 +1231,7 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
     for (slug, series) in OTHER_SERIES {
         seed_reports(conn, ctx, slug, series, &[], &mut assigned).await?;
     }
+    seed_cardio_inputs(conn, ctx).await?;
     seed_records(conn, ctx, &mut assigned).await?;
     seed_wearables(conn, ctx).await?;
     let id = |lit: &str| {
@@ -1197,7 +1264,7 @@ pub async fn seed_base(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result
 }
 
 /// v0.3 family history: Alex's relatives as the mockup draws them (synthetic). Its own demo hook
-/// (`family`, after every other one), so the 0.3.0 seed stays exactly what it was.
+/// (`family`) so tests can add relatives to a 0.3.0 fixture after they migrate it.
 pub async fn seed_family(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
     use ownhealth_core::family::{self, FamilyCondition, MemberIn};
     let alex = ctx.family.profile("alex");
@@ -1250,6 +1317,44 @@ pub async fn seed_family(conn: &mut PgConnection, ctx: &mut DemoContext) -> Resu
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Lucía's parents in her family history, and Sam's consent that her labs feed hints in Lucía's
+/// profile: written as `PUT /family-shares` writes it (granted by Sam, who owns her profile, with the
+/// consent change in the audit log), so Sam sees it on her Family page and can take it back.
+pub(crate) async fn seed_family_share(conn: &mut PgConnection, ctx: &mut DemoContext) -> Result<()> {
+    use ownhealth_core::audit::{AuditEvent, write_audit};
+    use ownhealth_core::family::{self, MemberIn};
+    let (lucia, sam) = (ctx.family.profile("lucia"), ctx.family.profile("sam"));
+    let sam_user = ctx.family.user("sam");
+    for (relationship, born_year, parent) in [("FTH", 1979, "alex"), ("MTH", 1981, "sam")] {
+        let mut m = MemberIn::new(lucia, relationship);
+        m.born_year = Some(born_year);
+        let src = SrcRef::New(SrcIn {
+            profile_id: Some(lucia),
+            label: Some("manual".into()),
+            ..SrcIn::manual(Some(sam_user))
+        });
+        family::add(&mut *conn, &m, &src, "person", None, Some(ctx.family.profile(parent))).await?;
+    }
+    sqlx::query(
+        "insert into family_share (source_profile_id, target_profile_id, categories, granted_by) \
+         values ($1, $2, array['labs'], $3)",
+    )
+    .bind(sam)
+    .bind(lucia)
+    .bind(sam_user)
+    .execute(&mut *conn)
+    .await?;
+    let mut ev = AuditEvent::new("user", "ui", "consent_change");
+    ev.actor_id = Some(sam_user);
+    ev.tool = Some("family_share".into());
+    ev.profile_id = Some(sam);
+    ev.resource_type = Some("profile".into());
+    ev.resource_ids = Some(vec![lucia.to_string()]);
+    ev.args_summary = Some("categories=labs".into());
+    write_audit(conn, &ev).await?;
     Ok(())
 }
 

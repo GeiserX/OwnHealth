@@ -6,6 +6,7 @@
 	// sheet's language; the `ips` specialty prints its twin.
 	import '#lib/components/pages2/pages2.css';
 	import { ApiError, exportIps, printSummary, SUMMARY_SPECIALTIES, type SummarySpecialty } from '#lib/api';
+	import IceCard from './IceCard.svelte';
 	import StepUpDialog from '#lib/components/pages2/StepUpDialog.svelte';
 	import { withStepUp } from '#lib/components/pages2/stepup.svelte';
 	import NotReady from '#lib/components/pages1/NotReady.svelte';
@@ -157,6 +158,12 @@
 		{/if}
 	</section>
 </div>
+
+{#if prof?.role === 'owner' && !prof.break_glass}
+	{#key prof.slug}
+		<IceCard slug={prof.slug} />
+	{/key}
+{/if}
 
 <StepUpDialog />
 
