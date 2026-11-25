@@ -12,7 +12,7 @@
 	import { fitDocId, fitHidden, fitLines } from '#lib/logic/fit_import';
 	import FitResult from './FitResult.svelte';
 	import GarminResult from './GarminResult.svelte';
-	import { garminNothing, garminReadings, garminSummary } from '#lib/logic/garmin_import';
+	import { garminNothing, garminReadings as archiveReadings, garminSummary } from '#lib/logic/garmin_import';
 
 	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
 	let {
@@ -82,10 +82,10 @@
 	// The document each upload made, from the upload answer or its finished job (a FIT or CGM export's
 	// job names it in its result, which reaches only those who may read wearables).
 	const docOf = (i: ImportItem) =>
-		i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? fitDocId(jobs[i.job_id]) ?? cgmDocument(jobs[i.job_id]?.result) ?? garminDocument(jobs[i.job_id])) : undefined);
+		i.document_id ?? (i.job_id != null ? (jobs[i.job_id]?.document_id ?? fitDocId(jobs[i.job_id]) ?? cgmDocument(jobs[i.job_id]?.result) ?? archiveDocument(jobs[i.job_id])) : undefined);
 	const cgmDocument = (r: unknown) => (cgmLines(r) && typeof (r as { document_id?: unknown }).document_id === 'string' ? (r as { document_id: string }).document_id : undefined);
-	const garminDocument = (job: JobInfo | undefined) =>
-		job?.kind === 'import.garmin_zip' && job.state === 'done' && typeof job.result?.document_id === 'string'
+	const archiveDocument = (job: JobInfo | undefined) =>
+		(job?.kind === 'import.garmin_zip' || job?.kind === 'import.fitbit_takeout') && job.state === 'done' && typeof job.result?.document_id === 'string'
 			? job.result.document_id : undefined;
 	const docIds = () => items.filter((i) => (i.job_id == null || jobs[i.job_id]?.state === 'done')).map(docOf).filter((x): x is string => !!x);
 	let gone = false;
@@ -163,7 +163,11 @@
 					</tr>
 					{#if fit}<tr><td colspan="4"><FitResult lines={fit} label={i.filename} /></td></tr>
 					{:else if fitHidden(j)}<tr><td colspan="4" class="dim" style="font-size:12px">{t('i2_fit_hidden')}</td></tr>{/if}
-					{#if garmin}<tr><td colspan="4"><GarminResult summary={garmin} readings={garminReadings(j?.result)} /></td></tr>{/if}
+					{#if garmin}<tr><td colspan="4"><GarminResult summary={garmin} readings={archiveReadings(j?.result)} /></td></tr>{/if}
+					{#if j?.kind === 'import.fitbit_takeout' && j.state === 'done'}
+						{@const readings = archiveReadings(j.result)}
+						{#if readings}<tr><td colspan="4" class="dim">{lineText(readings)}</td></tr>{/if}
+					{/if}
 					{#if cgm}
 						<tr>
 							<td colspan="4">

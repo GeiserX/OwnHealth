@@ -76,6 +76,7 @@ export function errKey(code: string | null | undefined, message: string, has: (k
 	if (code && has('err_' + code)) return 'err_' + code;
 	if (errorName(message) === 'PasswordError') return 'err_pdf_password';
 	const m = stripErrorName(message);
+	if (m.startsWith('fitbit_takeout_') && has('err_' + m)) return 'err_' + m;
 	for (const [re, key] of PATTERNS) if (re.test(m) && has(key)) return key;
 	return null;
 }

@@ -111,10 +111,11 @@ pub fn retract_document_facts<'c>(
 /// import writes: Gadgetbridge (samples adopted with `Conflict::Adopt`), the LibreView and Clarity
 /// CSV exports (one job for both; readings kept by the first file with `Conflict::Keep`) and Garmin
 /// account exports (readings kept by the first export, from the readings document each one stores).
-const REIMPORTED: [(&str, &str); 3] = [
+const REIMPORTED: [(&str, &str); 4] = [
     ("gadgetbridge_db", "gadgetbridge"),
     ("libreview_csv", "cgm_csv"),
     ("garmin_zip", "garmin"),
+    ("fitbit_takeout", "fitbit_takeout"),
 ];
 
 /// The exports of the same kind and profile that are still active are imported again, so the samples
@@ -188,7 +189,7 @@ pub async fn lock_export_of(conn: &mut PgConnection, document_id: Uuid) -> Resul
     let mut locked = Vec::new();
     loop {
         let export: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
-            "select profile_id, case when flags ? 'cgm_csv' then 'cgm_csv' when flags ? 'garmin' then 'garmin' end \
+            "select profile_id, case when flags ? 'cgm_csv' then 'cgm_csv' when flags ? 'garmin' then 'garmin' when flags ? 'fitbit_takeout' then 'fitbit_takeout' end \
              from document where id = $1",
         )
         .bind(document_id)

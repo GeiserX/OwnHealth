@@ -89,12 +89,20 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 | HL7 v2 ORU^R01 | Some LIS exports and lab portals | `python-hl7`-style segment parser, OBX → Observation | v2 |
 | CSV with column mapper | Lab portals, spreadsheets people already keep, vendor CSV exports | Saved mapping per source (column → LOINC, unit, date format) | v2 (with the HL7 v2 importer) |
 | DICOM (CD, zip, folder) | Hospital CDs, private imaging portals | Pushed to Orthanc (`imaging` profile); report text linked to the study | v1.0 |
-| Google Takeout (Fitbit) | takeout.google.com | Lenient per-metric JSON/CSV parser; layout changes over time | v1.0 |
+| Google Takeout (Fitbit) | takeout.google.com | Heart rate, resting heart rate, RMSSD heart rate variability and SpO2 from legacy Fitbit exports and Google Data CSVs | v1.0 |
 | Garmin "Export Your Data" | Garmin account GDPR export: FIT + JSON | FIT via `fitparser` (MIT): heart rate per minute, distance for running, walking and hiking, energy per activity, never a position (`ownhealth_devices::fit`); the JSON files later | v1.0 |
 | Gadgetbridge SQLite | Android app, fully offline, no vendor cloud | Read device tables by device type | v0.2 |
 | Vendor GDPR exports (Clue JSON, Flo, Natural Cycles, Samsung Health CSV, Huawei, Withings CSV, Polar Flow, Dexcom Clarity CSV, LibreView CSV) | Account settings or a GDPR Art. 15/20 request | One small parser each, registered as a T1 connector | LibreView and Dexcom Clarity CSV v1.0; cycle, nutrition and training exports v2; the rest not scheduled |
 | Taiwan My Health Bank (HTML/XML/JSON) | NHI portal download | JSON parser | v2 |
 | Consumer genome files, VCF | 23andMe, MyHeritage, Ancestry, WGS | Not a connector here: OwnGenome ingests them and emits `genome-facts.json` | v0.1 (facts ingest) |
+
+#### Fitbit history from Google Takeout
+
+In [Google Takeout](https://support.google.com/googlehealth/answer/14236615), select Fitbit or Google Health and request a ZIP. In OwnHealth, select the profile that owns the Fitbit history, then upload the ZIP in **Import review**. OwnHealth reads legacy JSON files in `Global Export Data` and the accompanying Fitbit HRV and SpO2 CSVs. It also reads the newer CSVs in `Physical Activity_GoogleData` or `Google Data`. Readings appear in **Wearables** under Fitbit.
+
+For a timestamp without a UTC offset, OwnHealth uses the IANA time zone in the Fitbit `Profile.json` in the same ZIP. It refuses the import if the zone is missing or invalid, or when a clock change leaves the time ambiguous or nonexistent. An explicit UTC offset is used as written. A date-only CSV summary uses midnight UTC for that calendar date.
+
+A ZIP with no supported files or usable readings shows an import error. Each ZIP may contain up to 500,000 readings. For larger exports, use smaller ZIPs that preserve the Fitbit or Google Health folder. Include the Fitbit profile file in each part that has timestamps without offsets. OwnHealth keeps a readings document with the source member names and releases the original ZIP.
 
 ### 2.3 T2: live APIs a self-hoster can register for
 

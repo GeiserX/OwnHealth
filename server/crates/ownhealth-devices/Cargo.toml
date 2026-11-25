@@ -15,6 +15,7 @@ ownhealth-core.workspace = true
 ownhealth-ingest-structured.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10.4"
 csv.workspace = true
 fitparser.workspace = true
 flate2.workspace = true

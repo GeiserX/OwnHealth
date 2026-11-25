@@ -217,11 +217,12 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
 
 /// The import jobs whose result counts a profile's wearable samples and names its devices (a CGM
 /// export's result also counts its Low and High readings).
-pub const WEARABLE_JOBS: [&str; 4] = [
+pub const WEARABLE_JOBS: [&str; 5] = [
     "import.fit",
     "import.gadgetbridge",
     "import.cgm_csv",
     ownhealth_devices::garmin_zip::JOB,
+    ownhealth_devices::takeout_fitbit::JOB,
 ];
 
 /// Import jobs of the caller's profiles, newest first; `ids=1,2,3` to poll specific ones.

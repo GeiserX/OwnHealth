@@ -1058,6 +1058,7 @@ fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
         "application/fhir+json" | "application/fhir+ndjson" => "import.fhir_bundle",
         "application/zip" => "import.apple_health",
         ownhealth_core::documents::GARMIN_READINGS_MIME => "import.garmin_zip",
+        ownhealth_core::documents::FITBIT_READINGS_MIME => "import.fitbit_takeout",
         _ => "import.pdf",
     }
 }

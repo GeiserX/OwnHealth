@@ -18,7 +18,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | zip_directory_limit | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | fitbit_takeout | broken_zip | zip_directory_limit | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -29,6 +29,7 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
         "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
         "garmin_zip" => "import.garmin_zip",
+        "fitbit_takeout" => "import.fitbit_takeout",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
         "gadgetbridge_db" => "import.gadgetbridge",
@@ -44,7 +45,7 @@ pub fn mime(kind: &str) -> Option<&'static str> {
         "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
-        "apple_health_zip" | "garmin_zip" => "application/zip",
+        "apple_health_zip" | "garmin_zip" | "fitbit_takeout" => "application/zip",
         "genome_facts" => "application/json",
         "vcf" => "application/gzip",
         "tbi" => "application/octet-stream",
@@ -57,13 +58,32 @@ pub fn mime(kind: &str) -> Option<&'static str> {
 /// The mime of the document a Garmin export's import stores: its readings as JSON lines, not the zip.
 pub const GARMIN_READINGS_MIME: &str = "application/x-ndjson";
 
-/// The mime of the document an upload kind's import stores: the upload's own, except a Garmin export,
-/// whose document holds the readings it read from the zip.
+pub const FITBIT_READINGS_MIME: &str = "application/vnd.ownhealth.fitbit-readings+ndjson";
+
+/// The mime of the document an upload kind stores. Wearable archives can store projected readings.
 pub fn stored_mime(kind: &str) -> Option<&'static str> {
-    if kind == "garmin_zip" {
-        return Some(GARMIN_READINGS_MIME);
+    match kind {
+        "garmin_zip" => Some(GARMIN_READINGS_MIME),
+        "fitbit_takeout" => Some(FITBIT_READINGS_MIME),
+        _ => mime(kind),
     }
-    mime(kind)
+}
+
+/// The service folder and relative member path of a Fitbit or Google Health Takeout export.
+/// The archive may contain the service folder directly or inside a Takeout directory.
+pub fn fitbit_takeout_path(name: &str) -> Option<(&str, &str)> {
+    let mut start = 0;
+    let mut parent: &str = "";
+    for (end, _) in name.match_indices('/') {
+        let part = &name[start..end];
+        let service = part.eq_ignore_ascii_case("Fitbit") || part.eq_ignore_ascii_case("Google Health");
+        if service && (start == 0 || parent.eq_ignore_ascii_case("Takeout")) {
+            return Some((&name[..end], &name[end + 1..]));
+        }
+        start = end + 1;
+        parent = part;
+    }
+    None
 }
 
 /// Recognized outer members of a Garmin account export. The leading directories vary between
@@ -118,16 +138,18 @@ fn classify_zip(reader: impl Read + Seek) -> UploadKind {
         Err(_) => return "broken_zip",
     };
     let mut kind = "unknown";
+    let mut fitbit = false;
     for name in archive.file_names().flatten() {
         // Preserve Apple Health's existing marker and precedence.
         if name.ends_with("export.xml") {
             return "apple_health_zip";
         }
+        fitbit |= fitbit_takeout_path(&name).is_some();
         if GarminMember::from_name(&name).is_some() {
             kind = "garmin_zip";
         }
     }
-    kind
+    if fitbit { "fitbit_takeout" } else { kind }
 }
 
 /// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.

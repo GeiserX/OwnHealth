@@ -29,6 +29,7 @@ const SLUGS: [&str; 4] = ["alex", "sam", "lucia", "carmen"];
 /// Every user-facing output we compute. One line per source.
 const SOURCES: &[(&str, Source)] = &[
     ("status", |s| Box::pin(status(s))),
+    ("fitbit_takeout", |_| Box::pin(async { fitbit_takeout_words() })),
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
     ("summary", |s| Box::pin(summaries(s))),
@@ -77,6 +78,17 @@ const SOURCES: &[(&str, Source)] = &[
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::smart::phrases()]) })
     }),
 ];
+
+fn fitbit_takeout_words() -> anyhow::Result<Vec<Value>> {
+    let dict = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../ui/src/lib/i18n/dict.ts"));
+    dict.lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim_start().split_once(':')?;
+            (key == "i2_ik_fitbit_takeout" || key.starts_with("err_fitbit_takeout_"))
+                .then(|| serde_json::from_str(value.trim().trim_end_matches(',')).map_err(anyhow::Error::from))
+        })
+        .collect()
+}
 
 fn session_report_words() -> anyhow::Result<Vec<Value>> {
     let dict = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../ui/src/lib/i18n/dict.ts"));

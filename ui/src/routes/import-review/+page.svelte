@@ -178,6 +178,7 @@
 	// a FIT activity file: what it holds, and that its route was not stored
 	const fitDoc = $derived(fitDocLines(doc.data?.flags));
 	const garminDoc = $derived(garminSummary(doc.data?.flags?.garmin));
+	const fitbitFiles = $derived((doc.data?.flags?.fitbit_takeout as { files_imported?: number } | undefined)?.files_imported);
 	const boxes = $derived<Box[]>([
 		...rows
 			.filter((i) => pg(i) === pageNo && Array.isArray((i.payload as { bbox?: number[] }).bbox))
@@ -503,6 +504,11 @@
 				<FitResult lines={fitDoc} label={plain(doc.data.filename)} />
 			{:else if doc.data && docId && doc.data.id === docId && garminDoc}
 				<GarminResult summary={garminDoc} />
+			{:else if doc.data && doc.data.id === docId && typeof fitbitFiles === 'number'}
+				<div class="empty cgmdoc">
+					<div>{t('i2_ik_fitbit_takeout')}</div>
+					<div>{tp('i2_garmin_imported', fitbitFiles)}</div>
+				</div>
 			{:else if doc.data && !doc.data.pages_info.length}
 				<div class="empty">{t('i2_no_pages')}</div>
 			{:else}

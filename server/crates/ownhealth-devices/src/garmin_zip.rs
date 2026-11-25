@@ -33,10 +33,10 @@ pub const PROVIDER: &str = "garmin_export";
 
 const MAX_MEMBERS: usize = GARMIN_MAX_FILES;
 const MAX_NAMES_BYTES: usize = GARMIN_MAX_NAME_BYTES;
-const MAX_EXPANDED: u64 = 4 * 1024 * 1024 * 1024;
-const MAX_JSON: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_EXPANDED: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) const MAX_JSON: u64 = 16 * 1024 * 1024;
 const MAX_FIT_ZIP: u64 = 1024 * 1024 * 1024;
-const MAX_READINGS: usize = 500_000;
+pub(crate) const MAX_READINGS: usize = 500_000;
 
 const UNREADABLE: &str = "garmin_zip_unreadable";
 const LIMIT: &str = "garmin_zip_limit";
@@ -110,7 +110,7 @@ struct Readings {
 }
 
 #[derive(Default)]
-struct Report {
+pub(crate) struct Report {
     files_imported: usize,
     not_imported: Vec<Omission>,
     gps_left_out: bool,
@@ -118,6 +118,19 @@ struct Report {
 }
 
 impl Report {
+    pub(crate) fn file_count(&self) -> Value {
+        json!({"files_imported": self.files_imported})
+    }
+
+    pub(crate) fn add_member(&mut self, member: String, samples: Vec<Sample>) {
+        self.files_imported += 1;
+        self.readings.push(Readings {
+            member,
+            fit: false,
+            samples,
+        });
+    }
+
     fn omit(&mut self, member: String, reason: &'static str) {
         self.not_imported.push(Omission { member, reason });
     }
@@ -175,7 +188,7 @@ impl MemberKind {
     }
 }
 
-fn unsafe_name(name: &str) -> bool {
+pub(crate) fn unsafe_name(name: &str) -> bool {
     name.is_empty()
         || name.starts_with(['/', '\\'])
         || name.contains(':')
@@ -186,7 +199,7 @@ fn unsafe_name(name: &str) -> bool {
 /// Garmin names some files after the account's email address (`<email>_0_summarizedActivities.json`,
 /// `<email>_<activity id>.fit`). A path part shaped like `name@domain.tld` up to the next `_` is
 /// replaced, so the address is never stored or shown.
-fn hide_email(name: &str) -> String {
+pub(crate) fn hide_email(name: &str) -> String {
     name.split_inclusive(['/', '\\'])
         .map(|part| {
             let Some(at) = part.find('@').filter(|at| *at > 0) else {
@@ -204,7 +217,7 @@ fn hide_email(name: &str) -> String {
 
 /// Read up to one byte beyond the member's declared size. A short, oversized or damaged member
 /// returns false. Storage errors and output failures propagate so the job can retry.
-fn read_member(reader: impl Read, size: u64, out: &mut impl Write) -> io::Result<bool> {
+pub(crate) fn read_member(reader: impl Read, size: u64, out: &mut impl Write) -> io::Result<bool> {
     let mut bounded = reader.take(size.saturating_add(1));
     let mut read = 0;
     let mut chunk = [0; 64 * 1024];
@@ -254,19 +267,31 @@ fn storage_error(error: io::Error) -> io::Error {
 }
 
 fn zip_error(error: ZipError) -> Error {
+    archive_error(error, UNREADABLE, LIMIT)
+}
+
+pub(crate) fn archive_error(error: ZipError, unreadable: &str, limit: &str) -> Error {
     match error {
         ZipError::Io(e) if !damaged_member(&e) => e.into(),
-        ZipError::UnsupportedArchive(DIRECTORY_LIMIT) => Error::Upload(LIMIT.into()),
-        _ => Error::Upload(UNREADABLE.into()),
+        ZipError::UnsupportedArchive(DIRECTORY_LIMIT) => Error::Upload(limit.into()),
+        _ => Error::Upload(unreadable.into()),
     }
 }
 
 /// ZipArchive collapses duplicate directory entries. Refuse such an archive instead of silently
 /// losing a member or letting a second entry with the same name shadow the first.
 fn open(reader: impl Read + Seek) -> Result<ZipArchive<impl Read + Seek>> {
-    let zip = zip_directory::open(ArchiveReader(reader)).map_err(zip_error)?;
+    open_archive(reader, UNREADABLE, LIMIT)
+}
+
+pub(crate) fn open_archive(
+    reader: impl Read + Seek,
+    unreadable: &str,
+    limit: &str,
+) -> Result<ZipArchive<impl Read + Seek>> {
+    let zip = zip_directory::open(ArchiveReader(reader)).map_err(|e| archive_error(e, unreadable, limit))?;
     if zip.has_duplicate_names() {
-        return Err(Error::Upload(UNREADABLE.into()));
+        return Err(Error::Upload(unreadable.into()));
     }
     Ok(zip)
 }
@@ -555,6 +580,29 @@ fn json_samples(kind: GarminMember, data: &[u8], remaining: usize) -> std::resul
 
 const READINGS_FORMAT: &str = "ownhealth.garmin-readings/1";
 
+/// The settings shared by importers that retain JSON-lines readings instead of their archive.
+pub(crate) struct ArchiveImport {
+    pub flag: &'static str,
+    pub format: &'static str,
+    pub mime: &'static str,
+    pub provider: &'static str,
+    pub label: &'static str,
+    pub unreadable: &'static str,
+    pub scan: fn(&JobContext, BlobOwner, &str) -> Result<Report>,
+    pub details: fn(&Report) -> Value,
+}
+
+const GARMIN: ArchiveImport = ArchiveImport {
+    flag: "garmin",
+    format: READINGS_FORMAT,
+    mime: GARMIN_READINGS_MIME,
+    provider: PROVIDER,
+    label: "Garmin Connect",
+    unreadable: UNREADABLE,
+    scan: scan_archive,
+    details: Report::details,
+};
+
 /// One line of the stored document after its header; `member` indexes the header's `members`.
 #[derive(Serialize, Deserialize)]
 struct Reading<M> {
@@ -573,11 +621,11 @@ struct StoredMember {
 }
 
 /// Read the readings back from a stored document (the JSON lines `prepare` wrote), grouped by member.
-fn read_stored(reader: impl Read) -> Result<Vec<Readings>> {
-    let bad = |what: &str| Error::Invalid(format!("not a stored Garmin readings file: {what}"));
+fn read_stored(reader: impl Read, spec: &ArchiveImport) -> Result<Vec<Readings>> {
+    let bad = |what: &str| Error::Invalid(format!("not a stored {} readings file: {what}", spec.label));
     let mut lines = io::BufReader::new(reader).lines();
     let header: Value = serde_json::from_str(&lines.next().ok_or_else(|| bad("empty"))??).map_err(|_| bad("header"))?;
-    if header["format"] != READINGS_FORMAT {
+    if header["format"] != spec.format {
         return Err(bad("format"));
     }
     let members: Vec<StoredMember> = serde_json::from_value(header["members"].clone()).map_err(|_| bad("members"))?;
@@ -613,10 +661,15 @@ fn read_stored(reader: impl Read) -> Result<Vec<Readings>> {
     Ok(groups)
 }
 
-fn prepare(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<(Report, Option<String>)> {
+fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report> {
     let mut zip = open(ctx.blobs.open_seek(owner, sha)?)?;
     let mut report = Report::default();
     scan(&mut zip, None, &mut Budget::default(), &mut report)?;
+    Ok(report)
+}
+
+fn prepare(ctx: &JobContext, owner: BlobOwner, sha: &str, spec: &ArchiveImport) -> Result<(Report, Option<String>)> {
+    let report = (spec.scan)(ctx, owner, sha)?;
     if report.readings.is_empty() {
         return Ok((report, None));
     }
@@ -633,7 +686,7 @@ fn prepare(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<(Report, Opt
             .collect();
         serde_json::to_writer(
             &mut writer,
-            &json!({"format": READINGS_FORMAT, "archive_sha256": sha, "members": members}),
+            &json!({"format": spec.format, "archive_sha256": sha, "members": members}),
         )
         .map_err(io::Error::other)?;
         writer.write_all(b"\n")?;
@@ -668,6 +721,7 @@ async fn write(
     readings: Vec<Readings>,
     details: &Value,
     source_id: Option<Uuid>,
+    spec: &ArchiveImport,
 ) -> Result<ImportSummary> {
     let mut summary = ImportSummary::new(doc.to_string());
     let start = readings.iter().flat_map(|g| g.samples.iter().map(|s| s.t)).min();
@@ -682,11 +736,11 @@ async fn write(
     let mut written = Written::default();
     // Keep total daily energy and energy per activity in separate sources. The daily series uses
     // one source per day, so a day with both never adds the workout calories to the whole-day total.
-    for (mut readings, label) in [(daily, "Garmin Connect"), (fit, "Garmin FIT")] {
+    for (mut readings, label) in [(daily, spec.label), (fit, "Garmin FIT")] {
         if readings.is_empty() {
             continue;
         }
-        let source = store::device_source(&mut *conn, profile, PROVIDER, Some(label), None, source_id).await?;
+        let source = store::device_source(&mut *conn, profile, spec.provider, Some(label), None, source_id).await?;
         for reading in &mut readings {
             reading.source = source;
         }
@@ -694,11 +748,12 @@ async fn write(
     }
     store::rebuild(&mut *conn, profile, touched).await?;
     sqlx::query(
-        "update document set collected_at = $2, flags = flags || jsonb_build_object('garmin', $3::jsonb) where id = $1",
+        "update document set collected_at = $2, flags = flags || jsonb_build_object($4::text, $3::jsonb) where id = $1",
     )
     .bind(doc)
     .bind(start)
     .bind(details)
+    .bind(spec.flag)
     .execute(&mut *conn)
     .await?;
     summary.accepted = written.new;
@@ -711,23 +766,28 @@ async fn write(
     Ok(summary)
 }
 
-/// Import a stored readings document again: after a retraction of another Garmin export of the profile
-/// (the readings it held in this one's place come back), or after a move to another profile.
-async fn import_document(ctx: &JobContext, job: &Job, source_id: Option<Uuid>) -> jobs::HandlerResult {
+/// Import stored readings again after a retraction of an overlapping export or a profile move.
+async fn import_document(
+    ctx: &JobContext,
+    job: &Job,
+    source_id: Option<Uuid>,
+    spec: &'static ArchiveImport,
+) -> jobs::HandlerResult {
     let doc = job.uuid("document_id")?;
     let mut tx = ctx.pool.begin().await?;
     lock_export_of(&mut tx, doc).await?;
     let row: Option<(Option<Uuid>, String, Value, String)> = sqlx::query_as(
-        "select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1 for update",
+        "select profile_id, encode(blob_sha256, 'hex'), flags, status from document where id = $1 and mime = $2 for update",
     )
     .bind(doc)
+    .bind(spec.mime)
     .fetch_optional(&mut *tx)
     .await?;
     let Some((profile, sha, flags, status)) = row else {
-        return Err(JobError::permanent("the Garmin document is gone"));
+        return Err(JobError::permanent(format!("the {} document is gone", spec.label)));
     };
     let mut summary = ImportSummary::new(doc.to_string());
-    let details = flags.get("garmin").cloned().unwrap_or_else(|| json!({}));
+    let details = flags.get(spec.flag).cloned().unwrap_or_else(|| json!({}));
     if let Some(queued_for) = job.str("profile_id").and_then(|p| Uuid::parse_str(p).ok())
         && profile != Some(queued_for)
     {
@@ -749,25 +809,26 @@ async fn import_document(ctx: &JobContext, job: &Job, source_id: Option<Uuid>) -
             .map(|m| m.iter().map(|(k, c)| (k.clone(), c.as_i64().unwrap_or(0))).collect())
             .unwrap_or_default();
     } else {
-        let profile = profile.ok_or_else(|| JobError::permanent("the Garmin document has no profile"))?;
+        let profile =
+            profile.ok_or_else(|| JobError::permanent(format!("the {} document has no profile", spec.label)))?;
         let blobs = ctx.blobs.clone();
         let readings =
-            tokio::task::spawn_blocking(move || read_stored(blobs.open_seek(BlobOwner::Profile(profile), &sha)?))
+            tokio::task::spawn_blocking(move || read_stored(blobs.open_seek(BlobOwner::Profile(profile), &sha)?, spec))
                 .await
                 .map_err(|e| JobError::from(Error::Other(e.into())))?
                 .map_err(|e| match e {
                     Error::Invalid(m) => JobError::permanent(m),
                     other => JobError::from(other),
                 })?;
-        summary = write(&mut tx, profile, doc, readings, &details, source_id).await?;
+        summary = write(&mut tx, profile, doc, readings, &details, source_id, spec).await?;
     }
     tx.commit().await?;
     let mut out = summary.to_value();
-    out["garmin"] = details;
+    out[spec.flag] = details;
     Ok(Some(out))
 }
 
-async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
+pub(crate) async fn run(ctx: JobContext, job: Job, spec: &'static ArchiveImport) -> jobs::HandlerResult {
     let channel = job
         .str("channel")
         .filter(|c| !c.is_empty())
@@ -775,10 +836,12 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
         .to_string();
     let source_id = job.str("source_id").and_then(|s| Uuid::parse_str(s).ok());
     if ownhealth_ingest_structured::py::truthy(job.payload.get("document_id")) {
-        return import_document(&ctx, &job, source_id).await;
+        return import_document(&ctx, &job, source_id, spec).await;
     }
     let profile = job.uuid("profile_id")?;
-    let sha = job.str("blob_sha256").ok_or_else(|| JobError::permanent(UNREADABLE))?;
+    let sha = job
+        .str("blob_sha256")
+        .ok_or_else(|| JobError::permanent(spec.unreadable))?;
 
     // If the worker stops after committing its writes, reuse the answer even if the original
     // upload has already been removed. The job still goes through the normal lease completion.
@@ -791,9 +854,10 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
         return Ok(Some(out));
     }
     let (worker_ctx, worker_sha) = (ctx.clone(), sha.to_owned());
-    let prepared = tokio::task::spawn_blocking(move || prepare(&worker_ctx, BlobOwner::Profile(profile), &worker_sha))
-        .await
-        .map_err(|e| JobError::from(Error::Other(e.into())))?;
+    let prepared =
+        tokio::task::spawn_blocking(move || prepare(&worker_ctx, BlobOwner::Profile(profile), &worker_sha, spec))
+            .await
+            .map_err(|e| JobError::from(Error::Other(e.into())))?;
     let (report, kept) = match prepared {
         Ok(prepared) => prepared,
         Err(Error::Upload(code)) => {
@@ -802,30 +866,22 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
         }
         Err(error) => return Err(error.into()),
     };
-    let details = report.details();
+    let details = (spec.details)(&report);
     let mut tx = ctx.pool.begin().await?;
-    lock_exports(&mut tx, profile, "garmin").await?;
+    lock_exports(&mut tx, profile, spec.flag).await?;
     let (mut out, document) = if let Some(kept) = kept {
         let mut payload = job.payload.clone();
         payload["blob_sha256"] = json!(kept);
-        let filename = job.str("filename").unwrap_or("garmin.zip");
+        let filename = job.str("filename").unwrap_or(spec.flag);
         let stem = filename.rsplit_once('.').map_or(filename, |(stem, _)| stem);
         payload["filename"] = json!(format!("{stem}.jsonl"));
-        let doc = document_of_type(
-            &mut tx,
-            &ctx.blobs,
-            &payload,
-            GARMIN_READINGS_MIME,
-            &channel,
-            WEARABLES_DOC_TYPE,
-        )
-        .await?;
-        let summary = write(&mut tx, profile, doc, report.readings, &details, source_id).await?;
+        let doc = document_of_type(&mut tx, &ctx.blobs, &payload, spec.mime, &channel, WEARABLES_DOC_TYPE).await?;
+        let summary = write(&mut tx, profile, doc, report.readings, &details, source_id, spec).await?;
         (summary.to_value(), Some(doc))
     } else {
         (json!({"accepted": 0, "skipped": 0, "reasons": {}}), None)
     };
-    out["garmin"] = details;
+    out[spec.flag] = details;
     // A queued inbox arrival owns the raw ZIP until the import and its result commit. Keep the hash
     // and link to the projected document for subsequent arrivals, then allow the raw bytes to go.
     sqlx::query(
@@ -849,7 +905,7 @@ async fn run(ctx: JobContext, job: Job) -> jobs::HandlerResult {
 }
 
 pub fn register() {
-    jobs::register_handler(JOB, |ctx, job| Box::pin(run(ctx, job)));
+    jobs::register_handler(JOB, |ctx, job| Box::pin(run(ctx, job, &GARMIN)));
 }
 
 #[cfg(test)]
@@ -1145,7 +1201,7 @@ mod tests {
             json!({"member": 1, "metric": "hr", "start": "2024-01-04T08:00:00Z", "end": null, "offset_min": 60, "value": 120.0}),
             json!({"member": 0, "metric": "steps", "start": "2024-01-04T00:00:00Z", "end": null, "offset_min": null, "value": 6200.0}),
         );
-        let groups = read_stored(text.as_bytes())?;
+        let groups = read_stored(text.as_bytes(), &GARMIN)?;
         let seen: Vec<_> = groups
             .iter()
             .map(|g| {
@@ -1164,9 +1220,12 @@ mod tests {
             ]
         );
         let unknown = text.replace("\"hr\"", "\"blood_alcohol\"");
-        assert!(matches!(read_stored(unknown.as_bytes()), Err(Error::Invalid(_))));
+        assert!(matches!(
+            read_stored(unknown.as_bytes(), &GARMIN),
+            Err(Error::Invalid(_))
+        ));
         let past = text.replace("\"member\":1", "\"member\":2");
-        assert!(matches!(read_stored(past.as_bytes()), Err(Error::Invalid(_))));
+        assert!(matches!(read_stored(past.as_bytes(), &GARMIN), Err(Error::Invalid(_))));
         Ok(())
     }
 }

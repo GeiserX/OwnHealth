@@ -131,9 +131,9 @@ async fn remember(conn: &mut PgConnection, a: &Arrival<'_>, document_id: Option<
     Ok(())
 }
 
-/// A previously imported Garmin item can match the next arrival by its raw hash, even when its
+/// A previously imported wearable archive can match the next arrival by its raw hash, even when its
 /// new inbox ID differs. The original archive has already been released, so release this copy too.
-async fn garmin_duplicate(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>) -> Result<Option<Arrived>> {
+async fn archive_duplicate(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>) -> Result<Option<Arrived>> {
     let (Some(source), Some(ext)) = (a.source_id, a.external_id) else {
         return Ok(None);
     };
@@ -182,7 +182,16 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
             && item.profile_id == Some(a.profile_id)
             && item.blob_sha256.as_deref() == Some(sha256_hex_to_bytes(a.sha256)?.as_slice())
         {
-            lock_exports(&mut *conn, a.profile_id, "garmin").await?;
+            let mime: Option<String> = sqlx::query_scalar("select mime from document where id = $1")
+                .bind(item.document_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+            let flag = if mime.as_deref() == Some(crate::documents::FITBIT_READINGS_MIME) {
+                "fitbit_takeout"
+            } else {
+                "garmin"
+            };
+            lock_exports(&mut *conn, a.profile_id, flag).await?;
             remove_unheld_upload(&mut *conn, blobs, a.profile_id, a.sha256).await?;
         }
         return Ok(Arrived::AlreadySeen {
@@ -191,11 +200,15 @@ pub async fn arrive(conn: &mut PgConnection, blobs: &BlobStore, a: &Arrival<'_>)
     }
     let filename = a.filename.unwrap_or("").to_string();
     let kind = sniff_blob(blobs, BlobOwner::Profile(a.profile_id), a.sha256, filename.clone()).await?;
-    if kind == "garmin_zip" {
+    if let Some(flag) = match kind {
+        "garmin_zip" => Some("garmin"),
+        "fitbit_takeout" => Some("fitbit_takeout"),
+        _ => None,
+    } {
         // Hold the import's lock while registering the raw hash, so a duplicate arrival that
         // shares the running job cannot register a new holder after that job releases the hash.
-        lock_exports(&mut *conn, a.profile_id, "garmin").await?;
-        if let Some(duplicate) = garmin_duplicate(&mut *conn, blobs, a).await? {
+        lock_exports(&mut *conn, a.profile_id, flag).await?;
+        if let Some(duplicate) = archive_duplicate(&mut *conn, blobs, a).await? {
             return Ok(duplicate);
         }
     }
