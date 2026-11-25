@@ -355,3 +355,177 @@ async fn retraction_restores_overlapping_samples_from_the_other_readings_documen
     assert_eq!(header["members"][0]["name"], member);
     Ok(())
 }
+
+fn omitted(result: &Value) -> Vec<(String, String)> {
+    let mut list: Vec<_> = result["fitbit_takeout"]["not_imported"]
+        .as_array()
+        .expect("not_imported list")
+        .iter()
+        .map(|o| {
+            (
+                o["member"].as_str().unwrap_or("").to_string(),
+                o["reason"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    list.sort();
+    list
+}
+
+#[tokio::test]
+async fn spo2_in_the_real_oxygen_saturation_folder_is_read() -> R {
+    let env = Env::new().await?;
+    let folder = "Takeout/Fitbit/Oxygen Saturation (SpO2)";
+    let (state, error, result) = upload(
+        &env,
+        &[
+            (
+                &format!("{folder}/Daily SpO2 - 2024-07-04-2024-07-05.csv"),
+                "timestamp,average_value,lower_bound,upper_bound\n\
+                 2024-07-04T00:00:00Z,97.5,94.0,100.0\n2024-07-05T00:00:00Z,96.1,92.6,100.0\n",
+            ),
+            (
+                &format!("{folder}/Minute SpO2 - 2024-07-04.csv"),
+                "timestamp,value\n2024-07-04T03:53:35Z,95.0\n",
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(
+        omitted(&result),
+        [(
+            format!("{folder}/Minute SpO2 - 2024-07-04.csv"),
+            "unsupported".to_string()
+        )]
+    );
+    assert_readings(
+        &env,
+        result,
+        &[
+            ("spo2", 97.5, "2024-07-04T00:00:00Z", 0),
+            ("spo2", 96.1, "2024-07-05T00:00:00Z", 0),
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn files_that_bring_no_readings_are_listed_with_their_reason() -> R {
+    let env = Env::new().await?;
+    let zone = profile("Europe/Madrid");
+    let (state, error, result) = upload(
+        &env,
+        &[
+            ("Takeout/Fitbit/Your Profile/Profile.csv", &zone),
+            (
+                "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json",
+                r#"[{"dateTime":"07/04/24 08:10:00","value":{"bpm":72}}]"#,
+            ),
+            (
+                "Takeout/Fitbit/Heart Rate Variability/Daily Respiratory Rate Summary - 2024-07-(4).csv",
+                "timestamp,daily_respiratory_rate\n2024-07-04T00:00:00,14.2\n",
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/steps-2024-07-04.json",
+                r#"[{"dateTime":"07/04/24 08:10:00","value":"12"}]"#,
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-05.json",
+                "not JSON",
+            ),
+            (
+                "Takeout/Fitbit/Physical Activity_GoogleData/Heart Rate/heart_rate_2024-08-01.csv",
+                "time,value\n2024-08-01T00:00:00Z,70\n",
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/resting_heart_rate-2024-07-06.json",
+                r#"[{"dateTime":"07/06/24 00:00:00","value":{"date":null,"value":0.0,"error":0.0}}]"#,
+            ),
+            (
+                "Takeout/Google Fit/Daily activity metrics/2024-07-04.csv",
+                "Start time,Steps\n",
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    let ged = "Takeout/Fitbit/Global Export Data";
+    assert_eq!(
+        omitted(&result),
+        [
+            (format!("{ged}/heart_rate-2024-07-05.json"), "invalid_json".to_string()),
+            (
+                format!("{ged}/resting_heart_rate-2024-07-06.json"),
+                "no_readings".to_string()
+            ),
+            (format!("{ged}/steps-2024-07-04.json"), "unsupported".to_string()),
+            (
+                "Takeout/Fitbit/Heart Rate Variability/Daily Respiratory Rate Summary - 2024-07-(4).csv".to_string(),
+                "unsupported".to_string()
+            ),
+            (
+                "Takeout/Fitbit/Physical Activity_GoogleData/Heart Rate/heart_rate_2024-08-01.csv".to_string(),
+                "invalid_csv".to_string()
+            ),
+        ]
+    );
+    assert_eq!(result["fitbit_takeout"]["files_imported"], 1);
+    assert_readings(&env, result, &[("hr", 72.0, "2024-07-04T08:10:00Z", 120)]).await
+}
+
+#[tokio::test]
+async fn finder_twins_of_a_zip_made_on_a_mac_are_ignored() -> R {
+    let env = Env::new().await?;
+    let member = "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json";
+    let (state, error, result) = upload(
+        &env,
+        &[
+            (member, r#"[{"dateTime":"07/04/24 08:10:00","value":{"bpm":72}}]"#),
+            (
+                "__MACOSX/Takeout/Fitbit/Global Export Data/._heart_rate-2024-07-04.json",
+                "\u{0}\u{5}\u{16}\u{7}\u{0}\u{2}\u{0}\u{0}Mac OS X",
+            ),
+            (
+                "Takeout/Fitbit/Global Export Data/._heart_rate-2024-07-04.json",
+                "\u{0}\u{5}\u{16}\u{7}",
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(omitted(&result), []);
+    assert_readings(&env, result, &[("hr", 72.0, "2024-07-04T08:10:00Z", 0)]).await
+}
+
+#[tokio::test]
+async fn a_zip_with_both_account_folders_reads_both_and_keeps_one_copy() -> R {
+    let env = Env::new().await?;
+    let zone = profile("Europe/Madrid");
+    let (state, error, result) = upload(
+        &env,
+        &[
+            ("Takeout/Fitbit/Your Profile/Profile.csv", &zone),
+            (
+                "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-12.json",
+                r#"[{"dateTime":"07/12/24 08:00:00","value":{"bpm":70}},{"dateTime":"07/12/24 08:05:00","value":{"bpm":71}}]"#,
+            ),
+            (
+                "Takeout/Google Health/Physical Activity_GoogleData/Heart Rate/heart_rate_2024-07-01.csv",
+                "timestamp,beats per minute,data source\n2024-07-12T08:00:00Z,70,watch\n2024-07-12T08:10:00Z,72,watch\n",
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_readings(
+        &env,
+        result,
+        &[
+            ("hr", 70.0, "2024-07-12T08:00:00Z", 120),
+            ("hr", 71.0, "2024-07-12T08:05:00Z", 120),
+            ("hr", 72.0, "2024-07-12T08:10:00Z", 120),
+        ],
+    )
+    .await
+}

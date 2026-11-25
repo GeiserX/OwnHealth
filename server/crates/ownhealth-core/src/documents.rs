@@ -70,8 +70,12 @@ pub fn stored_mime(kind: &str) -> Option<&'static str> {
 }
 
 /// The service folder and relative member path of a Fitbit or Google Health Takeout export.
-/// The archive may contain the service folder directly or inside a Takeout directory.
+/// The archive may contain the service folder directly or inside a Takeout directory. The
+/// AppleDouble twins a Mac adds (`__MACOSX/…`, `._name`) hold no readings and are not members.
 pub fn fitbit_takeout_path(name: &str) -> Option<(&str, &str)> {
+    if name.starts_with("__MACOSX/") || name.rsplit('/').next().is_some_and(|base| base.starts_with("._")) {
+        return None;
+    }
     let mut start = 0;
     let mut parent: &str = "";
     for (end, _) in name.match_indices('/') {

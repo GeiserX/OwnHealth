@@ -138,7 +138,7 @@ impl Report {
         });
     }
 
-    fn omit(&mut self, member: String, reason: &'static str) {
+    pub(crate) fn omit(&mut self, member: String, reason: &'static str) {
         self.not_imported.push(Omission { member, reason });
     }
 

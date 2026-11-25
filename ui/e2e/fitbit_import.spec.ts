@@ -3,8 +3,8 @@ import { expect, test } from '@playwright/test';
 test('Fitbit Takeout imports both layouts and explains an unsupported ZIP in English and Spanish', async ({ page }) => {
 	const files = ['legacy.zip', 'google-data.zip', 'unrecognized.zip'];
 	for (const [lang, upload, label, readings, refusal] of [
-		['en', 'Upload', 'Fitbit Takeout', '4 readings added', 'This ZIP has no supported Fitbit export files in a single account folder.'],
-		['es', 'Subir', 'Exportación de Fitbit', 'Nada nuevo: las 4 mediciones ya estaban', 'Este ZIP no contiene archivos de Fitbit compatibles en una única carpeta de cuenta.']
+		['en', 'Upload', 'Fitbit Takeout', '4 readings added', 'This ZIP has no supported Fitbit export files.'],
+		['es', 'Subir', 'Exportación de Fitbit', 'Nada nuevo: las 4 mediciones ya estaban', 'Este ZIP no contiene archivos de Fitbit compatibles.']
 	]) {
 		await page.goto('/import-review');
 		const language = page.getByRole('button', { name: lang.toUpperCase(), exact: true });

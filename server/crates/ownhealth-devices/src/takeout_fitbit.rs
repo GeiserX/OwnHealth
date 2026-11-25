@@ -212,7 +212,7 @@ fn member_kind(path: &str) -> Option<MemberKind> {
         }
     }
     // Older exports also ship separate Fitbit CSVs alongside their Global Export Data JSON.
-    if folder.eq_ignore_ascii_case("Heart Rate Variability") && series.is_empty() {
+    if words(folder) == "heart rate variability" && series.is_empty() {
         for label in [
             "heart rate variability details",
             "heart rate variability summary",
@@ -223,9 +223,15 @@ fn member_kind(path: &str) -> Option<MemberKind> {
             }
         }
     }
-    if ["Oxygen Saturation", "SpO2", "Global Export Data"]
-        .iter()
-        .any(|known| folder.eq_ignore_ascii_case(known))
+    // The real folder is `Oxygen Saturation (SpO2)`; `Minute SpO2` files are not read (the daily
+    // file already holds each night's average).
+    if [
+        "oxygen saturation spo2",
+        "oxygen saturation",
+        "spo2",
+        "global export data",
+    ]
+    .contains(&words(folder).as_str())
         && series.is_empty()
         && ["daily spo2", "daily oxygen saturation"]
             .iter()
@@ -345,7 +351,7 @@ fn member_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, index: usize, expanded:
 
 fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report> {
     let mut zip = open_archive(ctx.blobs.open_seek(owner, sha)?, UNREADABLE, LIMIT)?;
-    let mut root = None;
+    let mut report = Report::default();
     let mut profiles = Vec::new();
     let mut members = Vec::new();
     let mut names = 0;
@@ -360,19 +366,27 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             return Err(refuse(LIMIT));
         }
         let Ok(name) = header.name() else { continue };
-        let Some((folder, relative)) = fitbit_takeout_path(&name) else {
+        // Files outside the Fitbit and Google Health folders belong to other Takeout products.
+        let Some((_, relative)) = fitbit_takeout_path(&name) else {
             continue;
         };
-        if header.is_dir() || header.is_symlink() || unsafe_name(&name) {
+        if header.is_dir() {
             continue;
         }
-        let Some(kind) = member_kind(relative) else { continue };
-        if root.get_or_insert_with(|| folder.to_string()) != folder {
-            return Err(refuse(UNKNOWN));
+        let shown = hide_email(
+            &name
+                .chars()
+                .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+                .collect::<String>(),
+        );
+        if header.is_symlink() || unsafe_name(&name) {
+            report.omit(shown, "unsafe_path");
+            continue;
         }
-        match kind {
-            MemberKind::Profile => profiles.push(index),
-            MemberKind::Readings(member) => members.push((index, hide_email(&name), member)),
+        match member_kind(relative) {
+            Some(MemberKind::Profile) => profiles.push(index),
+            Some(MemberKind::Readings(member)) => members.push((index, shown, member)),
+            None => report.omit(shown, "unsupported"),
         }
     }
     if members.is_empty() {
@@ -392,13 +406,13 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
         .flatten()
         .filter(|z| zones.iter().all(|o| *o == Some(*z)));
     let latest = Utc::now() + Duration::days(1);
-    let mut report = Report::default();
     let mut count = 0;
     for (index, name, member) in members {
         let bytes = member_bytes(&mut zip, index, &mut expanded)?;
         let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
         let mut samples = Vec::new();
         let mut left_out = 0;
+        let before = count;
         let push = |raw: Option<&str>, v| {
             let Some((t, offset)) = raw.and_then(|raw| when(raw, member, zone)) else {
                 left_out += 1;
@@ -413,13 +427,25 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             }
             Ok(())
         };
-        if member.json {
-            json_rows(bytes, member.metric, push)?;
+        let read = if member.json {
+            json_rows(bytes, member.metric, push)
         } else {
-            csv_rows(bytes, member.metric, push)?;
+            csv_rows(bytes, member.metric, push)
+        };
+        match read {
+            Ok(()) => {}
+            // A file that is not the JSON or CSV it should be is listed; the others still import.
+            Err(Error::Upload(code)) if code == UNREADABLE => {
+                count = before;
+                report.omit(name, if member.json { "invalid_json" } else { "invalid_csv" });
+                continue;
+            }
+            Err(error) => return Err(error),
         }
         report.rows_left_out += left_out;
-        if !samples.is_empty() {
+        if samples.is_empty() {
+            report.omit(name, "no_readings");
+        } else {
             report.add_member(name, samples);
         }
     }
