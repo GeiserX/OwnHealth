@@ -197,9 +197,16 @@ pub async fn update_source(conn: &mut PgConnection, id: Uuid, p: &SourcePatch) -
 }
 
 pub async fn delete_source(conn: &mut PgConnection, id: Uuid) -> Result<bool> {
+    let mut tx = sqlx::Connection::begin(conn).await?;
+    // Take the row lock a gap check holds first. The next statement then reads with a fresh snapshot,
+    // so it sees any alert that check filed while this delete waited.
+    sqlx::query("select 1 from source where id = $1 for update")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     // A review reference is polymorphic. Close the alert in the same statement that removes
     // the source, so a disconnected device cannot leave an open review item behind.
-    Ok(sqlx::query_scalar(
+    let removed = sqlx::query_scalar(
         "with removed as (delete from source where id = $1 returning id, household_id), \
          closed as (update review_item i set status = 'dismissed', decided_at = now(), \
            decision_reason = 'source_unavailable' from removed s where i.household_id = s.household_id \
@@ -207,8 +214,10 @@ pub async fn delete_source(conn: &mut PgConnection, id: Uuid) -> Result<bool> {
          select exists (select 1 from removed)",
     )
     .bind(id)
-    .fetch_one(conn)
-    .await?)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(removed)
 }
 
 /// Save the position a poller reached, in the caller's transaction (connectors.md 6.3 rule 2: in the
@@ -672,7 +681,8 @@ pub async fn enqueue_grant_poll(tx: &mut Transaction<'_, Postgres>, source_id: U
 }
 
 /// A connector interprets its cursor and returns localized review payload when a gap is present.
-/// The core supplies whether a pull has been failing for longer than the source's interval.
+/// The core supplies whether a pull has been failing for longer than the source's interval, its retry
+/// included.
 pub type GapCheck = fn(Option<&Value>, bool, DateTime<Utc>) -> Option<Value>;
 
 static GAP_CHECKS: LazyLock<RwLock<HashMap<String, GapCheck>>> = LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -706,11 +716,13 @@ async fn pull_failed_for_interval(
         return Ok(false);
     };
     // Measure from the first recorded failure of the current streak. Retries cannot postpone the
-    // alert, and one late failure after a long interval does not immediately raise it.
+    // alert, and one late failure after a long interval does not immediately raise it. The scheduler
+    // queues the retry of a failed poll and runs this check in the same pass, so the check always
+    // comes before that retry ends: a gap needs the retry to have failed too.
     Ok(sqlx::query_scalar(
-        "select exists (select 1 from source_run where source_id = $1 \
+        "select count(*) >= 2 and min(finished_at) < $3 from source_run where source_id = $1 \
          and oauth_grant_id is not distinct from $2 and trigger in ('poll', 'manual') and status = 'error' \
-         and finished_at < $3 and ($4::timestamptz is null or finished_at > $4))",
+         and finished_at is not null and ($4::timestamptz is null or finished_at > $4)",
     )
     .bind(id)
     .bind(source.oauth_grant_id)

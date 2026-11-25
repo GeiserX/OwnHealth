@@ -19,11 +19,10 @@ type Localized = BTreeMap<String, String>;
 struct Policy {
     providers: BTreeMap<String, Provider>,
     openwearables: Localized,
+    openwearables_down: Localized,
     dexcom: Localized,
 }
 
-// Dexcom can hold CGM readings for 1 h in the US or 3 h elsewhere. Its policy leaves
-// room for both. Slice 38 supplies its native vendor sync status.
 static POLICY: LazyLock<Policy> = LazyLock::new(|| {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -46,6 +45,10 @@ pub(crate) enum Status {
 pub(crate) struct ConnectionHealth {
     pub status: Status,
     pub last_synced_at: Option<DateTime<Utc>>,
+    /// The first poll that saw this connection active without any sync time. Its staleness counts
+    /// from here, so a vendor that never sends data still raises an alert. OwnHealth sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_since: Option<DateTime<Utc>>,
 }
 
 impl ConnectionHealth {
@@ -54,6 +57,7 @@ impl ConnectionHealth {
             Status::Expired | Status::Revoked => true,
             Status::Active => self
                 .last_synced_at
+                .or(self.seen_since)
                 .is_some_and(|synced| now - synced > Duration::hours(provider.stale_hours)),
             Status::Unknown => false,
         }
@@ -85,7 +89,8 @@ fn openwearables_gap(cursor: Option<&Value>, pull_failed: bool, now: DateTime<Ut
     if !providers.is_empty() {
         Some(ow_message(&providers.join(", ")))
     } else {
-        pull_failed.then(|| ow_message("Open Wearables"))
+        // The sidecar itself does not answer: reconnecting accounts would not help.
+        pull_failed.then(|| json!({"message": POLICY.openwearables_down}))
     }
 }
 
@@ -98,6 +103,9 @@ fn ow_message(names: &str) -> Value {
     json!({"message": message})
 }
 
+// Only a failing Dexcom pull is a gap for now. Dexcom holds CGM readings back for 1 h in the US and
+// 3 h elsewhere, so a freshness window must allow for both; the native connector (slice 38) adds that
+// check with its own window.
 fn dexcom_gap(_: Option<&Value>, pull_failed: bool, _: DateTime<Utc>) -> Option<Value> {
     pull_failed.then(|| json!({"message": POLICY.dexcom}))
 }
@@ -119,15 +127,12 @@ mod tests {
     }
 
     #[test]
-    fn dexcom_vendor_freshness_allows_both_api_delays() {
-        let now = DateTime::<Utc>::UNIX_EPOCH;
-        let dexcom = &POLICY.providers["dexcom"];
-        for hours in [1, 3] {
-            let reading = ConnectionHealth {
-                status: Status::Active,
-                last_synced_at: Some(now - Duration::hours(hours)),
-            };
-            assert!(!reading.is_gap(dexcom, now), "{hours} h is an expected delay");
+    fn every_provider_window_is_an_open_wearables_provider() {
+        for key in POLICY.providers.keys() {
+            assert!(
+                super::super::PROVIDERS.contains(&key.as_str()),
+                "{key} has no Open Wearables poller"
+            );
         }
     }
 }

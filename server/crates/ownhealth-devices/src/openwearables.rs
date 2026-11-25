@@ -766,7 +766,7 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
         return Err(binding_changed());
     }
     let previous = gaps::observed_connections(binding.cursor.as_ref());
-    let observed: BTreeMap<_, _> = connections
+    let mut observed: BTreeMap<String, ConnectionHealth> = connections
         .iter()
         .map(|(vendor, report)| {
             // Keep the last known health if the sidecar reports a status we do not recognize.
@@ -775,11 +775,20 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
             if health.status == Status::Unknown {
                 health = previous.get(vendor).copied().unwrap_or(health);
             } else if health.status == Status::Active && health.last_synced_at.is_none() {
-                health.last_synced_at = previous.get(vendor).and_then(|p| p.last_synced_at);
+                let known = previous.get(vendor);
+                health.last_synced_at = known.and_then(|p| p.last_synced_at);
+                if health.last_synced_at.is_none() {
+                    health.seen_since = Some(known.and_then(|p| p.seen_since).unwrap_or(now));
+                }
             }
-            (vendor, health)
+            (vendor.clone(), health)
         })
         .collect();
+    // A vendor that drops out of the report (its connection deleted in the sidecar) sends no more data:
+    // it has not recovered. Keep its last health, so an open alert stays open and staleness keeps counting.
+    for (vendor, health) in previous {
+        observed.entry(vendor).or_insert(health);
+    }
     let mut next = cursor.unwrap_or_else(|| json!({}));
     next[gaps::CURSOR_KEY] = json!(observed);
     sqlx::query(

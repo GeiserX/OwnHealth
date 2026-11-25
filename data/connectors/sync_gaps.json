@@ -1,15 +1,17 @@
-
 {
   "providers": {
     "oura": {"name": "Oura", "stale_hours": 36},
     "polar": {"name": "Polar", "stale_hours": 20},
     "whoop": {"name": "WHOOP", "stale_hours": 36},
-    "withings": {"name": "Withings", "stale_hours": 36},
-    "dexcom": {"name": "Dexcom", "stale_hours": 4}
+    "withings": {"name": "Withings", "stale_hours": 36}
   },
   "openwearables": {
     "en": "Sync has stopped for {providers}. The server operator can check Open Wearables and reconnect the affected accounts there.",
     "es": "Se ha interrumpido la sincronización de {providers}. Quien administra el servidor puede revisar Open Wearables y volver a conectar allí las cuentas afectadas."
+  },
+  "openwearables_down": {
+    "en": "OwnHealth cannot sync with Open Wearables. The server operator can check that the Open Wearables service is running.",
+    "es": "OwnHealth no puede sincronizar con Open Wearables. Quien administra el servidor puede comprobar que el servicio de Open Wearables está en marcha."
   },
   "dexcom": {
     "en": "Sync has stopped for Dexcom. You can reconnect your Dexcom account from Connections.",
