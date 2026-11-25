@@ -281,7 +281,8 @@ pub const STAGED_SAMPLE_IS_ACTIVE: &str = "exists (select 1 from profile p where
  and (h.document_id is null or exists (select 1 from document d where d.id = h.document_id \
  and d.profile_id = h.profile_id and d.status = 'active'))";
 
-pub(crate) async fn can_use_staging(conn: &mut PgConnection, write: bool) -> Result<bool> {
+/// Whether this role may read (and with `write`, delete from) the staged samples, when they exist.
+pub async fn can_use_staging(conn: &mut PgConnection, write: bool) -> Result<bool> {
     Ok(sqlx::query_scalar(
         "select coalesce(has_table_privilege(oid, 'SELECT') and \
          (not $2 or has_table_privilege(oid, 'DELETE')), false) \

@@ -134,22 +134,22 @@ You can stop the job at any time and run it again. It prints a JSON report and e
 - **`busy`** means another session held a lock the job needed.
 - **`needs_owner`** means the app's role cannot continue or clear a cutoff. Run the command as the database owner.
 - **`needs_maintenance`** means a device with a wrong clock dated too many samples in the future. The job would have to move them under its exclusive lock, and the limit is 50,000. The note gives the count and the date. The limit is fixed, so every run stops here until those samples are gone. The app logs this warning once a day while it lasts. To fix it:
-  1. Find the files or pushes that hold the samples. Put the date from the note in this query:
+  1. Find the files or pushes that hold the samples. Put the date from the note in this query. The query reads it as a day in UTC, as the note means it:
 
      ```sh
-     docker compose exec db psql -U ownhealth -d ownhealth -c "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) from wearable_sample s join profile p on p.id = s.profile_id left join document d on d.id = s.document_id where s.t >= 'YYYY-MM-DD' group by d.id, d.filename, p.display_name order by count(*) desc"
+     docker compose exec db psql -U ownhealth -d ownhealth -c "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) from wearable_sample s join profile p on p.id = s.profile_id left join document d on d.id = s.document_id where s.t >= timestamptz 'YYYY-MM-DD 00:00+00' group by d.id, d.filename, p.display_name order by count(*) desc"
      ```
 
      If the report also has a `cutoff`, the samples are already set aside. Query `wearable_sample_ahead` instead of `wearable_sample`.
   2. Retract each file on its profile's Documents page. This removes its samples from the table, the set-aside samples and the rollups. To keep the data, set the device clock right, export again, upload the new file, and then retract the old one.
 
-     A row with an empty `id` and `filename` holds samples that an inbox pushed without a file, such as Health Auto Export. There is no file to retract. Set the phone's clock right first, or the next push brings the samples back. Then delete those samples and their rollups. Put the date from the note in both places:
+     A row with an empty `id` and `filename` holds samples that an inbox pushed without a file, such as Health Auto Export. There is no file to retract. Set the phone's clock right first, or the next push brings the samples back. Then delete those samples. Put the date from the note in the command:
 
      ```sh
-     docker compose exec db psql -U ownhealth -d ownhealth -c "with gone as (delete from wearable_sample where document_id is null and t >= 'YYYY-MM-DD' returning source_id) delete from wearable_rollup where source_id in (select source_id from gone) and t >= date 'YYYY-MM-DD' - 1"
+     docker compose run --rm -T admin ownhealth partition --drop-pushed-from YYYY-MM-DD
      ```
 
-     The job picks a date at least 7 days ahead, so a correct clock has no samples on or after it. The command removes the rollups of those inboxes from the day before the date. A day in a time zone west of UTC can start on the day before. If the report has a `cutoff`, use `wearable_sample_ahead` instead of `wearable_sample` here too.
+     It deletes the samples that inboxes pushed without a file, dated on or after the start of that day in UTC, also those set aside. Then it rebuilds the rollups of those inboxes from the samples that stay. Files and devices with no inbox keep their samples. It prints what it removed. It refuses a date that is not ahead of now, because a correct clock has samples from today on.
   3. Run `ownhealth partition` again.
 
   While the report has a `cutoff`, imports of samples dated on or after it wait. They go on after step 3.

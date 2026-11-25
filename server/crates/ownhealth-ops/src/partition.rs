@@ -40,8 +40,10 @@
 //! (deploy/README.md, "Large wearable histories"). An app that connects as the owner runs the whole
 //! job itself, every hour. Only one run works at a time (an advisory lock).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+pub use chrono::NaiveDate;
 use chrono::{DateTime, Datelike, Months, TimeZone, Utc};
 use futures::future::BoxFuture;
 use ownhealth_core::{Error, Result};
@@ -204,6 +206,129 @@ pub async fn run(pool: &PgPool, opts: &Options) -> Result<Value> {
 /// For tests and for an operator who wants the slow part done ahead of a quiet hour.
 pub async fn prepare(pool: &PgPool, opts: &Options) -> Result<Value> {
     locked(pool, opts, true, || opts.now.unwrap_or_else(Utc::now)).await
+}
+
+/// Samples an inbox pushed with no file (Health Auto Export, Nightscout): no document, and a
+/// wearable source an inbox feeds. `$1` is the first instant they are dated at.
+const PUSHED: &str = "document_id is null and t >= $1 \
+     and source_id in (select id from wearable_source where source_id is not null)";
+
+/// The way out of `needs_maintenance` for pushed samples, which have no file to retract (deploy/README.md,
+/// "Large wearable histories"): delete the samples inboxes pushed with no file dated on or after the
+/// start of `from` in UTC, from the table and from the samples set aside, then rebuild the rollups of
+/// those sources from the samples that stay, near the times deleted, as a write does
+/// ([`wearables::recompute_rollups_between`]). A file's samples and the samples of a source no inbox
+/// feeds stay. A date that is not ahead of now is refused: from today on, a correct clock has samples.
+/// It holds the run lock, so no run moves samples meanwhile.
+pub async fn drop_pushed(pool: &PgPool, opts: &Options, from: NaiveDate) -> Result<Value> {
+    let since = from.and_time(chrono::NaiveTime::MIN).and_utc();
+    let refusal = |state: &str, note: String| json!({ "ok": false, "state": state, "table": TABLE, "from": since.to_rfc3339(), "note": note });
+    if since <= opts.now.unwrap_or_else(Utc::now) {
+        return Ok(refusal(
+            "refused",
+            format!(
+                "{from} is not ahead of now, and samples dated from it on may be right: nothing was deleted. \
+                 Give the date the needs_maintenance note names"
+            ),
+        ));
+    }
+    let mut conn = pool.acquire().await?.detach();
+    let mine: bool = sqlx::query_scalar("select pg_try_advisory_lock($1)")
+        .bind(RUN_LOCK)
+        .fetch_one(&mut conn)
+        .await?;
+    let out = if mine {
+        drop_pushed_locked(&mut conn, since).await
+    } else {
+        Ok(Some(refusal("busy", "another run is partitioning the table".into())))
+    };
+    let _ = conn.close().await;
+    out.map(|r| {
+        r.unwrap_or_else(|| {
+            refusal(
+                "needs_owner",
+                format!("this database role may not delete from {AHEAD}: run the command as the database owner"),
+            )
+        })
+    })
+}
+
+/// The samples one delete removed, per profile, metric and source: count, first and last `t`.
+type Dropped = (uuid::Uuid, String, i16, i64, DateTime<Utc>, DateTime<Utc>);
+
+/// [`drop_pushed`] under the run lock, in one transaction. `None` when the role may not change the
+/// samples set aside.
+async fn drop_pushed_locked(conn: &mut PgConnection, since: DateTime<Utc>) -> Result<Option<Value>> {
+    let mut tx = conn.begin().await?;
+    let staged = exists(&mut tx, AHEAD).await?;
+    if staged && !wearables::can_use_staging(&mut tx, true).await? {
+        return Ok(None);
+    }
+    let mut gone: Vec<Dropped> = Vec::new();
+    let mut set_aside = 0;
+    for table in [TABLE, AHEAD] {
+        if table == AHEAD && !staged {
+            continue;
+        }
+        let rows: Vec<Dropped> = sqlx::query_as(AssertSqlSafe(format!(
+            "with gone as (delete from {table} where {PUSHED} returning profile_id, metric, source_id, t) \
+             select profile_id, metric, source_id, count(*), min(t), max(t) from gone group by 1, 2, 3 order by 1, 2, 3"
+        )))
+        .bind(since)
+        .fetch_all(&mut *tx)
+        .await?;
+        if table == AHEAD {
+            set_aside = rows.iter().map(|r| r.3).sum::<i64>();
+        }
+        gone.extend(rows);
+    }
+    // per profile: the metrics, the sources and the span the deleted samples covered
+    type Touched = (BTreeSet<String>, BTreeSet<i16>, DateTime<Utc>, DateTime<Utc>);
+    let mut touched: BTreeMap<uuid::Uuid, Touched> = BTreeMap::new();
+    // per profile and source: the samples deleted, the first and the last
+    type Counted = (i64, DateTime<Utc>, DateTime<Utc>);
+    let mut sources: BTreeMap<(uuid::Uuid, i16), Counted> = BTreeMap::new();
+    for (profile, metric, source, n, first, last) in &gone {
+        let e = touched
+            .entry(*profile)
+            .or_insert_with(|| (BTreeSet::new(), BTreeSet::new(), *first, *last));
+        e.0.insert(metric.clone());
+        e.1.insert(*source);
+        e.2 = e.2.min(*first);
+        e.3 = e.3.max(*last);
+        let s = sources.entry((*profile, *source)).or_insert((0, *first, *last));
+        s.0 += n;
+        s.1 = s.1.min(*first);
+        s.2 = s.2.max(*last);
+    }
+    let mut rollups = 0;
+    for (profile, (metrics, ids, first, last)) in touched {
+        let metrics: Vec<String> = metrics.into_iter().collect();
+        let ids: Vec<i16> = ids.into_iter().collect();
+        rollups +=
+            wearables::recompute_rollups_between(&mut tx, profile, Some(&metrics), Some(&ids), Some((first, last)))
+                .await?;
+    }
+    tx.commit().await?;
+    let removed: i64 = sources.values().map(|s| s.0).sum();
+    let sources: Vec<Value> = sources
+        .into_iter()
+        .map(|((profile, source), (n, first, last))| {
+            json!({ "profile_id": profile, "source_id": source, "samples": n,
+                    "first": first.to_rfc3339(), "last": last.to_rfc3339() })
+        })
+        .collect();
+    Ok(Some(json!({
+        "ok": true,
+        "state": "dropped",
+        "table": TABLE,
+        "from": since.to_rfc3339(),
+        "removed": removed,
+        "removed_set_aside": set_aside,
+        "sources": sources,
+        "rollups_written": rollups,
+        "note": "Set the clock of the device that pushed them right, then run `ownhealth partition` again",
+    })))
 }
 
 async fn locked(pool: &PgPool, opts: &Options, only_prepare: bool, clock: impl Fn() -> DateTime<Utc>) -> Result<Value> {

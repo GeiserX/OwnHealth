@@ -1249,11 +1249,26 @@ async fn analyze_during_preparation_counts_staged_rows_toward_the_threshold() ->
     Ok(())
 }
 
-/// The query deploy/README.md ("Large wearable histories") gives for a `needs_maintenance` report
-/// with no `cutoff`: the files that hold the samples dated on or after a date, largest first.
-const FUTURE_FILES: &str = "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) \
-     from wearable_sample s join profile p on p.id = s.profile_id left join document d on d.id = s.document_id \
-     where s.t >= $1 group by d.id, d.filename, p.display_name order by count(*) desc";
+/// The query deploy/README.md ("Large wearable histories") gives for a `needs_maintenance` report:
+/// the files that hold the samples dated on or after the date of the note, largest first. The date is
+/// a UTC day, whatever the zone of the session that runs it.
+const FUTURE_FILES: &str = "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) from wearable_sample s \
+     join profile p on p.id = s.profile_id left join document d on d.id = s.document_id \
+     where s.t >= timestamptz 'YYYY-MM-DD 00:00+00' group by d.id, d.filename, p.display_name order by count(*) desc";
+
+/// [`FUTURE_FILES`] as the README prints it, run on `table` (the README names `wearable_sample_ahead`
+/// when the report has a `cutoff`) with `day` (YYYY-MM-DD) in place.
+async fn future_files(pool: &PgPool, day: &str, table: &str) -> anyhow::Result<Vec<FutureFile>> {
+    let readme = include_str!("../../../../deploy/README.md");
+    assert!(
+        readme.contains(FUTURE_FILES),
+        "deploy/README.md gives the query: {FUTURE_FILES}"
+    );
+    let sql = FUTURE_FILES
+        .replace("YYYY-MM-DD", day)
+        .replace("from wearable_sample s", &format!("from {table} s"));
+    Ok(sqlx::query_as(AssertSqlSafe(sql)).fetch_all(pool).await?)
+}
 
 /// A row of [`FUTURE_FILES`]: document, file name, profile, samples, first and last sample time.
 type FutureFile = (Option<Uuid>, Option<String>, String, i64, DateTime<Utc>, DateTime<Utc>);
@@ -1319,8 +1334,7 @@ async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
         "nothing resolves it by itself: {again}"
     );
 
-    let since = DateTime::parse_from_rfc3339(&format!("{since}T00:00:00Z"))?.with_timezone(&Utc);
-    let files: Vec<FutureFile> = sqlx::query_as(FUTURE_FILES).bind(since).fetch_all(pool).await?;
+    let files = future_files(pool, &since, "wearable_sample").await?;
     assert_eq!(files.len(), 1, "{files:?}");
     assert_eq!((files[0].0, files[0].3), (Some(doc), 50001), "{files:?}");
     let mut tx = pool.begin().await?;
@@ -1332,27 +1346,75 @@ async fn an_oversized_future_group_leaves_the_table_unchanged() -> R {
     Ok(())
 }
 
-/// The delete deploy/README.md ("Large wearable histories") gives for rows of [`FUTURE_FILES`] with no
-/// file: samples a push wrote (Health Auto Export keeps no document), and the rollups of their sources
-/// from the day before the date on (a day bucket is a local day, up to a day before its UTC date).
-const PUSHED_DELETE: &str = "with gone as (delete from wearable_sample where document_id is null and t >= 'YYYY-MM-DD' \
-     returning source_id) delete from wearable_rollup where source_id in (select source_id from gone) \
-     and t >= date 'YYYY-MM-DD' - 1";
+/// A Health Auto Export inbox on Alex's profile and the wearable source its pushes write to.
+async fn push_inbox(c: &mut PgConnection, d: &Demo) -> anyhow::Result<i16> {
+    let inbox: Uuid = sqlx::query_scalar(
+        "insert into source (household_id, profile_id, kind, label) \
+         values ($1, $2, 'health_auto_export', 'Phone') returning id",
+    )
+    .bind(d.household)
+    .bind(d.alex)
+    .fetch_one(&mut *c)
+    .await?;
+    Ok(store::device_source(
+        c,
+        d.alex,
+        "health_auto_export",
+        None,
+        Some(&inbox.to_string()),
+        Some(inbox),
+    )
+    .await?)
+}
+
+/// A pool whose sessions run in a zone west of UTC, as an operator's psql there may (sqlx itself
+/// starts every session in UTC).
+async fn west_of_utc(d: &Demo) -> anyhow::Result<PgPool> {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                sqlx::query("set time zone 'America/New_York'").execute(&mut *c).await?;
+                Ok(())
+            })
+        })
+        .connect(&d.db.url)
+        .await?;
+    let zone: String = sqlx::query_scalar("show timezone").fetch_one(&pool).await?;
+    assert_eq!(zone, "America/New_York");
+    Ok(pool)
+}
+
+/// `ownhealth partition` with extra arguments.
+fn cli_args(d: &Demo, rows: &str, args: &[&str]) -> anyhow::Result<std::process::Output> {
+    Ok(Command::new(BIN)
+        .arg("partition")
+        .args(args)
+        .env("OWNHEALTH_DATABASE_URL", &d.db.url)
+        .env("OWNHEALTH_DATA_DIR", &d.settings.data_dir)
+        .env("OWNHEALTH_PARTITION_ROWS", rows)
+        .env_remove("OWNHEALTH_PARTITION_ROWS_FILE")
+        .env_remove("OWNHEALTH_DATABASE_URL_FILE")
+        .env_remove("OWNHEALTH_DB_PASSWORD")
+        .env_remove("OWNHEALTH_DB_PASSWORD_FILE")
+        .output()?)
+}
 
 /// The same group from a push, with no file to retract: the README query shows a row with no
-/// document, its delete removes those samples and their rollups only, and the next run converts.
+/// document, `ownhealth partition --drop-pushed-from` removes those samples, the rollups stay what a
+/// rebuild makes, and the next run converts.
 #[tokio::test]
 async fn an_oversized_future_group_from_a_push_has_a_way_out() -> R {
     let readme = include_str!("../../../../deploy/README.md");
     assert!(
-        readme.contains(PUSHED_DELETE),
-        "deploy/README.md gives the delete for pushed samples"
+        readme.contains("ownhealth partition --drop-pushed-from YYYY-MM-DD"),
+        "deploy/README.md gives the command for pushed samples"
     );
     let d = demo().await?;
     let pool = &d.db.pool;
     let now = Utc::now();
     let mut c = pool.acquire().await?;
-    let push = store::device_source(&mut c, d.alex, "health_auto_export", Some("Push Watch"), None, None).await?;
+    let push = push_inbox(&mut c, &d).await?;
     let kept: Vec<Sample> = (1..=3)
         .map(|h| hr(now - chrono::Duration::hours(h), 70.0, push))
         .collect();
@@ -1379,8 +1441,7 @@ async fn an_oversized_future_group_from_a_push_has_a_way_out() -> R {
         "the note names pushes as well as files: {note}"
     );
     let since = cutoff_for(now).format("%Y-%m-%d").to_string();
-    let from = DateTime::parse_from_rfc3339(&format!("{since}T00:00:00Z"))?.with_timezone(&Utc);
-    let files: Vec<FutureFile> = sqlx::query_as(FUTURE_FILES).bind(from).fetch_all(pool).await?;
+    let files = future_files(pool, &since, "wearable_sample").await?;
     assert_eq!(files.len(), 1, "{files:?}");
     assert_eq!(
         (files[0].0, files[0].1.as_deref(), files[0].3),
@@ -1388,9 +1449,10 @@ async fn an_oversized_future_group_from_a_push_has_a_way_out() -> R {
         "{files:?}"
     );
 
-    sqlx::query(AssertSqlSafe(PUSHED_DELETE.replace("YYYY-MM-DD", &since)))
-        .execute(pool)
-        .await?;
+    let out = cli_args(&d, "1000", &["--drop-pushed-from", &since])?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let dropped: Value = serde_json::from_slice(&out.stdout)?;
+    assert_eq!(dropped["removed"], 50001, "{dropped}");
     let left: i64 = sqlx::query_scalar("select count(*) from wearable_sample where source_id = $1")
         .bind(push)
         .fetch_one(pool)
@@ -1401,10 +1463,123 @@ async fn an_oversized_future_group_from_a_push_has_a_way_out() -> R {
     assert_eq!(
         rollups(pool).await?,
         after,
-        "the delete left the rollups a rebuild makes"
+        "the command left the rollups a rebuild makes"
     );
     let r = partition::run(pool, &opts(now)).await?;
     assert_eq!(state(&r), "converted", "{r}");
+    Ok(())
+}
+
+/// `--drop-pushed-from` takes only what inboxes pushed with no file, from the start of the UTC day
+/// on, whatever the session's zone, out of the samples set aside too. A file's sample (an inbox can
+/// bring files too) and the sample of a source no inbox feeds stay. The rollups of the inbox are rebuilt from what stays, so the day
+/// before keeps its own. A date that is not ahead of now is refused.
+#[tokio::test]
+async fn dropping_pushed_samples_takes_only_pushes_from_the_utc_day_and_keeps_the_day_before() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let now = Utc::now();
+    let since = cutoff_for(now);
+    let day = since.format("%Y-%m-%d").to_string();
+    let hours = chrono::Duration::hours;
+    let kept = since - hours(2); // the day before in UTC
+    let early = since + hours(2); // still the day before in New York
+    let mut c = pool.acquire().await?;
+    let push = push_inbox(&mut c, &d).await?;
+    let band = store::device_source(&mut c, d.alex, "apple_health", Some("Band"), None, None).await?;
+    drop(c);
+    let doc = document(&d, b"a watch export dated ahead", "application/x-sqlite3").await?;
+    let mut c = pool.acquire().await?;
+    let pushed = vec![
+        hr(kept, 70.0, push),
+        hr(early, 71.0, push),
+        hr(since + chrono::Duration::days(1), 72.0, push),
+        hr(since + hours(4), 73.0, band),
+    ];
+    store::write(&mut c, d.alex, None, pushed, Conflict::Refresh).await?;
+    store::write(
+        &mut c,
+        d.alex,
+        Some(doc),
+        vec![hr(since + hours(3), 74.0, push)],
+        Conflict::Refresh,
+    )
+    .await?;
+    drop(c);
+    // the demo seed writes rollups of its own: start from those a rebuild makes
+    rebuild_all(pool).await?;
+    let prepared = partition::prepare(pool, &opts(now)).await?;
+    assert_eq!(state(&prepared), "prepared", "{prepared}");
+    assert_eq!(prepared["held_aside"], 4, "{prepared}");
+
+    let west = west_of_utc(&d).await?;
+    let files = future_files(&west, &day, "wearable_sample_ahead").await?;
+    let counts: Vec<(Option<Uuid>, i64)> = files.iter().map(|f| (f.0, f.3)).collect();
+    assert_eq!(
+        counts,
+        vec![(None, 3), (Some(doc), 1)],
+        "the README query reads the UTC day"
+    );
+    let r = partition::drop_pushed(&west, &opts(now), since.date_naive()).await?;
+    west.close().await;
+
+    let left: Vec<(i16, DateTime<Utc>)> = sqlx::query_as(
+        "select source_id, t from wearable_sample where profile_id = $1 and t >= $2 \
+         union all select source_id, t from wearable_sample_ahead where profile_id = $1 and t >= $2 order by 2",
+    )
+    .bind(d.alex)
+    .bind(kept)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        left,
+        vec![(push, kept), (push, since + hours(3)), (band, since + hours(4))],
+        "only the pushes from the UTC day on are gone"
+    );
+    let inbox_rollups: Vec<(String, DateTime<Utc>, i32)> =
+        sqlx::query_as("select bucket, t, n from wearable_rollup where source_id = $1 order by bucket, t")
+            .bind(push)
+            .fetch_all(pool)
+            .await?;
+    assert_eq!(
+        inbox_rollups,
+        vec![
+            ("day".to_string(), since - chrono::Duration::days(1), 1),
+            ("day".to_string(), since, 1),
+            ("hour".to_string(), kept, 1),
+            ("hour".to_string(), since + hours(3), 1),
+        ],
+        "the day before keeps its rollups, and the file's sample its own"
+    );
+    let after = rollups(pool).await?;
+    rebuild_all(pool).await?;
+    assert_eq!(
+        rollups(pool).await?,
+        after,
+        "the command left the rollups a rebuild makes"
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["state"], "dropped", "{r}");
+    assert_eq!(r["from"], since.to_rfc3339(), "{r}");
+    assert_eq!(r["removed"], 2, "{r}");
+    assert_eq!(r["removed_set_aside"], 2, "{r}");
+
+    let converted = partition::run(pool, &opts(now)).await?;
+    assert_eq!(state(&converted), "converted", "{converted}");
+    let back: i64 = sqlx::query_scalar("select count(*) from wearable_sample where t >= $1")
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(back, 2, "the file's sample and the band's come back");
+
+    let refused = partition::drop_pushed(pool, &opts(now), now.date_naive()).await?;
+    assert_eq!(state(&refused), "refused", "{refused}");
+    assert_eq!(refused["ok"], false, "{refused}");
+    let still: i64 = sqlx::query_scalar("select count(*) from wearable_sample where source_id = $1")
+        .bind(push)
+        .fetch_one(pool)
+        .await?;
+    assert!(still >= 1, "a refused date deletes nothing");
     Ok(())
 }
 

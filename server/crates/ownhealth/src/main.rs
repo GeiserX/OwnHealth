@@ -81,7 +81,15 @@ enum Cmd {
     /// partition ahead of time. Run it as the database owner (the admin service), while the app runs
     /// if you like. You can stop it at any time and run it again to resume. It prints a JSON report and
     /// exits 1 when work is left for a later run. Needs OWNHEALTH_DATABASE_URL.
-    Partition,
+    Partition {
+        /// Instead of a run: delete the samples that inboxes pushed with no file (Health Auto Export,
+        /// Nightscout) dated on or after the start of this day in UTC, from the table and from the
+        /// samples set aside, and rebuild the rollups of those inboxes from the samples that stay.
+        /// Give the date a `needs_maintenance` note names, after setting the device clock right. It
+        /// refuses a date that is not ahead of now, and prints what it removed.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        drop_pushed_from: Option<ownhealth_ops::partition::NaiveDate>,
+    },
 }
 
 /// `host:port` of a database URL, for an error a person can act on (never the password).
@@ -145,7 +153,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
     ownhealth_core::access::set_env_majority(settings.age_of_majority);
     // Every profile's files are sealed under a key made from OWNHEALTH_SECRETS_KEY, so nothing that
     // reads or writes them starts without it. migrate, healthcheck and partition never open a blob.
-    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck | Cmd::Partition) {
+    if !matches!(cmd, Cmd::Migrate | Cmd::Healthcheck | Cmd::Partition { .. }) {
         // a restore needs the key the backup was made with: a new one never opens it
         if settings.secrets_key.is_none() && matches!(cmd, Cmd::Restore { .. } | Cmd::VerifyRestore { .. }) {
             anyhow::bail!(ownhealth_core::keys::MISSING_BACKUP_KEY);
@@ -218,7 +226,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             let sb = ownhealth_core::secrets::SecretBox::from_settings(&rt.settings)?.with_keys(rt.blobs.keyring());
             report(&ownhealth_ops::seal_legacy(&rt.pool, &rt.blobs, &sb, dry_run).await?)
         }
-        Cmd::Partition => {
+        Cmd::Partition { drop_pushed_from } => {
             let rt = Runtime::new(settings)?;
             let mut conn = rt.pool.acquire().await?;
             if !migrate::pending(&mut conn, &migrate::embedded()?).await?.is_empty() {
@@ -226,7 +234,10 @@ async fn run(cmd: Cmd) -> anyhow::Result<ExitCode> {
             }
             drop(conn);
             let opts = ownhealth_ops::partition::Options::new(rt.settings.partition_rows);
-            report(&ownhealth_ops::partition::run(&rt.pool, &opts).await?)
+            match drop_pushed_from {
+                Some(from) => report(&ownhealth_ops::partition::drop_pushed(&rt.pool, &opts, from).await?),
+                None => report(&ownhealth_ops::partition::run(&rt.pool, &opts).await?),
+            }
         }
         Cmd::Worker => {
             let rt = Runtime::new(settings)?;
