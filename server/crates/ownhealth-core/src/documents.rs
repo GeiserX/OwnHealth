@@ -5,6 +5,7 @@
 //! handles it.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::Path;
 
@@ -380,9 +381,43 @@ pub async fn lock_blob(conn: &mut PgConnection, profile: Uuid, sha256: &str, sha
 }
 
 /// The start of the status reason of a row retracted with its document (`POST
-/// /api/documents/{id}/retract`). An imaging study with that reason comes back when the document does
-/// ([`create_document`]).
+/// /api/documents/{id}/retract`). An imaging study with that reason comes back when a person who may
+/// change its profile uploads the document again ([`restore_studies`]).
 pub const RETRACTED_WITH_DOCUMENT: &str = "document retracted: ";
+
+/// The profile of each imaging study retracted with document `document_id` (its report), each study
+/// locked: the profiles [`restore_studies`] could bring a study back on, for the caller to check its
+/// grant on.
+pub async fn retracted_study_profiles(conn: &mut PgConnection, document_id: Uuid) -> Result<BTreeSet<Uuid>> {
+    let rows: Vec<Uuid> = sqlx::query_scalar(
+        "select profile_id from imaging_study where report_document_id = $1 and status = 'retracted' \
+         and starts_with(status_reason, $2) order by id for update",
+    )
+    .bind(document_id)
+    .bind(RETRACTED_WITH_DOCUMENT)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Brings back each imaging study on one of `profiles` that was retracted with document
+/// `document_id` (its report), with the status it had (`retracted_from`); its row and its pixels
+/// stayed. A study retracted for another reason, or on another profile, stays retracted. The number
+/// brought back.
+pub async fn restore_studies(conn: &mut PgConnection, document_id: Uuid, profiles: &[Uuid]) -> Result<u64> {
+    let done = sqlx::query(
+        "update imaging_study set status = coalesce(retracted_from, 'current'), status_reason = null, \
+         retracted_from = null \
+         where report_document_id = $1 and status = 'retracted' and starts_with(status_reason, $2) \
+         and profile_id = any($3)",
+    )
+    .bind(document_id)
+    .bind(RETRACTED_WITH_DOCUMENT)
+    .bind(profiles)
+    .execute(&mut *conn)
+    .await?;
+    Ok(done.rows_affected())
+}
 
 /// Insert a document or return the existing one for the same profile and bytes.
 pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Result<DocumentRef> {
@@ -406,18 +441,8 @@ pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Re
             .bind(id)
             .execute(&mut *conn)
             .await?;
-        // An imaging study retracted with this document as its report comes back with it, with the
-        // status it had (`retracted_from`); its row and its pixels stayed. A study retracted for
-        // another reason stays retracted.
-        sqlx::query(
-            "update imaging_study set status = coalesce(retracted_from, 'current'), status_reason = null, \
-             retracted_from = null \
-             where report_document_id = $1 and status = 'retracted' and starts_with(status_reason, $2)",
-        )
-        .bind(id)
-        .bind(RETRACTED_WITH_DOCUMENT)
-        .execute(&mut *conn)
-        .await?;
+        // An imaging study retracted with it stays retracted here: only a person who may change the
+        // study's profile brings it back ([`restore_studies`], from `POST /api/imports`).
     }
     let (id, created) = match row {
         Some((id, _)) => (id, false),

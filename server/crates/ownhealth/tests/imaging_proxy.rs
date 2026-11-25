@@ -1562,33 +1562,21 @@ async fn retracting_the_report_of_a_study_retracts_the_study() -> R {
 }
 
 /// Slice 43: a study retracted with its report comes back with it. Uploading the report's bytes
-/// again reactivates the document (core create_document), and the study it retracted is current again:
+/// again (`POST /api/imports`) reactivates the document, and the study it retracted is current again:
 /// the viewer opens it. Without this, only SQL could undo one wrong Retract.
 #[tokio::test]
 async fn a_retracted_report_uploaded_again_brings_its_study_back() -> R {
     let w = World::new().await?;
     let cookie = w.session("alex").await?;
-    let alex = w.fam.profile("alex");
-    let sha = "ce".repeat(32);
-    let upload =
-        || ownhealth_core::documents::NewDocument::upload(w.fam.household_id, Some(alex), &sha, "application/pdf", 10);
-    let report = {
-        let mut c = w.db.pool.acquire().await?;
-        ownhealth_core::documents::create_document(&mut c, &upload()).await?.id
-    };
+    let pdf = b"%PDF-1.4 synthetic report ce".to_vec();
+    let report = upload_report(&w, &cookie, "alex", &pdf).await?;
     sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
         .bind(report)
         .bind(ALEX_CT)
         .execute(&w.db.pool)
         .await?;
-    let req = Request::post(format!("/api/documents/{report}/retract"))
-        .header(header::HOST, "health.test")
-        .header(header::ORIGIN, BASE)
-        .header(header::COOKIE, format!("{}={cookie}", sessions::COOKIE))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({"reason": "wrong click"}).to_string()))?;
-    let (s, _, body) = w.call(req).await?;
-    assert_eq!(s, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let (s, v) = retract_document(&w, &cookie, report, "wrong click").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
     let (s, v) = w.open_with(Auth::Cookie(&cookie), "alex", ALEX_CT).await?;
     assert_eq!(
         (s, v["detail"]["code"].as_str()),
@@ -1605,11 +1593,12 @@ async fn a_retracted_report_uploaded_again_brings_its_study_back() -> R {
         .bind(CARMEN_MR)
         .execute(&w.db.pool)
         .await?;
-    let again = {
-        let mut c = w.db.pool.acquire().await?;
-        ownhealth_core::documents::create_document(&mut c, &upload()).await?
-    };
-    assert_eq!((again.id, again.reactivated), (report, true));
+    assert_eq!(upload_report(&w, &cookie, "alex", &pdf).await?, report);
+    let doc: String = sqlx::query_scalar("select status from document where id = $1")
+        .bind(report)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(doc, "active");
     let (status, reason): (String, Option<String>) =
         sqlx::query_as("select status, status_reason from imaging_study where study_instance_uid = $1")
             .bind(ALEX_CT)
@@ -1622,6 +1611,130 @@ async fn a_retracted_report_uploaded_again_brings_its_study_back() -> R {
         .fetch_one(&w.db.pool)
         .await?;
     assert_eq!(carmen, "retracted");
+    Ok(())
+}
+
+/// Slice 43: uploading a retracted report again brings back only the studies the uploader could have
+/// retracted (`write` and `read:records` on the study's profile); a study on a profile they cannot
+/// change stays retracted, and the upload still goes through. A report the inbox brought back (no
+/// person behind it) brings no study back.
+#[tokio::test]
+async fn a_report_uploaded_again_brings_back_only_the_studies_the_uploader_may_change() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    let pdf = b"%PDF-1.4 synthetic report d1".to_vec();
+    let report = upload_report(&w, &cookie, "alex", &pdf).await?;
+    // Alex is Carmen's caregiver: both studies go with the report
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = any($2)")
+        .bind(report)
+        .bind(vec![ALEX_CT, CARMEN_MR])
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = retract_document(&w, &cookie, report, "wrong click").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let status = |uid: &'static str| {
+        sqlx::query_scalar::<_, String>("select status from imaging_study where study_instance_uid = $1")
+            .bind(uid)
+            .fetch_one(&w.db.pool)
+    };
+    assert_eq!(status(ALEX_CT).await?, "retracted");
+    assert_eq!(status(CARMEN_MR).await?, "retracted");
+
+    // the inbox brings the same bytes back: the document returns, no study does
+    {
+        let mut c = w.db.pool.acquire().await?;
+        let sha: String = sqlx::query_scalar("select encode(blob_sha256, 'hex') from document where id = $1")
+            .bind(report)
+            .fetch_one(&mut *c)
+            .await?;
+        let again = ownhealth_core::documents::create_document(
+            &mut c,
+            &ownhealth_core::documents::NewDocument::upload(
+                w.fam.household_id,
+                Some(w.fam.profile("alex")),
+                &sha,
+                "application/pdf",
+                10,
+            ),
+        )
+        .await?;
+        assert_eq!((again.id, again.reactivated), (report, true));
+    }
+    assert_eq!(status(ALEX_CT).await?, "retracted");
+    assert_eq!(status(CARMEN_MR).await?, "retracted");
+
+    // Alex is now only a viewer of Carmen: his upload brings his own study back, not hers
+    sqlx::query("update profile_grant set role = 'viewer' where user_id = $1 and profile_id = $2")
+        .bind(w.fam.user("alex"))
+        .bind(w.fam.profile("carmen"))
+        .execute(&w.db.pool)
+        .await?;
+    assert_eq!(upload_report(&w, &cookie, "alex", &pdf).await?, report);
+    assert_eq!(status(ALEX_CT).await?, "current");
+    assert_eq!(status(CARMEN_MR).await?, "retracted");
+    // as her caregiver again, the next upload brings hers back too
+    sqlx::query("update profile_grant set role = 'caregiver' where user_id = $1 and profile_id = $2")
+        .bind(w.fam.user("alex"))
+        .bind(w.fam.profile("carmen"))
+        .execute(&w.db.pool)
+        .await?;
+    assert_eq!(upload_report(&w, &cookie, "alex", &pdf).await?, report);
+    assert_eq!(status(CARMEN_MR).await?, "current");
+    Ok(())
+}
+
+/// Slice 43: retracting a report retracts its studies, so every study's profile needs `write` and
+/// `read:records` on the caller's own grant, the report's own profile too: a lab report (which needs
+/// only `read:labs`) that is a study's report cannot retract the study without `read:records`.
+#[tokio::test]
+async fn retracting_a_lab_report_of_a_study_needs_read_records() -> R {
+    let w = World::new().await?;
+    let cookie = w.session("alex").await?;
+    // Alex is Carmen's caregiver, with labs but no records on his grant
+    sqlx::query(
+        "update profile_grant set categories = array['read:summary', 'read:labs'] where user_id = $1 and profile_id = $2",
+    )
+    .bind(w.fam.user("alex"))
+    .bind(w.fam.profile("carmen"))
+    .execute(&w.db.pool)
+    .await?;
+    let report = report_of(&w, "carmen", &"d2".repeat(32)).await?;
+    sqlx::query("update document set doc_type = 'lab_report' where id = $1")
+        .bind(report)
+        .execute(&w.db.pool)
+        .await?;
+    sqlx::query("update imaging_study set report_document_id = $1 where study_instance_uid = $2")
+        .bind(report)
+        .bind(CARMEN_MR)
+        .execute(&w.db.pool)
+        .await?;
+    let (s, v) = retract_document(&w, &cookie, report, "not her scan").await?;
+    assert_eq!(
+        (s, v["detail"]["code"].as_str()),
+        (StatusCode::FORBIDDEN, Some("forbidden")),
+        "{v}"
+    );
+    let carmen: String = sqlx::query_scalar("select status from imaging_study where study_instance_uid = $1")
+        .bind(CARMEN_MR)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_eq!(carmen, "current");
+    let doc: String = sqlx::query_scalar("select status from document where id = $1")
+        .bind(report)
+        .fetch_one(&w.db.pool)
+        .await?;
+    assert_ne!(doc, "retracted");
+    // with records on his grant, the same retraction goes through
+    sqlx::query(
+        "update profile_grant set categories = array['read:summary', 'read:labs', 'read:records'] \
+         where user_id = $1 and profile_id = $2",
+    )
+    .bind(w.fam.user("alex"))
+    .bind(w.fam.profile("carmen"))
+    .execute(&w.db.pool)
+    .await?;
+    let (s, v) = retract_document(&w, &cookie, report, "not her scan").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
     Ok(())
 }
 
@@ -1668,6 +1781,35 @@ async fn retract_document(
         .body(Body::from(json!({ "reason": reason }).to_string()))?;
     let (s, _, body) = w.call(req).await?;
     Ok((s, serde_json::from_slice(&body).unwrap_or(Value::Null)))
+}
+
+/// `POST /api/imports` of one PDF to `slug`'s profile as `cookie`'s user: its document id.
+async fn upload_report(w: &World, cookie: &str, slug: &str, pdf: &[u8]) -> anyhow::Result<Uuid> {
+    let boundary = "ownhealth-report-boundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"profile\"\r\n\r\n{slug}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"report.pdf\"\r\n\
+         Content-Type: application/pdf\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(pdf);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let req = Request::post("/api/imports")
+        .header(header::HOST, "health.test")
+        .header(header::ORIGIN, BASE)
+        .header(header::COOKIE, format!("{}={cookie}", sessions::COOKIE))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))?;
+    let (s, _, body) = w.call(req).await?;
+    let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    anyhow::ensure!(s == StatusCode::OK, "upload: {s} {v}");
+    let id = v["items"][0]["document_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no document in {v}"))?;
+    Ok(Uuid::parse_str(id)?)
 }
 
 /// A report document of `slug`'s profile with bytes `sha`.
@@ -1748,8 +1890,8 @@ async fn retracting_a_report_whose_study_is_on_a_profile_the_caller_cannot_chang
 async fn a_provisional_study_retracted_with_its_report_comes_back_provisional() -> R {
     let w = World::new().await?;
     let cookie = w.session("alex").await?;
-    let sha = "d0".repeat(32);
-    let report = report_of(&w, "alex", &sha).await?;
+    let pdf = b"%PDF-1.4 synthetic report d0".to_vec();
+    let report = upload_report(&w, &cookie, "alex", &pdf).await?;
     sqlx::query(
         "update imaging_study set report_document_id = $1, status = 'provisional' where study_instance_uid = $2",
     )
@@ -1765,7 +1907,7 @@ async fn a_provisional_study_retracted_with_its_report_comes_back_provisional() 
             .fetch_one(&w.db.pool)
     };
     assert_eq!(status().await?, "retracted");
-    assert_eq!(report_of(&w, "alex", &sha).await?, report);
+    assert_eq!(upload_report(&w, &cookie, "alex", &pdf).await?, report);
     assert_eq!(status().await?, "provisional");
     Ok(())
 }

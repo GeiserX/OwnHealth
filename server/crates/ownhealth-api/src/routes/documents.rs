@@ -700,21 +700,49 @@ async fn assign(
     ))
 }
 
-/// A retraction of a report retracts its studies too: one on another profile (the report was moved)
-/// needs the caller's `write` there, with `read:records` on the caller's own grant.
-async fn may_retract_study(conn: &mut PgConnection, principal: &Principal, profile_id: Uuid) -> Result<(), ApiError> {
-    let refused = || -> ApiError {
-        Error::access_denied(
-            "forbidden",
-            "A scan this report belongs to is on a profile you cannot change, so the report stays as it is.",
-        )
-        .into()
-    };
+/// Whether the caller may retract, or bring back, an imaging study of `profile_id`: `write` there,
+/// with `read:records` on the caller's own grant.
+async fn may_change_study(conn: &mut PgConnection, principal: &Principal, profile_id: Uuid) -> Result<bool, Error> {
     match effective_permission(&mut *conn, principal, profile_id).await {
-        Ok(p) if p.can("write") && p.own_scopes.contains("read:records") => Ok(()),
-        Ok(_) | Err(Error::AccessDenied { .. }) => Err(refused()),
-        Err(e) => Err(e.into()),
+        Ok(p) => Ok(p.can("write") && p.own_scopes.contains("read:records")),
+        Err(Error::AccessDenied { .. }) => Ok(false),
+        Err(e) => Err(e),
     }
+}
+
+/// A retraction of a report retracts its studies too, so each study's profile needs
+/// [`may_change_study`], the report's own one included: the document's own check asks only the scope
+/// of its type (`read:labs` for a lab report).
+async fn may_retract_study(conn: &mut PgConnection, principal: &Principal, profile_id: Uuid) -> Result<(), ApiError> {
+    if may_change_study(conn, principal, profile_id).await? {
+        return Ok(());
+    }
+    Err(Error::access_denied(
+        "forbidden",
+        "A scan this report belongs to is on a profile you cannot change, so the report stays as it is.",
+    )
+    .into())
+}
+
+/// After an upload brought document `document_id` back (core `create_document`): each imaging study
+/// retracted with it comes back where the caller may change its profile ([`may_change_study`], the
+/// grant its retraction needs). A study on another profile stays retracted, and the upload goes
+/// through.
+pub(crate) async fn restore_studies(
+    conn: &mut PgConnection,
+    principal: &Principal,
+    document_id: Uuid,
+) -> Result<(), Error> {
+    let mut allowed = Vec::new();
+    for profile_id in ownhealth_core::documents::retracted_study_profiles(&mut *conn, document_id).await? {
+        if may_change_study(&mut *conn, principal, profile_id).await? {
+            allowed.push(profile_id);
+        }
+    }
+    if !allowed.is_empty() {
+        ownhealth_core::documents::restore_studies(&mut *conn, document_id, &allowed).await?;
+    }
+    Ok(())
 }
 
 /// Soft delete with a reason: the document leaves the vault, its values are retracted, its open
@@ -752,9 +780,10 @@ async fn retract(
     }
     // A study whose report this is goes with it (slice 43): the person retracts a scan that is not
     // theirs through its report. Its row and its pixels in Orthanc stay; the viewer and the timeline
-    // leave it out. Uploading the report again brings the study back with the status it had (core
-    // create_document). A move of the report (assign) leaves its studies on their own profile, so each
-    // study's profile needs the caller's write there too; one that lacks it refuses the retraction.
+    // leave it out. Uploading the report again brings the study back with the status it had
+    // (`restore_studies`). A move of the report (assign) leaves its studies on their own profile, so
+    // each study's profile needs the caller's write and read:records there, the report's own profile
+    // too; one that lacks it refuses the retraction.
     let linked: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "select id, profile_id from imaging_study where report_document_id = $1 \
          and status in ('current', 'provisional') order by id for update",
@@ -764,9 +793,7 @@ async fn retract(
     .await?;
     let study_profiles: BTreeSet<Uuid> = linked.iter().map(|(_, p)| *p).collect();
     for profile_id in &study_profiles {
-        if *profile_id != doc.perm.profile.id {
-            may_retract_study(&mut tx, &principal, *profile_id).await?;
-        }
+        may_retract_study(&mut tx, &principal, *profile_id).await?;
     }
     let why = format!("{}{reason}", ownhealth_core::documents::RETRACTED_WITH_DOCUMENT);
     let mut out = ownhealth_ingest_structured::retract::retract_document_facts(&mut tx, document_id, &why).await?;
