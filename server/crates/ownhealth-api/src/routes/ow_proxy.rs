@@ -14,6 +14,8 @@ use ownhealth_devices::openwearables::PROVIDERS;
 use reqwest::{Client, Url, redirect::Policy};
 use serde::Serialize;
 
+use super::auth::R;
+use super::connectors::manager;
 use crate::extract::SessionCaller;
 
 const PREFIX: &str = "/ow";
@@ -175,12 +177,16 @@ struct SetupProvider {
     redirect_uri: String,
 }
 
-/// The signed-in guide reads the same provider policy the MCP readers and the poller use.
+/// The signed-in guide reads the same provider policy the MCP readers and the poller use. It is an
+/// operator guide, so only those who manage the connections (an owner or guardian) read it.
 pub fn setup_router() -> Router<Runtime> {
     Router::new().route("/wearables/setup", get(setup))
 }
 
-async fn setup(State(rt): State<Runtime>, _caller: SessionCaller) -> Json<Setup> {
+async fn setup(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) -> R<Json<Setup>> {
+    let mut conn = rt.pool.acquire().await?;
+    manager(&mut conn, &p).await?;
+    drop(conn);
     let origin = rt.settings.ow_public_url.as_deref().unwrap_or(&rt.settings.base_url);
     let api_base_url = format!("{}{PREFIX}", origin.trim_end_matches('/'));
     let providers = PROVIDERS
@@ -194,8 +200,8 @@ async fn setup(State(rt): State<Runtime>, _caller: SessionCaller) -> Json<Setup>
             })
         })
         .collect();
-    Json(Setup {
+    Ok(Json(Setup {
         api_base_url,
         providers,
-    })
+    }))
 }

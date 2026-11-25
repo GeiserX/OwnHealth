@@ -117,6 +117,12 @@ export function endedVendors(r: Pick<ConnectionRow, 'kind' | 'last_run_problem'>
 export const cardTitle = (r: Pick<ConnectionRow, 'kind' | 'label'>, t: (k: string) => string): string =>
 	r.kind === 'brands' ? t('con_t_brands') : r.label;
 
+/** The person owns or guards a profile, so the Connections screen offers the wearables setup guide.
+ * GET /wearables/setup checks it again (connectors.rs manager); a guardian whose profile was claimed
+ * still sees the button and gets the refusal there. */
+export const mayManageConnections = (profiles: readonly { role: string }[] | undefined): boolean =>
+	(profiles ?? []).some((p) => p.role === 'owner' || p.role === 'guardian');
+
 /** The rows the screen lists: connections (not inboxes) of profiles the person manages. */
 export function shownConnections<T extends ConnectionRow>(rows: T[]): T[] {
 	return rows.filter((r) => (CONNECTOR_KINDS as readonly string[]).includes(r.kind) && r.can_manage === true);

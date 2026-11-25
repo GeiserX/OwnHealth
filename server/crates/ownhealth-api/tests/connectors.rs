@@ -911,3 +911,47 @@ async fn no_log_line_carries_a_token_on_the_happy_or_the_failing_paths() -> R {
     t.assert_no_secret("the log", &text);
     Ok(())
 }
+
+#[tokio::test]
+async fn only_an_owner_or_guardian_reads_the_wearables_setup_guide() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex.get("/api/wearables/setup").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["api_base_url"], "https://testserver/ow");
+    let whoop = r.json["providers"]
+        .as_array()
+        .and_then(|list| list.iter().find(|p| p["id"] == "whoop"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        whoop["redirect_uri"],
+        "https://testserver/ow/api/v1/oauth/whoop/callback"
+    );
+    // Pat views Alex's profile and manages none: the operator guide is not for Pat
+    let pat = {
+        let h = household(&env, env.profile("alex")).await?;
+        let mut c = env.pool().acquire().await?;
+        let pat = ownhealth_core::access::create_user(&mut c, h, "Pat Rivera", "en", None).await?;
+        ownhealth_core::access::set_grant(
+            &mut c,
+            pat,
+            env.profile("alex"),
+            "viewer",
+            None,
+            Some(env.user("alex")),
+            None,
+        )
+        .await?;
+        pat
+    };
+    let mut pat = env.as_user(pat).await?;
+    let r = pat.get("/api/wearables/setup").await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.json);
+    assert!(r.json.get("api_base_url").is_none() && r.json.get("providers").is_none());
+    assert_eq!(
+        env.anon().get("/api/wearables/setup").await?.status,
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}

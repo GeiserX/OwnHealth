@@ -83,7 +83,12 @@
 	</div>
 {/snippet}
 
-{#if !setup}
+{#if !setup && data.forbidden}
+	<PageHeader title={t('ow_setup_index')}>
+		{#snippet right()}<a class="btn" href="/connections">{t('con_nav')}</a>{/snippet}
+	</PageHeader>
+	<p class="p2err" role="alert">{t('ow_setup_forbidden')}</p>
+{:else if !setup}
 	<PageHeader title={t('ow_setup_index')} />
 	<p class="p2err" role="alert">{t('ow_setup_load_failed')}</p>
 	<button class="btn" onclick={() => invalidateAll()}>{t('ow_setup_retry')}</button>
