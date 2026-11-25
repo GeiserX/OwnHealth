@@ -333,6 +333,9 @@ networks:
     ipam:
       config:
         - subnet: ${OWNHEALTH_CADDY_SUBNET:-172.31.253.0/28}
+          # Docker hands out addresses (and picks its gateway) from this range only, so Caddy's fixed
+          # address, outside it, is always free: the app starts first and could take it otherwise.
+          ip_range: ${OWNHEALTH_CADDY_RANGE:-172.31.253.8/29}
   ow-api:
     internal: true # the OwnHealth poller and the Open Wearables API
   wearables:
