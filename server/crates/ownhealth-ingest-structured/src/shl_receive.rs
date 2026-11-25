@@ -384,7 +384,7 @@ fn net_refusal(e: NetError) -> Refusal {
         NetError::Resolve(_) => Refusal::Fetch("dns".into()),
         NetError::Timeout(_) => Refusal::Fetch("timeout".into()),
         NetError::TooLarge(_) => Refusal::Fetch("too_large".into()),
-        NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Write(_) => {
+        NetError::BadUrl | NetError::NotHttps | NetError::Http { .. } | NetError::Connect(_) | NetError::Write(_) => {
             Refusal::Fetch("connect".into())
         }
     }

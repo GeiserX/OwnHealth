@@ -16,6 +16,8 @@ const port = Number(process.env.OWNHEALTH_E2E_PORT ?? 8190);
 const viewerPort = Number(process.env.OWNHEALTH_E2E_VIEWER_PORT ?? port + 1);
 const baseURL = `http://127.0.0.1:${port}`;
 const fakePort = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? port + 1000);
+// an empty key counts as unset, as in serve.sh, so the server and the tests share this one
+process.env.OWNHEALTH_E2E_SECRETS_KEY ||= btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 const orthancPort = Number(process.env.OWNHEALTH_E2E_ORTHANC_PORT ?? port + 2000);
 process.env.OWNHEALTH_E2E_PORT = String(port);
 process.env.OWNHEALTH_E2E_FAKE_PORT = String(fakePort);

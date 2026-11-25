@@ -6,7 +6,17 @@
 //
 // The first grant lasts 3 days, so the Connections screen shows a sign-in that ends soon; every later
 // grant lasts 90 days. GET /__book says what the fake saw.
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+
+const cms = (kind) => JSON.parse(readFileSync(new URL(`../../fixtures/bluebutton/cms-${kind}.json`, import.meta.url)));
+const cmsPatient = { ...cms('patient'), name: [{ family: 'Rivera', given: ['Alex'] }], birthDate: '1979-05-14' };
+const cmsRows = { Patient: cmsPatient, Coverage: cms('coverage'), ExplanationOfBenefit: cms('eob') };
+const cmsScope = 'launch/patient patient/Patient.rs patient/Coverage.rs patient/ExplanationOfBenefit.rs';
+const cmsCodes = new Map();
+const cmsAccess = new Set();
+
 
 const port = Number(process.env.OWNHEALTH_E2E_FAKE_PORT ?? 9190);
 const base = `http://127.0.0.1:${port}`;
@@ -38,6 +48,47 @@ createServer(async (req, res) => {
 			token_endpoint_auth_methods_supported: ['client_secret_basic', 'client_secret_post'],
 			capabilities: ['launch-standalone', 'client-confidential-symmetric', 'permission-offline', 'permission-v2']
 		});
+	}
+	if (req.method === 'GET' && url.pathname === '/v3/o/authorize/') {
+		const q = url.searchParams;
+		const state = q.get('state') ?? '';
+		const challenge = q.get('code_challenge');
+		if (state.length < 16 || !challenge || q.get('code_challenge_method') !== 'S256' || q.get('scope') !== cmsScope) {
+			return json(res, 400, { error: 'invalid_request' });
+		}
+		const code = randomUUID();
+		cmsCodes.set(code, challenge);
+		const back = new URL(q.get('redirect_uri') ?? '');
+		back.searchParams.set('state', state);
+		back.searchParams.set('code', code);
+		res.writeHead(302, { location: back.toString() });
+		return res.end();
+	}
+	if (req.method === 'POST' && url.pathname === '/v3/o/token/') {
+		const f = await form(req);
+		const code = f.get('code');
+		const challenge = createHash('sha256').update(f.get('code_verifier') ?? '').digest('base64url');
+		const basic = (req.headers.authorization ?? '').split(' ');
+		if (basic[0] !== 'Basic' || !Buffer.from(basic[1] ?? '', 'base64').toString().startsWith('e2e-medicare:')
+			|| f.get('grant_type') !== 'authorization_code' || cmsCodes.get(code) !== challenge) {
+			return json(res, 400, { error: 'invalid_grant' });
+		}
+		cmsCodes.delete(code);
+		const access = randomUUID();
+		cmsAccess.add(access);
+		return json(res, 200, { access_token: access, refresh_token: randomUUID(), token_type: 'Bearer',
+			expires_in: 3600, scope: cmsScope, patient: cmsPatient.id });
+	}
+	const fhir = /^\/v3\/fhir\/(Patient|Coverage|ExplanationOfBenefit)\/$/.exec(url.pathname);
+	if (req.method === 'GET' && fhir) {
+		if (!cmsAccess.has((req.headers.authorization ?? '').replace(/^Bearer /, ''))) {
+			return json(res, 401, { error: 'invalid_token' });
+		}
+		const q = url.searchParams;
+		const bound = fhir[1] === 'Patient' ? q.get('_id') === cmsPatient.id
+			: fhir[1] === 'Coverage' ? q.get('beneficiary') === `Patient/${cmsPatient.id}` : q.get('patient') === cmsPatient.id;
+		if (!bound || q.get('_count') !== '50' || q.get('_offset') !== '0') return json(res, 400, { error: 'invalid_query' });
+		return json(res, 200, { resourceType: 'Bundle', type: 'searchset', total: 1, entry: [{ resource: cmsRows[fhir[1]] }] });
 	}
 	if (req.method === 'GET' && url.pathname === '/authorize') {
 		const back = new URL(url.searchParams.get('redirect_uri') ?? '');

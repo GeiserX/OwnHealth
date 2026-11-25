@@ -145,6 +145,7 @@ const routes = read('../../server/crates/ownhealth-api/src/routes/connectors.rs'
 const core = read('../../server/crates/ownhealth-core/src/connector_oauth.rs');
 const codes = new Set<string>();
 for (const m of routes.matchAll(/back\(&state, "([a-z_]+)"\)/g)) codes.add(m[1]);
+for (const m of /fn exchange_refusal[\s\S]*?\n\}/.exec(routes)?.[0].matchAll(/"([a-z_]+)"/g) ?? []) codes.add(m[1]);
 for (const m of routes.matchAll(/ApiError::new\(\s*StatusCode::\w+,\s*"([a-z_]+)"/g)) codes.add(m[1]);
 for (const m of core.matchAll(/refused\(\s*"([a-z_]+)"/g)) codes.add(m[1]);
 
@@ -239,6 +240,25 @@ test('every stop and problem code of the SMART poller reads in es and en', () =>
 	}
 	const missing = [...runCodes].filter((c) => {
 		const text = `${c}: Observation: the server answered 503`;
+		const en = runWords(text, hasKey, sayIn('en'));
+		const es = runWords(text, hasKey, sayIn('es'));
+		return !en || !es || en === es || /\{\w+\}/.test(en + es);
+	});
+	assert.deepEqual(missing, []);
+});
+
+const bluebutton = read('../../server/crates/ownhealth-ingest-structured/src/bluebutton.rs');
+const blueCodes = new Set<string>();
+for (const m of bluebutton.matchAll(/=> \(\s*"([a-z_]+)"/g)) blueCodes.add(m[1]);
+for (const m of bluebutton.matchAll(/"([a-z][a-z_]+): /g)) blueCodes.add(m[1]);
+
+test('every stop and problem code of the Blue Button poller reads in es and en', () => {
+	// the gate can fail: problem codes and stop codes are both found
+	for (const c of ['bluebutton_not_granted', 'patient_reference', 'repeated_page', 'bluebutton_no_answer', 'token_unreachable', 'profile_changed']) {
+		assert.ok(blueCodes.has(c), `the scan missed ${c}`);
+	}
+	const missing = [...blueCodes].filter((c) => {
+		const text = `${c}: ExplanationOfBenefit: the server answered 503`;
 		const en = runWords(text, hasKey, sayIn('en'));
 		const es = runWords(text, hasKey, sayIn('es'));
 		return !en || !es || en === es || /\{\w+\}/.test(en + es);

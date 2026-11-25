@@ -480,6 +480,106 @@ pub async fn removal_lock(conn: &mut sqlx::PgConnection, wait: bool) -> Result<b
         .map_err(lock_error)
 }
 
+/// Every column that names a blob, by table, with the profile a row's file belongs to (as text, null
+/// when no one profile owns the row) and which of the table's rows still read the file. The same
+/// columns as `ownhealth_ops::seal::COLUMNS` and `ownhealth_auth::household::BLOB_COLUMNS` (ownhealth-ops
+/// `tests/seal_legacy.rs` compares them, and the auth crate compares its list with the schema), so the
+/// removal check of [`remove_unheld_upload`], built from this list, counts every row a backup counts.
+pub const HOLDERS: &[(&str, &[&str], &str, &str)] = &[
+    ("document", &["blob_sha256"], "profile_id::text", "true"),
+    (
+        "document_page",
+        &["words_blob", "image_blob"],
+        "(select d.profile_id::text from document d where d.id = document_id)",
+        "true",
+    ),
+    (
+        "genome_dataset",
+        &[
+            "facts_blob",
+            "vcf_blob",
+            "tbi_blob",
+            "coverage_blob",
+            "gvcf_blob",
+            "gvcf_tbi_blob",
+            "sites_blob",
+            "sites_tbi_blob",
+        ],
+        "profile_id::text",
+        "true",
+    ),
+    ("imaging_import", &["zip_blob"], "profile_id::text", "true"),
+    (
+        "ocr_run",
+        &["words_blob"],
+        "(select d.profile_id::text from document d where d.id = document_id)",
+        "true",
+    ),
+    // an item whose importer released its raw bytes no longer reads them
+    (
+        "source_item",
+        &["blob_sha256"],
+        "profile_id::text",
+        "raw_released_at is null",
+    ),
+    ("quarantine_item", &["raw_blob"], "null::text", "true"),
+];
+
+/// The removal check of [`remove_unheld_upload`]: whether a row of profile `$3` names the bytes `$1`
+/// (hex `$2`), and whether any row or live job does.
+fn holders_query() -> &'static str {
+    static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SQL.get_or_init(|| {
+        let mut rows: Vec<String> = HOLDERS
+            .iter()
+            .map(|(table, cols, owner, live)| {
+                let names: Vec<String> = cols.iter().map(|c| format!("{c} = $1")).collect();
+                format!(
+                    "select {owner} as owner from {table} where ({}) and ({live})",
+                    names.join(" or ")
+                )
+            })
+            .collect();
+        rows.push(
+            "select payload->>'profile_id' from job where state in ('queued', 'running') \
+             and payload->>'blob_sha256' = $2 and payload->'upload_released' is null"
+                .into(),
+        );
+        format!(
+            "with holders as ({}) select coalesce(bool_or(owner = $3), false), count(*) > 0 from holders",
+            rows.join(" union all ")
+        )
+    })
+}
+
+/// Drop an upload's bytes after the importer or inbox has released its reference. The caller
+/// supplies a connection in an open transaction. Other consumers and backup snapshots can still
+/// hold the file, so check them before removing either copy: a row of any blob column in [`HOLDERS`]
+/// or a live job. A row of `profile` keeps both copies; a row of another profile, or of none, keeps the
+/// plain copy only.
+pub async fn remove_unheld_upload(
+    conn: &mut sqlx::PgConnection,
+    blobs: &BlobStore,
+    profile: Uuid,
+    sha: &str,
+) -> crate::Result<()> {
+    removal_lock(conn, true).await?;
+    let hash = sha256_hex_to_bytes(sha)?;
+    let (mine, held): (bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(holders_query()))
+        .bind(hash)
+        .bind(sha)
+        .bind(profile.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+    let owner = BlobOwner::Profile(profile);
+    if !held {
+        blobs.delete(owner, sha)?;
+    } else if !mine {
+        blobs.drop_sealed(owner, sha)?;
+    }
+    Ok(())
+}
+
 // Run after the sealed lookup and before the plain lookup, in this test thread only.
 #[cfg(test)]
 thread_local! {

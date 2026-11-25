@@ -824,6 +824,14 @@ fn activity(read: &Read) -> Result<(Vec<Sample>, BTreeMap<&'static str, i64>)> {
     Ok((all, reasons))
 }
 
+/// Project a FIT activity for a bulk export without retaining its binary or device metadata.
+pub(crate) fn archive_activity(bytes: &[u8]) -> Result<(Vec<Sample>, bool)> {
+    let read = read_fit(bytes)?;
+    let (_, developer_positions) = strip(bytes, &read.position_fields)?;
+    let (samples, _) = samples(&read, Utc::now() + Duration::days(1));
+    Ok((samples, read.positions || developer_positions))
+}
+
 /// Import a stored FIT document into its profile again (payload `{document_id}`). Returns the summary
 /// and the details the upload panel shows (`fit` in the job result): counts per metric, the device,
 /// and whether positions were left out.
@@ -1047,7 +1055,7 @@ async fn import_upload(ctx: &JobContext, job: &Job, channel: &str, source_id: Op
 /// bytes: this profile's copy goes once no row of the profile holds it, and the plain copy once no
 /// row holds it at all (as `hae::prune_pushes`). The check and the delete wait while a backup copies
 /// the files (`blobs::removal_lock`): the backup's snapshot may still show a row that held the bytes.
-async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i64) {
+pub(crate) async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i64) {
     let done: Result<()> = async {
         let mut conn = ctx.pool.acquire().await?;
         sqlx::query("update job set payload = payload || '{\"upload_released\": true}'::jsonb where id = $1")
@@ -1055,30 +1063,7 @@ async fn forget_upload(ctx: &JobContext, profile_id: Uuid, sha: &str, job_id: i6
             .execute(&mut *conn)
             .await?;
         let mut tx = sqlx::Connection::begin(&mut *conn).await?;
-        ownhealth_core::blobs::removal_lock(&mut tx, true).await?;
-        let holders = "from job where id <> $2 and state in ('queued', 'running') \
-                       and payload->>'blob_sha256' = $1 and payload->'upload_released' is null";
-        let (mine, held): (bool, bool) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "select exists (select 1 from document where blob_sha256 = decode($1, 'hex') and profile_id = $3) \
-             or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex') and profile_id = $3) \
-             or exists (select 1 {holders} and payload->>'profile_id' = $4), \
-             exists (select 1 from document where blob_sha256 = decode($1, 'hex')) \
-             or exists (select 1 from source_item where blob_sha256 = decode($1, 'hex')) \
-             or exists (select 1 from quarantine_item where raw_blob = decode($1, 'hex')) \
-             or exists (select 1 {holders})"
-        )))
-        .bind(sha)
-        .bind(job_id)
-        .bind(profile_id)
-        .bind(profile_id.to_string())
-        .fetch_one(&mut *tx)
-        .await?;
-        let owner = BlobOwner::Profile(profile_id);
-        if !held {
-            ctx.blobs.delete(owner, sha)?;
-        } else if !mine {
-            ctx.blobs.drop_sealed(owner, sha)?;
-        }
+        ownhealth_core::blobs::remove_unheld_upload(&mut tx, &ctx.blobs, profile_id, sha).await?;
         tx.commit().await?;
         Ok(())
     }

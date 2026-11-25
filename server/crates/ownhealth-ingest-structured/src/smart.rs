@@ -244,7 +244,7 @@ mod words {
     /// The words a failed request leaves: the host at most, never the URL.
     pub fn net_text(e: &NetError) -> String {
         match e {
-            NetError::Http { host, .. } => format!("the request to {host} failed"),
+            NetError::Http { host, .. } | NetError::Connect(host) => format!("the request to {host} failed"),
             other => other.to_string(),
         }
     }

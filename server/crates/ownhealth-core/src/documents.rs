@@ -6,7 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -19,7 +19,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | zip_directory_limit | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -29,6 +29,7 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
         "pdf" => "import.pdf",
         "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
+        "garmin_zip" => "import.garmin_zip",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
         "gadgetbridge_db" => "import.gadgetbridge",
@@ -44,7 +45,7 @@ pub fn mime(kind: &str) -> Option<&'static str> {
         "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
-        "apple_health_zip" => "application/zip",
+        "apple_health_zip" | "garmin_zip" => "application/zip",
         "genome_facts" => "application/json",
         "vcf" => "application/gzip",
         "tbi" => "application/octet-stream",
@@ -54,10 +55,80 @@ pub fn mime(kind: &str) -> Option<&'static str> {
     })
 }
 
-fn zip_has_export_xml(path: &Path) -> Option<bool> {
-    let file = std::fs::File::open(path).ok()?;
-    let archive = zip::ZipArchive::new(file).ok()?;
-    Some(archive.file_names().any(|n| n.is_ok_and(|n| n.ends_with("export.xml"))))
+/// The mime of the document a Garmin export's import stores: its readings as JSON lines, not the zip.
+pub const GARMIN_READINGS_MIME: &str = "application/x-ndjson";
+
+/// The mime of the document an upload kind's import stores: the upload's own, except a Garmin export,
+/// whose document holds the readings it read from the zip.
+pub fn stored_mime(kind: &str) -> Option<&'static str> {
+    if kind == "garmin_zip" {
+        return Some(GARMIN_READINGS_MIME);
+    }
+    mime(kind)
+}
+
+/// Recognized outer members of a Garmin account export. The leading directories vary between
+/// exports and can also change when the person repacks the archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GarminMember {
+    Daily,
+    Sleep,
+    Weight,
+    BloodPressure,
+    Hrv,
+    FitZip,
+}
+
+impl GarminMember {
+    pub fn from_name(name: &str) -> Option<Self> {
+        let base = name.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+        let (stem, ext) = base.rsplit_once('.')?;
+        let named = |tag: &str| {
+            stem == tag
+                || stem.strip_prefix(tag).is_some_and(|rest| rest.starts_with('_'))
+                || stem.strip_suffix(tag).is_some_and(|rest| rest.ends_with('_'))
+        };
+        Some(match ext {
+            "zip" if named("uploadedfiles") => Self::FitZip,
+            "json" if named("udsfile") => Self::Daily,
+            "json" if named("sleepdata") => Self::Sleep,
+            "json" if named("userbiometrics") => Self::Weight,
+            "json" if named("bloodpressurefile") => Self::BloodPressure,
+            "json" if named("healthstatusdata") => Self::Hrv,
+            _ => return None,
+        })
+    }
+}
+
+/// Serialize import, replay, retraction and move for a profile's exports of this kind.
+pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str) -> Result<()> {
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("ownhealth:exports:{flag}:{profile_id}"))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// A zip whose member list cannot be read (a download cut short) is `broken_zip`, so the refusal can say so.
+fn classify_zip(reader: impl Read + Seek) -> UploadKind {
+    let archive = match crate::zip_directory::open(reader) {
+        Ok(archive) => archive,
+        Err(zip::result::ZipError::UnsupportedArchive(crate::zip_directory::DIRECTORY_LIMIT)) => {
+            return "zip_directory_limit";
+        }
+        Err(_) => return "broken_zip",
+    };
+    let mut kind = "unknown";
+    for name in archive.file_names().flatten() {
+        // Preserve Apple Health's existing marker and precedence.
+        if name.ends_with("export.xml") {
+            return "apple_health_zip";
+        }
+        if GarminMember::from_name(&name).is_some() {
+            kind = "garmin_zip";
+        }
+    }
+    kind
 }
 
 /// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.
@@ -78,6 +149,14 @@ fn gzip_holds_fit(head: &[u8]) -> bool {
 
 /// Classify an upload from its name and first bytes (and, for zips, its member list).
 pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKind {
+    sniff_with_zip(filename, head, || {
+        blob_path
+            .and_then(|path| std::fs::File::open(path).ok())
+            .map_or("unknown", classify_zip)
+    })
+}
+
+fn sniff_with_zip(filename: &str, head: &[u8], zip_kind: impl FnOnce() -> UploadKind) -> UploadKind {
     let name = filename.to_lowercase();
     if head.starts_with(b"%PDF-") {
         return "pdf";
@@ -93,11 +172,7 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
         return "gadgetbridge_db";
     }
     if is_zip(head) {
-        // Truncated or corrupt: refused like any unknown file.
-        return match blob_path.and_then(zip_has_export_xml) {
-            Some(true) => "apple_health_zip",
-            _ => "unknown",
-        };
+        return zip_kind();
     }
     if name.ends_with(".tbi") {
         return "tbi";
@@ -543,13 +618,13 @@ pub async fn dispatch_upload_in_zone(
             f.sha256.clone(),
             f.filename.clone(),
         );
-        // off the runtime: a plain file of an older install is hashed once when it opens, and a zip is
-        // decrypted whole into a local copy
+        // Off the runtime: a plain file of an older install is hashed once when it opens.
+        // ZIP classification only needs the central directory, even for a sealed blob.
         let kind = tokio::task::spawn_blocking(move || -> Result<UploadKind> {
             let mut head = Vec::with_capacity(4096);
-            store.open_seek(owner, &sha)?.take(4096).read_to_end(&mut head)?;
-            let copy = is_zip(&head).then(|| store.with_local_copy(owner, &sha)).transpose()?;
-            Ok(sniff(&name, &head, copy.as_ref().map(|c| c.path())))
+            let mut reader = store.open_seek(owner, &sha)?;
+            (&mut reader).take(4096).read_to_end(&mut head)?;
+            Ok(sniff_with_zip(&name, &head, || classify_zip(reader)))
         })
         .await
         .map_err(std::io::Error::other)??;
@@ -566,6 +641,18 @@ pub async fn dispatch_upload_in_zone(
             "unknown" => {
                 return Err(Error::Upload(format!(
                     "{}: not a PDF, image, Apple Health export, FHIR bundle or genome facts file",
+                    f.filename
+                )));
+            }
+            "zip_directory_limit" => {
+                return Err(Error::Upload(format!(
+                    "{}: this ZIP holds too many files to import",
+                    f.filename
+                )));
+            }
+            "broken_zip" => {
+                return Err(Error::Upload(format!(
+                    "{}: this ZIP could not be read; it may be incomplete",
                     f.filename
                 )));
             }
@@ -833,6 +920,25 @@ pub async fn rekey_document(
 mod tests {
     use super::*;
 
+    /// An end record alone whose central directory is one byte over the upload budget.
+    fn end_record_over_the_directory_budget() -> Vec<u8> {
+        let mut end = b"PK\x05\x06".to_vec();
+        for field in [0u16, 0, 1, 1] {
+            end.extend(field.to_le_bytes());
+        }
+        let size = u32::try_from(crate::zip_directory::MAX_DIRECTORY_BYTES + 1).expect("budget fits a ZIP32 size");
+        end.extend(size.to_le_bytes());
+        end.extend(0u32.to_le_bytes());
+        end.extend(0u16.to_le_bytes());
+        end
+    }
+
+    #[test]
+    fn upload_sniff_refuses_a_zip_directory_over_the_budget() {
+        let zip = std::io::Cursor::new(end_record_over_the_directory_budget());
+        assert_eq!(classify_zip(zip), "zip_directory_limit");
+    }
+
     #[test]
     fn upload_sniff_keeps_the_blocking_task_error_typed() {
         let function = include_str!("documents.rs")
@@ -961,7 +1067,7 @@ mod tests {
         assert_eq!(sniff("export.zip", b"PK\x03\x04", Some(&path)), "apple_health_zip");
         let bad = dir.path().join("bad.zip");
         std::fs::write(&bad, b"PK\x03\x04truncated")?;
-        assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "unknown");
+        assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "broken_zip");
         Ok(())
     }
 

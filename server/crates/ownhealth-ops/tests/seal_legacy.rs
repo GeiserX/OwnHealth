@@ -712,3 +712,19 @@ fn the_job_reads_every_blob_column() {
         .collect();
     assert_eq!(ours, all);
 }
+
+/// The removal check of an upload (`ownhealth_core::blobs::HOLDERS`) counts every blob column the job
+/// counts, which is every blob column a backup lists: a column it leaves out would let the removal of
+/// an upload delete bytes that row still names.
+#[test]
+fn the_upload_removal_check_counts_every_blob_column() {
+    let ours: BTreeSet<(String, String)> = ownhealth_ops::seal::COLUMNS
+        .iter()
+        .flat_map(|(t, cols)| cols.iter().map(|c| ((*t).to_string(), (*c).to_string())))
+        .collect();
+    let removal: BTreeSet<(String, String)> = ownhealth_core::blobs::HOLDERS
+        .iter()
+        .flat_map(|(t, cols, _, _)| cols.iter().map(|c| ((*t).to_string(), (*c).to_string())))
+        .collect();
+    assert_eq!(removal, ours);
+}
