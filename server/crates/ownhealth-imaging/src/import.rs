@@ -278,20 +278,22 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
 /// Only repeated SOPs require a full read during the scan. Verify the ZIP CRC and compare hashes
 /// of the original bytes before any study is sent.
 fn entry_hash(zip: &mut zip::ZipArchive<BlobReader>, index: usize) -> Result<[u8; 32], JobError> {
-    let unreadable = || JobError::permanent("a duplicate DICOM entry could not be read");
-    let entry = zip.by_index(index).map_err(|error| match error {
-        zip::result::ZipError::Io(e) => JobError::retry(format!("a duplicate DICOM entry could not be read: {e}")),
-        _ => unreadable(),
-    })?;
+    let read_error = |error: ZipError| {
+        let message = format!("a duplicate DICOM entry could not be read: {error}");
+        if entry_io_failed(&error) {
+            JobError::retry(message)
+        } else {
+            JobError::permanent(message)
+        }
+    };
+    let entry = zip.by_index(index).map_err(read_error)?;
     let expected = entry.size();
     let mut entry = entry.take(MAX_FILE_BYTES + 1);
     let mut digest = Sha256::new();
     let mut count = 0;
     let mut buf = [0; FILE_CHUNK];
     loop {
-        let n = entry
-            .read(&mut buf)
-            .map_err(|e| JobError::retry(format!("a duplicate DICOM entry could not be read: {e}")))?;
+        let n = entry.read(&mut buf).map_err(|e| read_error(e.into()))?;
         if n == 0 {
             break;
         }
@@ -299,7 +301,7 @@ fn entry_hash(zip: &mut zip::ZipArchive<BlobReader>, index: usize) -> Result<[u8
         digest.update(&buf[..n]);
     }
     if count != expected || count > MAX_FILE_BYTES {
-        return Err(unreadable());
+        return Err(JobError::permanent("a duplicate DICOM entry could not be read"));
     }
     Ok(digest.finalize().into())
 }

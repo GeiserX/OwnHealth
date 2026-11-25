@@ -73,9 +73,12 @@ async fn env() -> anyhow::Result<Env> {
 impl Env {
     /// Stores the disc as `POST /api/imaging/import` does and queues its import.
     async fn upload(&self, slug: &str, files: &[(String, Vec<u8>)]) -> anyhow::Result<Recorded> {
-        let zip = zip_files(files);
+        self.upload_zip(slug, &zip_files(files), files.len()).await
+    }
+
+    async fn upload_zip(&self, slug: &str, zip: &[u8], files: usize) -> anyhow::Result<Recorded> {
         let profile = self.fam.profile(slug);
-        let sha = self.rt.blobs.put_bytes(BlobOwner::Profile(profile), &zip)?;
+        let sha = self.rt.blobs.put_bytes(BlobOwner::Profile(profile), zip)?;
         let mut tx = self.rt.pool.begin().await?;
         let r = upload::record(
             &mut tx,
@@ -84,7 +87,7 @@ impl Env {
             &sha,
             i64::try_from(zip.len())?,
             Some("cd.zip"),
-            files.len(),
+            files,
             None,
         )
         .await?;
@@ -797,6 +800,28 @@ async fn round3_duplicate_instances_are_counted_once() -> R {
     let (_, result, _) = e.job(up.job_id).await?;
     assert_eq!(result["instances"], 1, "{result}");
     assert_eq!(result["submitted_files"], 2, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_duplicate_entry_with_a_bad_crc_fails_the_import_on_the_first_attempt() -> R {
+    let e = env().await?;
+    let mut image = support::image(&Study::new(U1, ALEX), 0, 0, support::EXPLICIT_LE);
+    // The header scan reads only the first MiB. Hashing the duplicate reads through to its CRC.
+    image.resize((1 << 20) + 1, 0);
+    let mut zip = zip_files(&[("one".into(), image.clone()), ("two".into(), image)]);
+    support::damage_last_zip_entry_crc(&mut zip)?;
+    let up = e.upload_zip("alex", &zip, 2).await?;
+
+    assert_eq!(e.run().await?, 1);
+    let (state, _, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "dead", "{error:?}");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("a duplicate DICOM entry could not be read"))
+    );
+    assert_eq!(e.orthanc.posts(), 0);
     Ok(())
 }
 
