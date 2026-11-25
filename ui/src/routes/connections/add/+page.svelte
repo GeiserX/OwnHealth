@@ -141,7 +141,7 @@
 				vendor: vendor.key,
 				client_id: clientId.trim(),
 				client_secret: confidential ? secret : undefined,
-				issuer: saveIssuer(vendor, server)
+				issuer: saveIssuer(vendor, server, replacing ? client : null)
 			});
 			saved = confidential ? 'secret' : 'public';
 			replacing = false;

@@ -71,6 +71,17 @@ test('a public client saved without a server serves every server of its vendor',
 	assert.equal(clientFor([saved({ issuer: null })], vendor(), 'https://fhir4.healow.com/fhir/r4/X'), null);
 });
 
+test('replacing a public client saves the issuer of the selected client', () => {
+	const v = vendor({ key: 'oracle', client_type: 'public' });
+	const server = 'https://fhir-myrecord.cerner.com/r4/tenant-a';
+	const global = saved({ vendor: v.key, issuer: null, confidential: false });
+	const named = saved({ vendor: v.key, issuer: server, confidential: false });
+
+	assert.equal(saveIssuer(v, server, clientFor([global, named], v, server)), server);
+	assert.equal(saveIssuer(v, server, clientFor([global], v, server)), null);
+	assert.equal(saveIssuer(v, server, null), undefined);
+});
+
 test('the server is searched in the directory or picked from the vendor list', () => {
 	assert.equal(serverPick(vendor()), 'directory');
 	assert.equal(serverPick(vendor({ directory: false, servers: ['https://api.va.gov/services/fhir/v0/r4'] })), 'list');

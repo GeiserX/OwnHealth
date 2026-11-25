@@ -32,11 +32,17 @@ export function clientFor(clients: SavedClient[], v: Pick<VendorProfile, 'key' |
 }
 
 /**
- * The issuer the save sends: the chosen server for a confidential vendor (its secret goes to that
- * server only), none for a public vendor (its client id serves every server of the vendor).
+ * A replacement keeps the saved issuer, including null for a global client. A new confidential
+ * client is bound to the chosen server, and a new public client serves every server of the vendor.
  */
-export const saveIssuer = (v: Pick<VendorProfile, 'client_type'>, server: string): string | undefined =>
-	v.client_type === 'confidential' ? bare(server) : undefined;
+export function saveIssuer(
+	v: Pick<VendorProfile, 'client_type'>,
+	server: string,
+	replacing: Pick<SavedClient, 'issuer'> | null = null
+): string | null | undefined {
+	if (replacing) return replacing.issuer;
+	return v.client_type === 'confidential' ? bare(server) : undefined;
+}
 
 /** Directory hits of this vendor only: the US directory lists every vendor's facilities. */
 export function hitsOf<T extends { vendor: string }>(hits: T[], v: Pick<VendorProfile, 'key'>): T[] {
