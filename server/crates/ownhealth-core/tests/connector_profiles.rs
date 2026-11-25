@@ -256,7 +256,7 @@ async fn a_rotating_vendor_that_sends_no_new_token_retired_the_old_one_and_it_is
     // the vendor rotates (it retires the token it is sent) but this answer carries no new one
     v.fake.set(|b| {
         if let Some(r) = b.refresh_reply.as_mut().and_then(Value::as_object_mut) {
-            r.remove("refresh_token");
+            r.shift_remove("refresh_token");
         }
     });
     let t1 = t0() + Duration::days(2);
@@ -287,7 +287,7 @@ async fn an_answer_without_expires_in_lasts_as_long_as_the_profile_says() -> R {
     oracle.fake.set(|b| {
         for r in [b.code_reply.as_mut(), b.refresh_reply.as_mut()].into_iter().flatten() {
             if let Some(m) = r.as_object_mut() {
-                m.remove("expires_in");
+                m.shift_remove("expires_in");
             }
         }
     });
@@ -302,7 +302,7 @@ async fn an_answer_without_expires_in_lasts_as_long_as_the_profile_says() -> R {
     assert_eq!(nextgen.profile.access_token_seconds, None);
     nextgen.fake.set(|b| {
         if let Some(m) = b.code_reply.as_mut().and_then(Value::as_object_mut) {
-            m.remove("expires_in");
+            m.shift_remove("expires_in");
         }
     });
     let id = nextgen.connect(t0()).await?;

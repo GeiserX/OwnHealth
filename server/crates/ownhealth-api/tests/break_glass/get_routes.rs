@@ -26,6 +26,8 @@ const GET_ROUTES: &[&str] = &[
     "/break-glass",
     "/break-glass/requests/{id}",
     "/connectors/callback",
+    "/connectors/clients",
+    "/connectors/profiles",
     "/documents/{document_id}",
     "/documents/{document_id}/file",
     "/documents/{document_id}/pages/{page_no}/words",
