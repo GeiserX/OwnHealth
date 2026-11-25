@@ -1457,7 +1457,7 @@ impl Drop for Container {
 
 /// deploy/Caddyfile in `image`, with a stub on app:8080 that names each request it receives and the
 /// X-Forwarded-For it came with. Returns the container and the host address of the share port.
-fn caddy(image: &str) -> anyhow::Result<(Container, String)> {
+fn caddy(image: &str, callback: Option<&str>) -> anyhow::Result<(Container, String)> {
     let name = format!("oh-share-block-{}", uuid::Uuid::new_v4().simple());
     let caddyfile = std::fs::read_to_string(root().join("deploy/Caddyfile"))?
         + "\nhttp://:8080 {\n\trespond \"upstream {method} {uri} xff={header.X-Forwarded-For}\" 200\n}\n";
@@ -1469,6 +1469,9 @@ fn caddy(image: &str) -> anyhow::Result<(Container, String)> {
         "-e",
         "OWNHEALTH_DOMAIN=http://private.test:8081",
     ]);
+    if let Some(value) = callback {
+        create.args(["-e", &format!("OWNHEALTH_OW_CALLBACK={value}")]);
+    }
     let out = create.arg(image).output()?;
     anyhow::ensure!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let c = Container(name.clone());
@@ -1636,7 +1639,7 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
         refused.push((method, f.clone()));
         refused.push((method, ice.clone()));
     }
-    let (_c, addr) = caddy(&image)?;
+    let (_c, addr) = caddy(&image, None)?;
     for (method, path, line) in &through {
         let (code, body) = fetch(&addr, method, path)?;
         let got = body.split(" xff=").next().unwrap_or_default();
@@ -1656,5 +1659,97 @@ fn the_public_share_block_passes_only_the_link_routes() -> R {
     let (_, body) = fetch_with(&addr, "POST", &m, &["X-Forwarded-For: 203.0.113.9"])?;
     let xff = body.split(" xff=").nth(1).unwrap_or_default();
     assert!(xff.starts_with("203.0.113.9, "), "{body}");
+    Ok(())
+}
+
+#[test]
+fn the_public_wearables_callback_needs_the_literal_true_switch() -> R {
+    if !ok(Command::new("docker").args(["info"])) {
+        eprintln!("docker not available: skipped");
+        return Ok(());
+    }
+    let image = caddy_image()?;
+    anyhow::ensure!(
+        ok(Command::new("docker").args(["image", "inspect", &image]))
+            || ok(Command::new("docker").args(["pull", &image])),
+        "docker pull {image}"
+    );
+    let callback = "/ow/api/v1/oauth/oura/callback?code=abc%2Bdef&state=xyz";
+    let success = "/ow/api/v1/oauth/success?provider=oura&user_id=demo";
+    let error = "/ow/api/v1/oauth/error?message=access+denied";
+    for value in [None, Some(""), Some("1"), Some("yes"), Some("true")] {
+        let (_container, addr) = caddy(&image, value)?;
+        for path in [callback, success, error] {
+            let (code, body) = fetch(&addr, "GET", path)?;
+            if value == Some("true") {
+                assert_eq!(code, 200, "{value:?} {path}: {body}");
+                assert_eq!(
+                    body.split(" xff=").next(),
+                    Some(format!("upstream GET {path}").as_str())
+                );
+            } else {
+                assert_eq!(code, 404, "{value:?} {path}: {body}");
+            }
+        }
+        for (method, path) in [
+            ("HEAD", callback),
+            ("POST", callback),
+            ("OPTIONS", success),
+            ("GET", "/ow/api/v1/oauth/strava/callback"),
+            ("GET", "/ow/api/v1/oauth/oura/authorize"),
+            ("GET", "/ow/api/v1/users"),
+            ("GET", "/api/me"),
+        ] {
+            assert_eq!(fetch(&addr, method, path)?.0, 404, "{value:?} {method} {path}");
+        }
+        if value == Some("true") {
+            let (code, body) = fetch(&addr, "GET", &format!("/login/..{callback}"))?;
+            assert_eq!(code, 200, "{body}");
+            assert_eq!(
+                body.split(" xff=").next(),
+                Some(format!("upstream GET {callback}").as_str())
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn both_stacks_give_the_guide_and_open_wearables_the_same_callback_origin() -> R {
+    if !has_compose() {
+        eprintln!("docker compose not available: skipped");
+        return Ok(());
+    }
+    for (case, compose, env, extra) in cases() {
+        let base = format!("\n{extra}COMPOSE_PROFILES=wearables\n");
+        let public = "https://callbacks.example.test";
+        let services = render(&compose, &env, &base, &[])?;
+        let origin = env_str(&services["app"], "OWNHEALTH_OW_PUBLIC_URL");
+        assert!(!origin.is_empty(), "{case}: default callback origin");
+        assert_eq!(
+            env_str(&services["app"], "OWNHEALTH_OW_URL"),
+            "http://ow-app:8000",
+            "{case}"
+        );
+        assert_eq!(
+            env_str(&services["ow-app"], "API_BASE_URL"),
+            format!("{origin}/ow"),
+            "{case}"
+        );
+        if case == "homelab" {
+            assert_eq!(env_str(&services["caddy"], "OWNHEALTH_OW_CALLBACK"), "false");
+        }
+        let custom = format!("{base}OWNHEALTH_OW_PUBLIC_URL={public}\nOWNHEALTH_OW_CALLBACK=true\n");
+        let services = render(&compose, &env, &custom, &[])?;
+        assert_eq!(env_str(&services["app"], "OWNHEALTH_OW_PUBLIC_URL"), public, "{case}");
+        assert_eq!(
+            env_str(&services["ow-app"], "API_BASE_URL"),
+            format!("{public}/ow"),
+            "{case}"
+        );
+        if case == "homelab" {
+            assert_eq!(env_str(&services["caddy"], "OWNHEALTH_OW_CALLBACK"), "true");
+        }
+    }
     Ok(())
 }

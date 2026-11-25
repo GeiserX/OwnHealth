@@ -203,6 +203,7 @@
 <PageHeader title={t('con_nav')} sub={t('con_sub')}>
 	{#snippet right()}
 		<PhaseChip phase="v1.0" />
+		<a class="btn" href="/connections/wearables">{t('ow_setup_index')}</a>
 		<a class="btn" href="/inbox">{t('fu_inbox')}</a>
 	{/snippet}
 </PageHeader>

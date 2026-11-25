@@ -54,6 +54,8 @@ services:
       OWNHEALTH_DATABASE_URL: postgresql://ownhealth_app@db:5432/ownhealth
       OWNHEALTH_DB_PASSWORD_FILE: /run/secrets/app_db_password
       OWNHEALTH_RUN_MIGRATIONS: "0" # the admin service migrated as the owner
+      OWNHEALTH_OW_URL: http://ow-app:8000
+      OWNHEALTH_OW_PUBLIC_URL: ${OWNHEALTH_OW_PUBLIC_URL:-https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}}
       OWNHEALTH_SECRET_KEY_FILE: /run/secrets/secret_key
       OWNHEALTH_SECRETS_KEY_FILE: /run/secrets/secrets_key # seals every profile's files and the inbox secrets
       OWNHEALTH_BASE_URL: https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
@@ -168,12 +170,13 @@ services:
         ipv4_address: ${OWNHEALTH_CADDY_IP:-172.31.253.2}
     environment:
       OWNHEALTH_DOMAIN: ${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}
+      OWNHEALTH_OW_CALLBACK: ${OWNHEALTH_OW_CALLBACK-false}
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
       # The SMART Health Link listener, for a tunnel on this host only (deploy/README.md, Sharing a
-      # summary). It answers the two link routes and 404 to everything else.
+      # summary). It also carries the opt-in Open Wearables OAuth callback.
       - "127.0.0.1:${OWNHEALTH_SHARE_PORT:-8090}:8090"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
@@ -241,6 +244,7 @@ services:
     env_file: *ow-env-file
     environment: &ow-env
       ENVIRONMENT: production
+      API_BASE_URL: ${OWNHEALTH_OW_PUBLIC_URL:-https://${OWNHEALTH_DOMAIN:?set OWNHEALTH_DOMAIN in .env}}/ow
       DB_HOST: db
       DB_PORT: "5432"
       DB_NAME: openwearables

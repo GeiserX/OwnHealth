@@ -59,6 +59,11 @@ pub struct Settings {
     /// every SMART Health Link points at. Unset: sharing is off. https, or http on a loopback host
     /// ([`check_share_url`]).
     pub share_url: Option<String>,
+    /// `OWNHEALTH_OW_URL`: the private Open Wearables origin. Unset: the OAuth proxy is off.
+    pub ow_url: Option<reqwest::Url>,
+    /// `OWNHEALTH_OW_PUBLIC_URL`: the origin the vendor sends the browser to, before the /ow prefix.
+    /// Unset: the setup guide uses `base_url`.
+    pub ow_public_url: Option<String>,
     /// `OWNHEALTH_TRUSTED_PROXIES`: comma-separated addresses or CIDR ranges of the proxies in front
     /// of the app. Only a request whose direct peer is one of them has its `X-Forwarded-For` read for
     /// the client address. Empty: the peer address is the client address.
@@ -107,6 +112,8 @@ impl Default for Settings {
             ocr_models_dir: PathBuf::from("/opt/ownhealth/ocr-models"),
             inbox_dir: None,
             share_url: None,
+            ow_url: None,
+            ow_public_url: None,
             trusted_proxies: Vec::new(),
             anchor_dir: None,
             orthanc: None,
@@ -313,6 +320,22 @@ fn with_password(url: &str, password: &str) -> String {
     format!("{scheme}://{user}:{}@{host}", quote_url_component(password))
 }
 
+/// An operator-supplied HTTP origin, with no path, query or credentials.
+fn ow_origin(value: &str, setting: &str) -> Result<reqwest::Url> {
+    reqwest::Url::parse(value)
+        .ok()
+        .filter(|u| {
+            matches!(u.scheme(), "http" | "https")
+                && u.host().is_some()
+                && u.username().is_empty()
+                && u.password().is_none()
+                && u.path() == "/"
+                && u.query().is_none()
+                && u.fragment().is_none()
+        })
+        .ok_or_else(|| Error::Invalid(format!("{setting} must be an HTTP or HTTPS origin.")))
+}
+
 impl Settings {
     pub fn from_env() -> Result<Settings> {
         Settings::from(&ProcessEnv)
@@ -327,6 +350,15 @@ impl Settings {
         if let Some(password) = env_or(env, "DB_PASSWORD")? {
             url = with_password(&url, &password);
         }
+        let ow_url = env_or(env, "OW_URL")?
+            .map(|s| ow_origin(&s, "OWNHEALTH_OW_URL"))
+            .transpose()?;
+        let ow_public_url = env_or(env, "OW_PUBLIC_URL")?
+            .map(|s| {
+                ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?;
+                Ok::<_, Error>(s.trim_end_matches('/').to_string())
+            })
+            .transpose()?;
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
         let dev_auth = flag(env, "DEV_AUTH", false)?;
         // only a debug build with dev auth uses the map (routes/shc.rs), so no other start reads it
@@ -366,6 +398,8 @@ impl Settings {
                 .unwrap_or(d.ocr_models_dir),
             inbox_dir: env_or(env, "INBOX_DIR")?.map(PathBuf::from),
             share_url: env_or(env, "SHARE_URL")?.map(|u| check_share_url(&u)).transpose()?,
+            ow_url,
+            ow_public_url,
             trusted_proxies: parse_trusted_proxies(&env_or(env, "TRUSTED_PROXIES")?.unwrap_or_default())?,
             anchor_dir: env_or(env, "ANCHOR_DIR")?.map(PathBuf::from),
             // serve's viewer proxy and every worker's DICOM import read the same Orthanc

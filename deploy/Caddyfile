@@ -29,11 +29,10 @@
 }
 
 # The public site block for SMART Health Links (docs/design/security-privacy.md section 11). It
-# passes only the link routes to the app: the manifest (POST and OPTIONS), the file (GET),
-# and the direct file for an ICE card (GET). Everything else gets 404 here.
-# Caddy matches the cleaned path, so a raw path such as /login/../api/shl/<id> also matches; each
-# route is rewritten to its canonical path. Only the direct file keeps its query, which the SHL
-# reader uses to name the recipient.
+# passes the manifest (POST and OPTIONS), file (GET), and direct ICE card file (GET).
+# The Open Wearables callback and its result pages are opt-in (GET only).
+# Caddy matches the cleaned path, so a raw path such as /login/../api/shl/<id> also matches.
+# Each route is rewritten to its canonical path. The direct file and OAuth routes keep their queries.
 # compose.homelab.yaml publishes this port on 127.0.0.1 only. Point a tunnel (Tailscale Funnel,
 # Cloudflare Tunnel) at it, never at the app or the site above, and set OWNHEALTH_SHARE_URL in .env
 # to the public https address the tunnel gives (deploy/README.md, Sharing a summary).
@@ -50,6 +49,11 @@ http://:8090 {
 		method GET
 		path_regexp i ^/api/shl/([A-Za-z0-9_-]{43})/ice$
 	}
+	@ow_callback {
+		method GET
+		path_regexp ow ^/ow/api/v1/oauth/((?:oura|polar|whoop|withings)/callback|success|error)$
+		expression "{$OWNHEALTH_OW_CALLBACK:false}" == "true"
+	}
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
@@ -65,6 +69,10 @@ http://:8090 {
 	}
 	handle @ice {
 		rewrite * /api/shl/{re.i.1}/ice
+		reverse_proxy app:8080
+	}
+	handle @ow_callback {
+		rewrite * /ow/api/v1/oauth/{re.ow.1}
 		reverse_proxy app:8080
 	}
 	handle {
