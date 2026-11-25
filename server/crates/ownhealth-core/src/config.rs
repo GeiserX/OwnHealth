@@ -357,15 +357,15 @@ impl Settings {
         // OWNHEALTH_BASE_URL), so a trailing slash would make its redirect URI differ from the guide's.
         let ow_public_url = env_or(env, "OW_PUBLIC_URL")?
             .map(|s| {
-                ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?;
-                if s.ends_with('/') {
+                let origin = ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?;
+                if s.trim_end_matches(|c: char| c <= ' ').ends_with('/') {
                     return Err(Error::Invalid(
                         "OWNHEALTH_OW_PUBLIC_URL must be written without a trailing slash. The Compose \
                          files use OWNHEALTH_BASE_URL when it is unset, so remove the slash there too."
                             .into(),
                     ));
                 }
-                Ok(s)
+                Ok(origin.origin().ascii_serialization())
             })
             .transpose()?;
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
@@ -677,6 +677,19 @@ mod tests {
         assert!(Settings::from(&env(&[])).expect("settings").trusted_proxies.is_empty());
         let err = Settings::from(&env(&[("OWNHEALTH_TRUSTED_PROXIES", "caddy")])).expect_err("refused");
         assert!(err.to_string().contains("OWNHEALTH_TRUSTED_PROXIES"));
+    }
+
+    #[test]
+    fn open_wearables_public_url_is_serialized_as_an_origin() {
+        let s = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", "https://CB.example.test:443 ")])).expect("settings");
+        assert_eq!(s.ow_public_url.as_deref(), Some("https://cb.example.test"));
+    }
+
+    #[test]
+    fn open_wearables_public_url_rejects_a_slash_before_trailing_space() {
+        let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", "https://cb.example.test/ ")]))
+            .expect_err("Compose appends /ow to the configured origin");
+        assert!(err.to_string().contains("without a trailing slash"));
     }
 
     #[test]
