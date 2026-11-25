@@ -28,7 +28,10 @@
 #                        searches it by organisation name.
 #   registration         the vendor's page where the app is registered.
 #   scopes               exactly what to tick at the vendor: read and search only, never a write scope.
-#                        A test checks them against what the launch asks for.
+#                        The launch asks for .rs scopes only from a server whose discovery document
+#                        lists permission-v2, and for .read otherwise (a SMART 1.0 server such as the
+#                        VA's). A test checks these scopes against what the launch asks for under the
+#                        vendor's recorded discovery document (fixtures/connectors/<vendor>/).
 #   verified_live        false until a real account has connected with these steps.
 #   sources              where the token values come from. A vendor with no source has no values.
 #

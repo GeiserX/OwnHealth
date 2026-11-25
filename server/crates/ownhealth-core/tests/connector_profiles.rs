@@ -194,7 +194,9 @@ impl V {
 async fn every_recorded_vendor_connects_and_refreshes_the_way_its_profile_says() -> R {
     for key in RECORDED {
         let v = vendor(key).await?;
-        // the launch asks for exactly the scopes the wizard told the person to tick at the vendor
+        // the launch asks for exactly the scopes the wizard told the person to tick at the vendor. The
+        // fake serves this vendor's recorded discovery, so .rs only where it lists permission-v2
+        // (every vendor here but the VA, a SMART 1.0 server whose profile lists .read)
         let asked: Vec<&str> = v.endpoints.scopes.split_whitespace().collect();
         assert_eq!(asked, v.profile.scopes, "{key}: the scopes of the launch");
         // what the vendor's own document says comes through: a revocation endpoint only where it names one
