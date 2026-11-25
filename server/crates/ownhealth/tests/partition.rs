@@ -1672,6 +1672,50 @@ async fn dropping_pushed_samples_takes_only_pushes_from_the_utc_day_and_keeps_th
 }
 
 #[tokio::test]
+async fn dropping_pushes_refuses_a_date_that_has_arrived_since_the_initial_check() -> R {
+    let d = demo().await?;
+    let pool = &d.db.pool;
+    let mut conn = pool.acquire().await?;
+    let database_now: DateTime<Utc> = sqlx::query_scalar("select clock_timestamp()")
+        .fetch_one(&mut *conn)
+        .await?;
+    let from = database_now.date_naive();
+    let push = push_inbox(&mut conn, &d).await?;
+    store::write(
+        &mut conn,
+        d.alex,
+        None,
+        vec![hr(database_now, 70.0, push), hr(cutoff_for(database_now), 80.0, push)],
+        Conflict::Keep,
+    )
+    .await?;
+    drop(conn);
+    assert_eq!(partition::prepare(pool, &opts(database_now)).await?["held_aside"], 1);
+    let before = rollups(pool).await?;
+
+    let yesterday = database_now - chrono::Duration::days(1);
+    let refused = partition::drop_pushed(pool, &opts(yesterday), from).await?;
+    assert_eq!(state(&refused), "refused", "{refused}");
+    assert_eq!(refused["ok"], false);
+    assert!(
+        refused["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("nothing was deleted"),
+        "{refused}"
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "select (select count(*) from wearable_sample where source_id = $1), +         (select count(*) from wearable_sample_ahead where source_id = $1)",
+    )
+    .bind(push)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(counts, (1, 1));
+    assert_eq!(rollups(pool).await?, before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn deleting_a_profile_as_the_app_cascades_to_its_private_staged_samples() -> R {
     let d = demo().await?;
     let pool = &d.db.pool;

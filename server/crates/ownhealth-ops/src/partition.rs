@@ -222,15 +222,8 @@ const PUSHED: &str = "document_id is null and t >= $1 \
 /// It holds the run lock, so no run moves samples meanwhile.
 pub async fn drop_pushed(pool: &PgPool, opts: &Options, from: NaiveDate) -> Result<Value> {
     let since = from.and_time(chrono::NaiveTime::MIN).and_utc();
-    let refusal = |state: &str, note: String| json!({ "ok": false, "state": state, "table": TABLE, "from": since.to_rfc3339(), "note": note });
     if since <= opts.now.unwrap_or_else(Utc::now) {
-        return Ok(refusal(
-            "refused",
-            format!(
-                "{from} is not ahead of now, and samples dated from it on may be right: nothing was deleted. \
-                 Give the date the needs_maintenance note names"
-            ),
-        ));
+        return Ok(pushed_date_refusal(since));
     }
     let mut conn = pool.acquire().await?.detach();
     let mine: bool = sqlx::query_scalar("select pg_try_advisory_lock($1)")
@@ -240,17 +233,46 @@ pub async fn drop_pushed(pool: &PgPool, opts: &Options, from: NaiveDate) -> Resu
     let out = if mine {
         drop_pushed_locked(&mut conn, since).await
     } else {
-        Ok(Some(refusal("busy", "another run is partitioning the table".into())))
+        Ok(Some(pushed_refusal(
+            since,
+            "busy",
+            "another run is partitioning the table",
+        )))
     };
     let _ = conn.close().await;
     out.map(|r| {
         r.unwrap_or_else(|| {
-            refusal(
+            pushed_refusal(
+                since,
                 "needs_owner",
-                format!("this database role may not delete from {AHEAD}: run the command as the database owner"),
+                &format!("this database role may not delete from {AHEAD}: run the command as the database owner"),
             )
         })
     })
+}
+
+fn pushed_refusal(since: DateTime<Utc>, state: &str, note: &str) -> Value {
+    json!({ "ok": false, "state": state, "table": TABLE, "from": since.to_rfc3339(), "note": note })
+}
+
+fn pushed_date_refusal(since: DateTime<Utc>) -> Value {
+    let from = since.date_naive();
+    pushed_refusal(
+        since,
+        "refused",
+        &format!(
+            "{from} is not ahead of now, and samples dated from it on may be right: nothing was deleted. \
+             Give the date the needs_maintenance note names"
+        ),
+    )
+}
+
+async fn ahead_of_database_clock(conn: &mut PgConnection, since: DateTime<Utc>) -> Result<bool> {
+    // The transaction can span midnight, so use wall time instead of its start time.
+    Ok(sqlx::query_scalar("select $1::timestamptz > clock_timestamp()")
+        .bind(since)
+        .fetch_one(conn)
+        .await?)
 }
 
 /// The samples one delete removed, per profile, metric and source: count, first and last `t`.
@@ -270,6 +292,10 @@ async fn drop_pushed_locked(conn: &mut PgConnection, since: DateTime<Utc>) -> Re
     for table in [TABLE, AHEAD] {
         if table == AHEAD && !staged {
             continue;
+        }
+        if !ahead_of_database_clock(&mut tx, since).await? {
+            tx.rollback().await?;
+            return Ok(Some(pushed_date_refusal(since)));
         }
         let rows: Vec<Dropped> = sqlx::query_as(AssertSqlSafe(format!(
             "with gone as (delete from {table} where {PUSHED} returning profile_id, metric, source_id, t) \
@@ -309,6 +335,11 @@ async fn drop_pushed_locked(conn: &mut PgConnection, since: DateTime<Utc>) -> Re
         rollups +=
             wearables::recompute_rollups_between(&mut tx, profile, Some(&metrics), Some(&ids), Some((first, last)))
                 .await?;
+    }
+    // A DELETE can wait on a row lock even after its clock check.
+    if !ahead_of_database_clock(&mut tx, since).await? {
+        tx.rollback().await?;
+        return Ok(Some(pushed_date_refusal(since)));
     }
     tx.commit().await?;
     let removed: i64 = sources.values().map(|s| s.0).sum();
