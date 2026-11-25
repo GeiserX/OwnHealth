@@ -353,19 +353,21 @@ impl Settings {
         let ow_url = env_or(env, "OW_URL")?
             .map(|s| ow_origin(&s, "OWNHEALTH_OW_URL"))
             .transpose()?;
-        // The Compose files give Open Wearables this value with /ow appended (falling back to
-        // OWNHEALTH_BASE_URL), so a trailing slash would make its redirect URI differ from the guide's.
+        // The Compose files give Open Wearables this value as written with /ow appended (falling back
+        // to OWNHEALTH_BASE_URL), and it builds its redirect URI from that. So the guide's URI matches
+        // only when the value is already its canonical origin: no trailing slash or space, a lowercase
+        // host, no default port and an ASCII host.
         let ow_public_url = env_or(env, "OW_PUBLIC_URL")?
             .map(|s| {
-                let origin = ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?;
-                if s.trim_end_matches(|c: char| c <= ' ').ends_with('/') {
-                    return Err(Error::Invalid(
-                        "OWNHEALTH_OW_PUBLIC_URL must be written without a trailing slash. The Compose \
-                         files use OWNHEALTH_BASE_URL when it is unset, so remove the slash there too."
-                            .into(),
-                    ));
+                let canon = ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?.origin().ascii_serialization();
+                if s != canon {
+                    return Err(Error::Invalid(format!(
+                        "OWNHEALTH_OW_PUBLIC_URL must be written as {canon}, because Open Wearables \
+                         builds its redirect URI from the value as written. The Compose files use \
+                         OWNHEALTH_BASE_URL when it is unset, so write that one the same way."
+                    )));
                 }
-                Ok(origin.origin().ascii_serialization())
+                Ok(s)
             })
             .transpose()?;
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
@@ -680,16 +682,36 @@ mod tests {
     }
 
     #[test]
-    fn open_wearables_public_url_is_serialized_as_an_origin() {
-        let s = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", "https://CB.example.test:443 ")])).expect("settings");
-        assert_eq!(s.ow_public_url.as_deref(), Some("https://cb.example.test"));
-    }
-
-    #[test]
-    fn open_wearables_public_url_rejects_a_slash_before_trailing_space() {
-        let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", "https://cb.example.test/ ")]))
-            .expect_err("Compose appends /ow to the configured origin");
-        assert!(err.to_string().contains("without a trailing slash"));
+    fn open_wearables_public_url_must_be_written_as_its_canonical_origin() {
+        // Compose hands Open Wearables the value as written and it builds its redirect URI from that,
+        // so any value the guide would show differently is refused, naming the form to write.
+        let cases = [
+            ("https://CB.example.test", "https://cb.example.test"),
+            ("https://cb.example.test:443", "https://cb.example.test"),
+            ("http://localhost:80", "http://localhost"),
+            ("https://cb.example.test ", "https://cb.example.test"),
+            ("https://cb.example.test/", "https://cb.example.test"),
+            ("https://cb.example.test/ ", "https://cb.example.test"),
+            ("https://bücher.example.test", "https://xn--bcher-kva.example.test"),
+        ];
+        for (value, canonical) in cases {
+            let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)]))
+                .expect_err(value)
+                .to_string();
+            assert!(
+                err.contains(&format!("OWNHEALTH_OW_PUBLIC_URL must be written as {canonical}")),
+                "{value}: {err}"
+            );
+        }
+        for value in [
+            "https://cb.example.test",
+            "https://cb.example.test:8443",
+            "http://localhost:8080",
+            "http://[::1]:8080",
+        ] {
+            let s = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)])).expect(value);
+            assert_eq!(s.ow_public_url.as_deref(), Some(value));
+        }
     }
 
     #[test]
@@ -724,7 +746,11 @@ mod tests {
             let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)]))
                 .expect_err(value)
                 .to_string();
-            assert!(err.contains("without a trailing slash"), "{value}: {err}");
+            let canonical = value.trim_end_matches('/');
+            assert!(
+                err.contains(&format!("must be written as {canonical}")),
+                "{value}: {err}"
+            );
         }
     }
 }
