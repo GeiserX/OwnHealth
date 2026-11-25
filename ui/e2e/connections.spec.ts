@@ -125,7 +125,7 @@ test('a person connects a record, sees a short grant, reconnects after the vendo
 	await expect(card).not.toContainText('Sign-in ends');
 	await expect(card).not.toContainText('Access token');
 	expect(sql("select count(*) from secret where purpose = 'connector_refresh_token'")).toBe('0');
-	const book = (await (await page.request.get(`${fake}/__book?client=e2e-client`)).json()) as { grants: number; revoked: number };
+	const book = (await (await page.request.get(`${fake}/__book`)).json()) as { grants: number; revoked: number };
 	expect(book).toMatchObject({ grants: 2, revoked: 1 });
 	expect(errors).toEqual([]);
 });
