@@ -591,9 +591,8 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             Ok(())
         };
         let read = if kind.json {
-            member_bytes(file, size).and_then(|bytes| {
-                json_rows(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes), kind.metric, push)
-            })
+            member_bytes(file, size)
+                .and_then(|bytes| json_rows(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes), kind.metric, push))
         } else {
             csv_rows(file, size, kind.metric, push)
         };
