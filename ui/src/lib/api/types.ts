@@ -1157,6 +1157,41 @@ export interface BrandsOpened {
 	created: boolean;
 	directory: BrandDirectory | null;
 }
+/** GET /api/connectors/profiles (slice 19): the vendor profiles of data/connectors/connectors.yaml. */
+export type ClientType = 'confidential' | 'public';
+export type Rotation = 'none' | 'rotating' | 'single_use' | 'unknown';
+
+export interface VendorProfile {
+	key: string;
+	name: string;
+	kind: string;
+	client_type: ClientType;
+	servers: string[];
+	directory: boolean;
+	registration: string;
+	scopes: string[];
+	refresh: { rotation: Rotation; unused_expiry_days: number | null };
+	access_token_seconds: number | null;
+	verified_live: boolean;
+	sources: string[];
+}
+
+export interface ConnectorProfiles {
+	redirect_uri: string;
+	vendors: VendorProfile[];
+}
+
+/** A household's own vendor client (GET/POST /api/connectors/clients); never its secret. */
+export interface SavedClient {
+	id: string;
+	vendor: string;
+	issuer: string | null;
+	client_id: string;
+	confidential: boolean;
+	redirect_uri: string;
+	created_at: string;
+}
+
 export interface BrandsFound {
 	directory: BrandDirectory | null;
 	results: BrandHit[];

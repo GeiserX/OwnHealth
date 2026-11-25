@@ -2,7 +2,7 @@
 	// The Connections screen (v1.0, slice 55): every health record and device connection of the
 	// profiles this person manages, with its status, last sync, when its sign-in and access token end,
 	// open sync-gap alerts, and Reconnect. The connector callback lands here with ?connected=<id> or
-	// ?connector_error=<code>. The add wizard (slice 19) launches new connections.
+	// ?connector_error=<code>. Add connection opens the add wizard (slice 19, ./add), which launches new ones.
 	import '#lib/components/pages2/pages2.css';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -194,6 +194,7 @@
 	{#snippet right()}
 		<PhaseChip phase="v1.0" />
 		<a class="btn" href="/inbox">{t('fu_inbox')}</a>
+		<a class="btn pri" href="/connections/add">{t('con_add')}</a>
 	{/snippet}
 </PageHeader>
 
