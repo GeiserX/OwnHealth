@@ -1081,6 +1081,25 @@ async fn a_heart_rate_row_with_only_a_date_is_left_out_and_a_daily_value_keeps_i
     .await
 }
 
+#[tokio::test]
+async fn a_legacy_json_hrv_row_with_a_time_keeps_its_day_west_of_utc() -> R {
+    let env = Env::new().await?;
+    let zone = profile("America/New_York");
+    let (state, error, result) = upload(
+        &env,
+        &[
+            ("Takeout/Fitbit/Your Profile/Profile.csv", &zone),
+            (
+                "Takeout/Fitbit/Global Export Data/hrv-2024-07-04.json",
+                r#"[{"dateTime":"07/04/24 00:00:00","value":{"dailyRmssd":38.5}}]"#,
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_readings(&env, result, &[("hrv_rmssd", 38.5, "2024-07-04T00:00:00Z", 0)]).await
+}
+
 /// Rewrite the compression method or set the encryption flag of one member, in its local and its
 /// central header. The reader is built with deflate only, so any other method cannot be opened.
 fn unreadable_member(bytes: &mut [u8], name: &str, method: Option<u16>, encrypt: bool) {

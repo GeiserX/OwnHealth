@@ -197,7 +197,8 @@ fn member_kind(path: &str) -> Option<MemberKind> {
             ("oxygen saturation", Metric::Spo2),
         ] {
             if named(&stem, label) {
-                return readings(metric, true, false);
+                // A legacy JSON HRV row is a day's value (dailyRmssd), even when it carries a time.
+                return readings(metric, true, matches!(metric, Metric::Rmssd));
             }
         }
     }
