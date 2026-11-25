@@ -33,10 +33,12 @@ pub use seal::seal_legacy;
 
 use ownhealth_core::demo;
 
-/// Register lane H's demo hooks: `base` (order 0, the port of `demo/base.py`), then `family` and
-/// `supplements` (v0.3, after every other hook).
+/// Register the base demo first, then the family, supplements and lab share.
 pub fn register() {
     demo::register_demo_hook("base", 0, |conn, ctx| Box::pin(seed_base(conn, ctx)));
     demo::register_demo_hook("family", 1100, |conn, ctx| Box::pin(seed_family(conn, ctx)));
     demo::register_demo_hook("supplements", 1101, |conn, ctx| Box::pin(seed_supplements(conn, ctx)));
+    demo::register_demo_hook("family_share", 1111, |conn, ctx| {
+        Box::pin(demo_base::seed_family_share(conn, ctx))
+    });
 }

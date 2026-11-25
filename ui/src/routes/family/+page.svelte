@@ -15,6 +15,7 @@
 	import { foreignOrigin, matrixHeads, matrixRowLabel, nameTaken, todayIso } from '#lib/logic/people';
 	import PhaseChip from '#lib/components/PhaseChip.svelte';
 	import Pedigree from '#lib/components/Pedigree.svelte';
+	import GedcomImport from '#lib/components/GedcomImport.svelte';
 	import FamilyConsent from '#lib/components/FamilyConsent.svelte';
 	import BreakGlassContact from './BreakGlassContact.svelte';
 	import BreakGlassOwner from './BreakGlassOwner.svelte';
@@ -303,6 +304,7 @@
 	<div class="grid" style="align-content:start">
 		<!-- keyed: a drawer left open for one profile must never save under the next one -->
 		{#if onScreen}{#key onScreen.slug}<Pedigree profile={onScreen} {profiles} />{/key}{/if}
+		{#if onScreen}{#key onScreen.slug}<GedcomImport profile={onScreen} />{/key}{/if}
 	</div>
 	<div class="grid" style="align-content:start">
 		<div class="card">

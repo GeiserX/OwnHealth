@@ -102,9 +102,13 @@ fn truthy(v: Option<&Value>) -> bool {
 /// A held payload carries the values it would write: show it only to someone whose scopes would
 /// show the committed fact (its category scope, and read:sensitive for a sensitive one). A held
 /// imaging study names the patient and the study, which the timeline and the viewer show only with
-/// read:records.
+/// read:records, and a proposed relative is family history, which needs read:records too.
 fn visible(item: &ReviewItem, perm: &Permission) -> bool {
     if item.kind == ownhealth_imaging::import::REVIEW_KIND && !perm.has("read:records") {
+        return false;
+    }
+    // a relative from a family tree file: the family list shows relatives only with read:records
+    if item.kind == ownhealth_core::gedcom::KIND && !perm.has("read:records") {
         return false;
     }
     let empty = Map::new();

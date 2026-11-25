@@ -67,6 +67,11 @@ pub struct Settings {
     /// dump (`keyfile.rs`). It must sit outside the blob folder and every backup. Unset:
     /// `<data_dir>/keyring`.
     pub keyring_dir: Option<PathBuf>,
+    /// `OWNHEALTH_DEV_SHC_ISSUERS`: `https://issuer.example=http://127.0.0.1:9177,...`, test origins of
+    /// SMART Health Card issuers and SMART Health Link servers mapped to local servers. Only a debug
+    /// build that runs with dev auth reads it (here, and again in routes/shc.rs `issuer_route`); any
+    /// other start leaves it unset and never reads the variable or its `_FILE` twin.
+    pub dev_shc_issuers: Option<String>,
 }
 
 impl Default for Settings {
@@ -99,6 +104,7 @@ impl Default for Settings {
             anchor_dir: None,
             orthanc: None,
             keyring_dir: None,
+            dev_shc_issuers: None,
         }
     }
 }
@@ -131,6 +137,7 @@ impl fmt::Debug for Settings {
             .field("anchor_dir", &self.anchor_dir)
             .field("orthanc", &self.orthanc)
             .field("keyring_dir", &self.keyring_dir)
+            .field("dev_shc_issuers", &self.dev_shc_issuers)
             .finish_non_exhaustive()
     }
 }
@@ -313,6 +320,13 @@ impl Settings {
             url = with_password(&url, &password);
         }
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
+        let dev_auth = flag(env, "DEV_AUTH", false)?;
+        // only a debug build with dev auth uses the map (routes/shc.rs), so no other start reads it
+        let dev_shc_issuers = if cfg!(debug_assertions) && dev_auth {
+            env_or(env, "DEV_SHC_ISSUERS")?
+        } else {
+            None
+        };
         Ok(Settings {
             database_url: url,
             data_dir: env_or(env, "DATA_DIR")?.map(PathBuf::from).unwrap_or(d.data_dir),
@@ -326,7 +340,7 @@ impl Settings {
             default_locale: env_or(env, "DEFAULT_LOCALE")?.unwrap_or(d.default_locale),
             secret_key: env_or(env, "SECRET_KEY")?.unwrap_or(d.secret_key),
             demo: flag(env, "DEMO", false)?,
-            dev_auth: flag(env, "DEV_AUTH", false)?,
+            dev_auth,
             run_migrations: flag(env, "RUN_MIGRATIONS", true)?,
             run_jobs: flag(env, "RUN_JOBS", true)?,
             job_workers: parse(env, "JOB_WORKERS", d.job_workers)?,
@@ -348,6 +362,7 @@ impl Settings {
             // serve's viewer proxy and every worker's DICOM import read the same Orthanc
             orthanc: OrthancConfig::from_env(env)?,
             keyring_dir: env_or(env, "KEYRING_DIR")?.map(PathBuf::from),
+            dev_shc_issuers,
         })
     }
 
@@ -431,6 +446,24 @@ mod tests {
         assert!(Settings::from(&env(&[])).expect("settings").orthanc.is_none());
         // a URL without a password stops every command, as it stops serve
         assert!(Settings::from(&env(&[("OWNHEALTH_ORTHANC_URL", "http://orthanc:8042")])).is_err());
+    }
+
+    /// The dev issuer map is read only where the route can use it: a debug build with dev auth. Any
+    /// other start never reads it, so a missing map file stops nothing.
+    #[test]
+    fn the_dev_issuer_map_is_read_only_by_a_debug_build_with_dev_auth() {
+        let missing = "/nonexistent/ownhealth-dev-shc-issuers";
+        let e = env(&[("OWNHEALTH_DEV_SHC_ISSUERS_FILE", missing)]);
+        let s = Settings::from(&e).expect("the map file was read without dev auth");
+        assert_eq!(s.dev_shc_issuers, None);
+        let map = "https://issuer.labnorte.example=http://127.0.0.1:9177";
+        let e = env(&[("OWNHEALTH_DEV_SHC_ISSUERS", map)]);
+        assert_eq!(Settings::from(&e).expect("settings").dev_shc_issuers, None);
+        let e = env(&[("OWNHEALTH_DEV_AUTH", "1"), ("OWNHEALTH_DEV_SHC_ISSUERS", map)]);
+        let got = Settings::from(&e).expect("settings").dev_shc_issuers;
+        // a release build (`cargo test --release`) never reads it
+        let want = cfg!(debug_assertions).then(|| map.to_string());
+        assert_eq!(got, want);
     }
 
     #[test]

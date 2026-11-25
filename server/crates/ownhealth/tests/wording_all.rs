@@ -57,11 +57,17 @@ const SOURCES: &[(&str, Source)] = &[
     ("imaging_viewer", |_| {
         Box::pin(async { Ok(vec![ownhealth_api::routes::imaging_proxy::phrases()]) })
     }),
+    ("gedcom_refusals", |_| {
+        Box::pin(async { Ok(vec![ownhealth_core::gedcom::phrases()]) })
+    }),
     ("shc", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shc::phrases()]) })
     }),
     ("bluebutton_poller", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::bluebutton::phrases()]) })
+    }),
+    ("shl_receive", |_| {
+        Box::pin(async { Ok(vec![ownhealth_ingest_structured::shl_receive::phrases()]) })
     }),
     ("session_report", |_| Box::pin(async { session_report_words() })),
     ("smart_poller", |_| {

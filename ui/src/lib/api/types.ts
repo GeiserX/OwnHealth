@@ -111,6 +111,7 @@ export interface ReviewItem {
 		| 'near_duplicate'
 		| 'encrypted_document'
 		| 'fhir_unmapped_summary'
+		| 'family_proposal'
 		| 'imaging_study';
 	profile_id: Uuid | null;
 	status: 'open' | 'accepted' | 'rejected' | 'dismissed';

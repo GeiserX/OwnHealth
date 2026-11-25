@@ -39,6 +39,7 @@
 	import { shcCards } from '#lib/logic/shc';
 	import { cgmDoc, type CgmLine } from '#lib/logic/cgm_import';
 	import { fitDocLines } from '#lib/logic/fit_import';
+	import { proposalTitle, type FamilyProposal } from '#lib/logic/gedcom';
 	import { focusOrder } from '#lib/logic/imaging';
 	import FitResult from '#lib/components/pages2/FitResult.svelte';
 	import ManualEntry from '#lib/components/ManualEntry.svelte';
@@ -359,6 +360,7 @@
 			return p.patient_name ? tf('i2_img_t', { what, who: String(p.patient_name) }) : what;
 		}
 		// A scan's chip already says what it is; the line names the file.
+		if (i.kind === 'family_proposal') return proposalTitle(p as FamilyProposal, i18n.lang, (k, v) => (v ? tf(k, v) : t(k)));
 		if (i.kind === 'pending_document' && i.document_id && docName(i.document_id)) return docName(i.document_id);
 		return t('i2_kind_' + i.kind);
 	}
@@ -611,6 +613,7 @@
 								{#if (it.kind === 'fhir_unmapped' || it.kind === 'imaging_study') && it.reasons.length}<div style="font-size:11.5px;color:var(--watch)">{reasonsText(it)}</div>{/if}
 								{#if it.kind === 'imaging_study' && imagingAcceptable(it)}<div class="dim" style="font-size:11.5px">{t('i2_img_accept_d')}</div>{/if}
 								{#if it.kind === 'fhir_unmapped_summary'}<div class="dim" style="font-size:11.5px">{t('i2_fus_d')}</div>{/if}
+								{#if it.kind === 'family_proposal'}<div class="dim" style="font-size:11.5px">{t('i2_fp_d')}</div>{/if}
 								{#if prows}
 									<ProposalRows rows={prows} {busy} documentId={it.document_id} onaccept={(edits) => act(() => acceptReview(it.id, edits))} onreject={() => act(() => rejectReview(it.id, 'rejected in review'))} />
 								{:else if otherText(it)}<pre class="p2untrusted" style="margin-top:4px">{otherText(it)}</pre>{/if}
@@ -637,6 +640,9 @@
 							{:else if (it.kind === 'agent_proposal' && !prows) || it.kind === 'fhir_unmapped'}
 								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
 								<button class="btn sm no" onclick={() => act(() => rejectReview(it.id, 'rejected in review'))} disabled={busy}>{t('i2_reject')}</button>
+							{:else if it.kind === 'family_proposal'}
+								<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>
+								<button class="btn sm" onclick={() => act(() => dismissReview(it.id))} disabled={busy}>{t('i2_dismiss')}</button>
 							{:else if it.kind === 'imaging_study'}
 								<!-- a patient who is not the profile's, or one of several on the disc, can still be added; a UID that another record or patient holds cannot -->
 								{#if imagingAcceptable(it)}<button class="btn sm ok" onclick={() => act(() => acceptReview(it.id))} disabled={busy}>{t('i2_accept')}</button>{/if}

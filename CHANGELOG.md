@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The demo computes SCORE2 and PREVENT for Alex, and shows Lucía a family hint from the high LDL her mother shares. The demo's pressure reading is dated 2026-09-14, so from 2027-09-14 its calculators read not assessed.
 - Restore accepts keyless backups from v0.4.0 and earlier. Keyed backups from untagged builds need the build that wrote them if they predate the keyring or list profile UUIDs without key IDs. Restore with that build, then take a new backup with this version.
 
 ## 0.4.0 (2026-11-19)

@@ -12,6 +12,7 @@ pub mod manual;
 pub mod py;
 pub mod retract;
 pub mod shc;
+pub mod shl_receive;
 pub mod smart;
 pub mod wearables;
 
