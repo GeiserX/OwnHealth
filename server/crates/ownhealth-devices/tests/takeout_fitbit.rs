@@ -535,6 +535,41 @@ async fn a_zip_with_both_account_folders_reads_both_and_keeps_one_copy() -> R {
 }
 
 #[tokio::test]
+async fn overlapping_heart_rate_members_give_the_same_mean_in_either_order() -> R {
+    let legacy = (
+        "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-12.json",
+        r#"[{"dateTime":"07/12/24 08:00:05","value":{"bpm":70}},
+            {"dateTime":"07/12/24 08:00:35","value":{"bpm":76}},
+            {"dateTime":"07/12/24 08:01:05","value":{"bpm":60}},
+            {"dateTime":"07/12/24 08:01:35","value":{"bpm":62}}]"#,
+    );
+    let google = (
+        "Takeout/Google Health/Physical Activity_GoogleData/Heart Rate/2024-07.csv",
+        "timestamp,beats per minute\n2024-07-12T08:00:05Z,70\n2024-07-12T08:00:45Z,82\n2024-07-12T08:01:05Z,90\n",
+    );
+    let mut orders = Vec::new();
+    for members in [[legacy, google], [google, legacy]] {
+        let env = Env::new().await?;
+        let (state, error, result) = upload(&env, &members).await?;
+        assert_eq!(state, "done", "{error}");
+        assert_eq!(result["accepted"], 2, "{result}");
+        assert_eq!(result["fitbit_takeout"]["files_imported"], 2, "{result}");
+        let points: Vec<(DateTime<Utc>, f32)> =
+            sqlx::query_as("select t, v from wearable_sample where metric = 'hr' order by t")
+                .fetch_all(&env.db.pool)
+                .await?;
+        orders.push(points);
+    }
+    // At a shared instant, the first path in alphabetical order supplies the reading.
+    let expected = vec![
+        ("2024-07-12T08:00:00Z".parse()?, 76.0),
+        ("2024-07-12T08:01:00Z".parse()?, 61.0),
+    ];
+    assert_eq!(orders, [expected.clone(), expected]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn heart_rate_is_kept_as_one_reading_per_minute() -> R {
     let env = Env::new().await?;
     // Fitbit records heart rate every few seconds. As with a FIT file, each minute keeps the mean
@@ -561,16 +596,21 @@ async fn heart_rate_is_kept_as_one_reading_per_minute() -> R {
 }
 
 /// A Google Data heart rate CSV with `per_minute` rows in each of `minutes` minutes.
-fn heart_rate_csv(minutes: i64, per_minute: i64) -> String {
+fn heart_rate_csv(minutes: i64, per_minute: i64, source: &str) -> String {
     use std::fmt::Write as _;
     let start = chrono::DateTime::parse_from_rfc3339("2023-01-01T00:00:00Z")
         .expect("start")
         .to_utc();
-    let mut rows = String::from("timestamp,beats per minute\n");
+    let mut rows = String::from("timestamp,beats per minute,data source\n");
     for minute in 0..minutes {
         for second in 0..per_minute {
             let t = start + chrono::Duration::seconds(minute * 60 + second * 5);
-            writeln!(rows, "{},70", t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).expect("row");
+            writeln!(
+                rows,
+                "{},70,{source}",
+                t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )
+            .expect("row");
         }
     }
     rows
@@ -581,11 +621,21 @@ async fn the_reading_limit_counts_minutes_so_a_long_history_fits() -> R {
     let env = Env::new().await?;
     let member = "Takeout/Fitbit/Physical Activity_GoogleData/Heart Rate/heart_rate_2023-01-01.csv";
     // 500,010 rows, more than the limit, in 50,001 minutes.
-    let (state, error, result) = upload(&env, &[(member, &heart_rate_csv(50_001, 10))]).await?;
+    let (state, error, result) = upload(&env, &[(member, &heart_rate_csv(50_001, 10, ""))]).await?;
     assert_eq!(state, "done", "{error}");
     assert_eq!(result["accepted"], 50_001, "{result}");
-    // 500,001 minutes, one more than the limit, refuse the ZIP before anything is written.
-    let (state, error, _) = upload(&env, &[(member, &heart_rate_csv(500_001, 1))]).await?;
+    // 500,001 distinct minutes across two files refuse the ZIP before anything is written.
+    let (state, error, _) = upload(
+        &env,
+        &[
+            (member, &heart_rate_csv(500_000, 1, "")),
+            (
+                "Takeout/Fitbit/Google Data/Heart Rate/2024-07.csv",
+                "timestamp,bpm\n2024-07-12T08:00:00Z,70\n",
+            ),
+        ],
+    )
+    .await?;
     assert_eq!(
         (state.as_str(), error.as_str()),
         ("dead", "PermanentJobError: fitbit_takeout_limit")
@@ -595,6 +645,72 @@ async fn the_reading_limit_counts_minutes_so_a_long_history_fits() -> R {
         .await?;
     assert_eq!(count, 50_001);
     Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_minutes_only_count_once_toward_the_reading_limit() -> R {
+    let env = Env::new().await?;
+    let csv = heart_rate_csv(250_001, 1, "");
+    let (state, error, result) = upload(
+        &env,
+        &[
+            (
+                "Takeout/Fitbit/Physical Activity_GoogleData/Heart Rate/2023-01.csv",
+                &csv,
+            ),
+            (
+                "Takeout/Google Health/Physical Activity_GoogleData/Heart Rate/2023-01.csv",
+                &csv,
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(result["accepted"], 250_001, "{result}");
+    assert_eq!(result["fitbit_takeout"]["files_imported"], 2, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_dense_month_of_google_data_imports_above_the_json_byte_limit() -> R {
+    let env = Env::new().await?;
+    let minutes = 31 * 24 * 60;
+    let csv = heart_rate_csv(minutes, 12, "Google Fitbit Air");
+    assert!(csv.len() > 16 * 1024 * 1024);
+    let (state, error, result) = upload(
+        &env,
+        &[(
+            "Takeout/Google Health/Physical Activity_GoogleData/Heart Rate/2023-01.csv",
+            &csv,
+        )],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(result["accepted"], minutes, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invalid_heart_rate_csv_contributes_no_partial_minute() -> R {
+    let env = Env::new().await?;
+    let broken = "Takeout/Fitbit/Google Data/Heart Rate/2024-07.csv";
+    let (state, error, result) = upload(
+        &env,
+        &[
+            (
+                broken,
+                "\u{feff}timestamp,bpm\n2024-07-12T08:00:05Z,100\n2024-07-12T08:00:35Z\n",
+            ),
+            (
+                "Takeout/Google Health/Google Data/Heart Rate/2024-07.csv",
+                "\u{feff}timestamp,bpm\n2024-07-12T08:00:15Z,70\n",
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(omitted(&result), [(broken.to_string(), "invalid_csv".to_string())]);
+    assert_readings(&env, result, &[("hr", 70.0, "2024-07-12T08:00:00Z", 0)]).await
 }
 
 #[tokio::test]
@@ -805,7 +921,7 @@ async fn the_committed_fixtures_import_four_readings_each() -> R {
 }
 
 #[tokio::test]
-async fn two_profiles_that_name_different_zones_place_no_local_time() -> R {
+async fn each_product_root_uses_its_own_profile_zone() -> R {
     let env = Env::new().await?;
     let (madrid, new_york) = (profile("Europe/Madrid"), profile("America/New_York"));
     let (state, error, result) = upload(
@@ -818,13 +934,49 @@ async fn two_profiles_that_name_different_zones_place_no_local_time() -> R {
                 "timestamp,rmssd,coverage,low_frequency,high_frequency\n2024-07-04T01:15:00,43.5,0.9,1,1\n",
             ),
             (
-                "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-04.json",
-                r#"[{"dateTime":"07/04/24 08:10:00","value":{"bpm":72}}]"#,
+                "Takeout/Google Health/Google Data/Heart Rate/2024-07.csv",
+                "timestamp,bpm\n2024-07-04T08:10:00Z,72\n",
+            ),
+        ],
+    )
+    .await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(result["fitbit_takeout"]["rows_left_out"], 0, "{result}");
+    assert_readings(
+        &env,
+        result,
+        &[
+            ("hr", 72.0, "2024-07-04T08:10:00Z", -240),
+            ("hrv_rmssd", 43.5, "2024-07-03T23:15:00Z", 120),
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_malformed_profile_does_not_suppress_another_roots_local_readings() -> R {
+    let env = Env::new().await?;
+    let madrid = profile("Europe/Madrid");
+    let (state, error, result) = upload(
+        &env,
+        &[
+            ("Takeout/Fitbit/Your Profile/Profile.csv", &madrid),
+            (
+                "Takeout/Google Health/Your Profile/Profile.csv",
+                "id,timezone\nABC123,Mars/Olympus\n",
+            ),
+            (
+                "Takeout/Fitbit/Heart Rate Variability/Heart Rate Variability Details - 2024-07-04.csv",
+                "timestamp,rmssd\n2024-07-04T01:15:00,43.5\n",
+            ),
+            (
+                "Takeout/Google Health/Heart Rate Variability/Heart Rate Variability Details - 2024-07-04.csv",
+                "timestamp,rmssd\n2024-07-04T04:15:00,61.5\n",
             ),
         ],
     )
     .await?;
     assert_eq!(state, "done", "{error}");
     assert_eq!(result["fitbit_takeout"]["rows_left_out"], 1, "{result}");
-    assert_readings(&env, result, &[("hr", 72.0, "2024-07-04T08:10:00Z", 0)]).await
+    assert_readings(&env, result, &[("hrv_rmssd", 43.5, "2024-07-03T23:15:00Z", 120)]).await
 }

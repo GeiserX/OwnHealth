@@ -7,12 +7,14 @@
 //! - a daily value (resting heart rate, a daily SpO2 or HRV summary) names its calendar day, even when
 //!   written as midnight UTC.
 //!
-//! The zone in `Your Profile/Profile.csv` gives a UTC time its local offset and places a local time.
+//! Each product folder's `Your Profile/Profile.csv` gives a UTC time its local offset and places a
+//! local time. A folder that has no profile can use a zone shared by the other usable profiles.
 //! A row whose time cannot be read or placed (no zone, or a clock change) is left out and counted;
 //! the rest of the archive still imports.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Seek};
+use std::collections::btree_map::Entry;
+use std::io::Read;
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -22,7 +24,7 @@ use ownhealth_core::jobs::{self, JobContext};
 use ownhealth_core::zip_directory::{GARMIN_MAX_FILES, GARMIN_MAX_NAME_BYTES};
 use ownhealth_core::{Error, Result};
 use serde_json::Value;
-use zip::ZipArchive;
+use zip::read::ZipFile;
 
 use crate::garmin_zip::{
     self, ArchiveImport, MAX_EXPANDED, MAX_JSON, MAX_READINGS, Report, archive_error, hide_email, open_archive,
@@ -37,6 +39,13 @@ const UNKNOWN: &str = "fitbit_takeout_unknown_layout";
 const UNREADABLE: &str = "fitbit_takeout_unreadable";
 const LIMIT: &str = "fitbit_takeout_limit";
 const NO_READINGS: &str = "fitbit_takeout_no_readings";
+const INVALID_CSV: &str = "invalid_csv";
+const INVALID_JSON: &str = "invalid_json";
+
+// A month of five-second heart rate can exceed MAX_JSON. The byte and input row caps
+// also bound work for archives whose rows collapse to very few output readings.
+const MAX_HEART_RATE_CSV: u64 = 64 * 1024 * 1024;
+const MAX_INPUT_ROWS: usize = 12_000_000;
 
 const IMPORT: ArchiveImport = ArchiveImport {
     flag: PROVIDER,
@@ -297,79 +306,142 @@ fn when(raw: &str, member: Member, zone: Option<Tz>) -> Option<(DateTime<Utc>, i
     Some((t.to_utc(), (t.offset().fix().local_minus_utc() / 60) as i16))
 }
 
-/// Each row with a value: its raw time (None when the row has none) and the value.
-fn json_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64)) -> Result<()> {
-    let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|_| refuse(UNREADABLE))?;
+/// Visit each row so the input budget counts rows even when they have no usable value.
+fn json_rows(
+    bytes: &[u8],
+    metric: Metric,
+    mut push: impl FnMut(Option<&str>, Option<f64>) -> Result<()>,
+) -> Result<()> {
+    let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|_| refuse(INVALID_JSON))?;
     for row in rows {
-        if let Some(v) = metric.json_value(&row) {
-            let time = row["dateTime"]
-                .as_str()
-                .or_else(|| row["timestamp"].as_str())
-                .or_else(|| row["date"].as_str());
-            push(time, v);
-        }
+        let time = row["dateTime"]
+            .as_str()
+            .or_else(|| row["timestamp"].as_str())
+            .or_else(|| row["date"].as_str());
+        push(time, metric.json_value(&row))?;
     }
     Ok(())
 }
 
-fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64)) -> Result<()> {
-    let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).from_reader(bytes);
-    let headers: Vec<_> = reader
-        .headers()
-        .map_err(|_| refuse(UNREADABLE))?
-        .iter()
-        .map(words)
-        .collect();
+fn csv_error(error: csv::Error) -> Error {
+    match error.into_kind() {
+        csv::ErrorKind::Io(error) => archive_error(error.into(), UNREADABLE, LIMIT),
+        _ => refuse(INVALID_CSV),
+    }
+}
+
+fn csv_rows(
+    file: impl Read,
+    size: u64,
+    metric: Metric,
+    mut push: impl FnMut(Option<&str>, Option<f64>) -> Result<()>,
+) -> Result<()> {
+    // The CSV reader buffers its input and handles the UTF-8 BOM and quoted newlines.
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(file.take(size + 1));
+    let headers: Vec<_> = reader.headers().map_err(csv_error)?.iter().map(words).collect();
     let column = |names: &[&str]| {
         names
             .iter()
             .find_map(|name| headers.iter().position(|header| header == name))
     };
-    let time = column(&["timestamp", "datetime", "date time", "date"]).ok_or_else(|| refuse(UNREADABLE))?;
-    let value = column(metric.csv_values()).ok_or_else(|| refuse(UNREADABLE))?;
-    for record in reader.records() {
-        let record = record.map_err(|_| refuse(UNREADABLE))?;
-        if let Some(v) = record.get(value).and_then(|v| v.parse().ok()) {
-            push(record.get(time), v);
-        }
+    let time = column(&["timestamp", "datetime", "date time", "date"]).ok_or_else(|| refuse(INVALID_CSV))?;
+    let value = column(metric.csv_values()).ok_or_else(|| refuse(INVALID_CSV))?;
+    let mut record = csv::StringRecord::new();
+    while reader.read_record(&mut record).map_err(csv_error)? {
+        push(record.get(time), record.get(value).and_then(|v| v.parse().ok()))?;
+    }
+    if reader.into_inner().limit() != 1 {
+        return Err(refuse(UNREADABLE));
     }
     Ok(())
 }
 
-/// Heart rate arrives every few seconds. As from a FIT file, each minute keeps the mean of its
-/// readings, rounded to a whole beat, so about a year of history fits the reading limit.
-fn per_minute(samples: Vec<Sample>) -> Vec<Sample> {
-    let mut minutes: BTreeMap<i64, (Sample, f64, u32)> = BTreeMap::new();
-    for sample in samples {
-        let (minute, v) = (sample.t.timestamp().div_euclid(60), sample.v);
-        let (_, sum, n) = minutes.entry(minute).or_insert((sample, 0.0, 0));
-        *sum += v;
-        *n += 1;
-    }
-    minutes
-        .into_iter()
-        .filter_map(|(minute, (first, sum, n))| {
-            Some(Sample {
-                t: DateTime::from_timestamp(minute * 60, 0)?,
-                v: (sum / f64::from(n)).round(),
-                ..first
-            })
-        })
-        .collect()
+#[derive(Default)]
+struct HeartRateMinute {
+    // Keep the original instants until all members have contributed. The mean weights
+    // each instant once even when two exports supply overlapping parts of the minute.
+    values: BTreeMap<DateTime<Utc>, f64>,
+    first: Option<(DateTime<Utc>, Option<i16>, usize)>,
+    sum: f64,
 }
 
-fn member_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, index: usize, expanded: &mut u64) -> Result<Vec<u8>> {
-    let file = zip.by_index(index).map_err(|e| archive_error(e, UNREADABLE, LIMIT))?;
-    let size = file.size();
+impl HeartRateMinute {
+    fn add_value(&mut self, time: DateTime<Utc>, bpm: f64) {
+        if let Entry::Vacant(slot) = self.values.entry(time) {
+            slot.insert(bpm);
+            self.sum += bpm;
+        }
+    }
+
+    fn keep_first(&mut self, first: (DateTime<Utc>, Option<i16>, usize)) {
+        if self.first.is_none_or(|current| first.0 < current.0) {
+            self.first = Some(first);
+        }
+    }
+
+    fn add_sample(&mut self, sample: Sample, file: usize) {
+        self.keep_first((sample.t, sample.tz, file));
+        self.add_value(sample.t, sample.v);
+    }
+
+    fn merge(&mut self, incoming: Self) {
+        if let Some(first) = incoming.first {
+            self.keep_first(first);
+        }
+        for (t, bpm) in incoming.values {
+            self.add_value(t, bpm);
+        }
+    }
+
+    fn finish(self, minute: i64) -> (usize, Sample) {
+        let (_, tz, file) = self.first.expect("a minute has at least one reading");
+        (
+            file,
+            Sample {
+                metric: "hr",
+                t: DateTime::from_timestamp(minute * 60, 0).expect("minute of a valid reading"),
+                t_end: None,
+                v: (self.sum / self.values.len() as f64).round(),
+                tz,
+                source: 0,
+            },
+        )
+    }
+}
+
+fn spend_bytes(size: u64, limit: u64, expanded: &mut u64) -> Result<()> {
     *expanded = expanded.saturating_add(size);
-    if size > MAX_JSON || *expanded > MAX_EXPANDED {
+    if size > limit || *expanded > MAX_EXPANDED {
         return Err(refuse(LIMIT));
     }
+    Ok(())
+}
+
+fn member_bytes(file: impl Read, size: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     if !read_member(file, size, &mut bytes)? {
         return Err(refuse(UNREADABLE));
     }
     Ok(bytes)
+}
+
+fn read_zone<R: Read>(file: ZipFile<'_, R>, expanded: &mut u64) -> Result<Option<Tz>> {
+    let size = file.size();
+    if size > MAX_JSON {
+        return Ok(None);
+    }
+    spend_bytes(size, MAX_JSON, expanded)?;
+    let bytes = member_bytes(file, size)?;
+    Ok(profile_zone(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)))
+}
+
+struct ReadingFile {
+    index: usize,
+    path: String,
+    root: String,
+    kind: Member,
 }
 
 fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report> {
@@ -390,26 +462,33 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
         }
         let Ok(name) = header.name() else { continue };
         // Files outside the Fitbit and Google Health folders belong to other Takeout products.
-        let Some((_, relative)) = fitbit_takeout_path(&name) else {
+        let Some((root, relative)) = fitbit_takeout_path(&name) else {
             continue;
         };
         if header.is_dir() {
             continue;
         }
-        let shown = hide_email(
-            &name
-                .chars()
-                .map(|c| if c.is_control() { '\u{fffd}' } else { c })
-                .collect::<String>(),
-        );
+        let shown = || {
+            hide_email(
+                &name
+                    .chars()
+                    .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+                    .collect::<String>(),
+            )
+        };
         if header.is_symlink() || unsafe_name(&name) {
-            report.omit(shown, "unsafe_path");
+            report.omit(shown(), "unsafe_path");
             continue;
         }
         match member_kind(relative) {
-            Some(MemberKind::Profile) => profiles.push(index),
-            Some(MemberKind::Readings(member)) => members.push((index, shown, member)),
-            None => report.omit(shown, "unsupported"),
+            Some(MemberKind::Profile) => profiles.push((index, root.to_ascii_lowercase())),
+            Some(MemberKind::Readings(kind)) => members.push(ReadingFile {
+                index,
+                root: root.to_ascii_lowercase(),
+                path: name.into_owned(),
+                kind,
+            }),
+            None => report.omit(shown(), "unsupported"),
         }
     }
     if members.is_empty() {
@@ -417,54 +496,146 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
     }
 
     let mut expanded = 0;
-    // Two profiles that name different zones place nothing.
-    let mut zones = Vec::new();
-    for index in profiles {
-        let bytes = member_bytes(&mut zip, index, &mut expanded)?;
-        zones.push(profile_zone(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)));
+    let mut zones = BTreeMap::new();
+    for (index, root) in profiles {
+        let zone = zip
+            .by_index(index)
+            .map_err(|e| archive_error(e, UNREADABLE, LIMIT))
+            .and_then(|file| read_zone(file, &mut expanded));
+        let zone = match zone {
+            Ok(zone) => zone,
+            Err(Error::Upload(code)) if code == UNREADABLE => None,
+            Err(error) => return Err(error),
+        };
+        // A malformed profile or conflicting profiles within this folder leave its zone unknown.
+        zones
+            .entry(root)
+            .and_modify(|current| {
+                if *current != zone {
+                    *current = None;
+                }
+            })
+            .or_insert(zone);
     }
-    let zone = zones
-        .first()
-        .copied()
-        .flatten()
-        .filter(|z| zones.iter().all(|o| *o == Some(*z)));
+    let mut available = zones.values().flatten();
+    let shared_zone = available.next().copied().filter(|first| available.all(|z| z == first));
+
+    // The first path in lexicographic order wins when heart-rate values at the same instant
+    // disagree. Duplicate ZIP paths are refused by open_archive.
+    members.sort_unstable_by(|first, second| first.path.cmp(&second.path));
     let latest = Utc::now() + Duration::days(1);
-    let mut count = 0;
-    for (index, name, member) in members {
-        let bytes = member_bytes(&mut zip, index, &mut expanded)?;
-        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
-        let mut samples = Vec::new();
-        let mut left_out = 0;
-        let push = |raw: Option<&str>, v| match raw.and_then(|raw| when(raw, member, zone)) {
-            Some((t, offset)) => samples.extend(member.metric.sample(t, offset, v, latest)),
-            None => left_out += 1,
-        };
-        let read = if member.json {
-            json_rows(bytes, member.metric, push)
+    let mut input_rows = 0;
+    let mut imported = Vec::new();
+    let mut minutes = BTreeMap::<i64, HeartRateMinute>::new();
+    let mut non_heart_rate = BTreeMap::new();
+    for ReadingFile {
+        index,
+        path,
+        root,
+        kind,
+    } in members
+    {
+        let name = hide_email(&path);
+        let zone = zones.get(&root).copied().unwrap_or(shared_zone);
+        let heart_rate = matches!(kind.metric, Metric::HeartRate);
+        let file = zip.by_index(index).map_err(|e| archive_error(e, UNREADABLE, LIMIT))?;
+        let size = file.size();
+        let limit = if heart_rate && !kind.json {
+            MAX_HEART_RATE_CSV
         } else {
-            csv_rows(bytes, member.metric, push)
+            MAX_JSON
         };
-        // A file that is not the JSON or CSV it should be is listed; the others still import.
-        if read.is_err() {
-            report.omit(name, if member.json { "invalid_json" } else { "invalid_csv" });
-            continue;
+        spend_bytes(size, limit, &mut expanded)?;
+
+        // Stage one member at a time so an invalid CSV cannot contribute a partial minute.
+        let mut member_minutes = BTreeMap::<i64, HeartRateMinute>::new();
+        let mut member_points = BTreeMap::new();
+        let mut left_out = 0;
+        let mut over_limit = false;
+        let member = imported.len();
+        let push = |raw: Option<&str>, value: Option<f64>| {
+            input_rows += 1;
+            if input_rows > MAX_INPUT_ROWS {
+                return Err(refuse(LIMIT));
+            }
+            let Some(v) = value.filter(|_| !over_limit) else {
+                return Ok(());
+            };
+            let Some((t, offset)) = raw.and_then(|raw| when(raw, kind, zone)) else {
+                left_out += 1;
+                return Ok(());
+            };
+            if let Some(sample) = kind.metric.sample(t, offset, v, latest) {
+                if heart_rate {
+                    let minute = t.timestamp().div_euclid(60);
+                    member_minutes.entry(minute).or_default().add_sample(sample, member);
+                } else {
+                    member_points.insert(t, sample);
+                }
+                over_limit = member_minutes.len() + member_points.len() > MAX_READINGS;
+            }
+            Ok(())
+        };
+        let read = if kind.json {
+            let bytes = member_bytes(file, size)?;
+            json_rows(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes), kind.metric, push)
+        } else {
+            csv_rows(file, size, kind.metric, push)
+        };
+        let invalid = if kind.json { INVALID_JSON } else { INVALID_CSV };
+        match read {
+            Ok(()) => {}
+            Err(Error::Upload(code)) if code == invalid => {
+                report.omit(name, invalid);
+                continue;
+            }
+            Err(error) => return Err(error),
         }
-        if matches!(member.metric, Metric::HeartRate) {
-            samples = per_minute(samples);
-        }
-        count += samples.len();
-        if count > MAX_READINGS {
+        if over_limit {
             return Err(refuse(LIMIT));
         }
         report.rows_left_out += left_out;
-        if samples.is_empty() {
+        if member_minutes.is_empty() && member_points.is_empty() {
             report.omit(name, "no_readings");
-        } else {
-            report.add_member(name, samples);
+            continue;
+        }
+        imported.push((name, Vec::new()));
+        for (minute, incoming) in member_minutes {
+            match minutes.entry(minute) {
+                Entry::Vacant(slot) => {
+                    slot.insert(incoming);
+                }
+                Entry::Occupied(mut slot) => slot.get_mut().merge(incoming),
+            }
+        }
+        for (t, sample) in member_points {
+            // Keep the existing last-ZIP-member precedence for non-heart-rate metrics.
+            match non_heart_rate.entry((sample.metric, t)) {
+                Entry::Vacant(slot) => {
+                    slot.insert((index, member, sample));
+                }
+                Entry::Occupied(mut slot) if index > slot.get().0 => {
+                    slot.insert((index, member, sample));
+                }
+                Entry::Occupied(_) => {}
+            }
+        }
+        if minutes.len() + non_heart_rate.len() > MAX_READINGS {
+            return Err(refuse(LIMIT));
         }
     }
-    if count == 0 {
+    if imported.is_empty() {
         return Err(refuse(NO_READINGS));
+    }
+    for (minute, readings) in minutes {
+        let (member, sample) = readings.finish(minute);
+        imported[member].1.push(sample);
+    }
+    for (_, member, sample) in non_heart_rate.into_values() {
+        imported[member].1.push(sample);
+    }
+    for (name, samples) in imported {
+        report.add_member(name, samples);
     }
     Ok(report)
 }
