@@ -270,6 +270,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
         "import.gadgetbridge",
         "import.cgm_csv",
         "import.garmin_zip",
+        "import.strava_zip",
         "import.pdf",
     ] {
         let id: i64 = sqlx::query_scalar(
@@ -335,6 +336,7 @@ async fn a_wearables_import_result_shows_only_to_members_who_may_read_wearables(
         results(&v),
         [
             ("import.pdf".to_string(), result.clone()),
+            ("import.strava_zip".to_string(), serde_json::Value::Null),
             ("import.garmin_zip".to_string(), serde_json::Value::Null),
             ("import.cgm_csv".to_string(), serde_json::Value::Null),
             ("import.gadgetbridge".to_string(), serde_json::Value::Null),
@@ -1222,20 +1224,31 @@ async fn a_move_while_a_run_for_its_profile_is_still_marked_running_imports_afte
     Ok(())
 }
 
-/// A Garmin export's document holds the readings it read from the zip (the zip is not kept): a move
-/// runs the Garmin import of that document for the new owner, so the readings follow it.
+/// A move reimports the stored readings under the new owner.
 #[tokio::test]
-async fn a_moved_garmin_export_takes_its_readings_to_the_new_profile() -> R {
+async fn a_moved_export_takes_its_readings_to_the_new_profile() -> R {
+    for (kind, bytes) in [
+        (
+            "import.garmin_zip",
+            include_bytes!("../../../../fixtures/garmin/lucia-history.zip").as_slice(),
+        ),
+        (
+            "import.strava_zip",
+            include_bytes!("../../../../fixtures/strava/lucia-history.zip").as_slice(),
+        ),
+    ] {
+        assert_export_moves(kind, bytes).await?;
+    }
+    Ok(())
+}
+
+async fn assert_export_moves(kind: &str, bytes: &[u8]) -> R {
     let a = app().await?;
     ownhealth_devices::register();
     ownhealth_ingest_pdf::register();
-    let kinds = ["import.garmin_zip".to_string(), "import.pdf".to_string()];
-    let bytes = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../fixtures/garmin/lucia-history.zip"
-    ))?;
+    let kinds = [kind.to_string(), "import.pdf".to_string()];
     let (s, v) = a
-        .upload("alex", &[("profile", "alex")], &[("lucia-history.zip", &bytes)])
+        .upload("alex", &[("profile", "alex")], &[("lucia-history.zip", bytes)])
         .await?;
     assert_eq!(s, StatusCode::OK, "{v}");
     let ctx = a.rt.job_context();

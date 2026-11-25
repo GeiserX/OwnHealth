@@ -21,6 +21,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/ZIP could not be read/i, 'err_zip_unreadable'],
 	[/ZIP holds too many files to import/i, 'err_zip_too_many'],
 	[/^garmin_zip_limit$/i, 'err_garmin_zip_limit'],
+	[/^strava_zip_unreadable$/i, 'err_strava_zip_unreadable'],
+	[/^strava_zip_limit$/i, 'err_strava_zip_limit'],
 	[/^not a readable LibreView or Dexcom Clarity export/i, 'err_cgm_unreadable'],
 	[/^the export holds more than \d+ readings/i, 'err_cgm_too_many'],
 	[/^the export is larger than \d+ MB/i, 'err_cgm_too_large'],

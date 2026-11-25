@@ -18,7 +18,7 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | zip_directory_limit | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | strava_zip | broken_zip | zip_directory_limit | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -29,6 +29,7 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
         "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
         "garmin_zip" => "import.garmin_zip",
+        "strava_zip" => "import.strava_zip",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
         "gadgetbridge_db" => "import.gadgetbridge",
@@ -44,7 +45,7 @@ pub fn mime(kind: &str) -> Option<&'static str> {
         "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
-        "apple_health_zip" | "garmin_zip" => "application/zip",
+        "apple_health_zip" | "garmin_zip" | "strava_zip" => "application/zip",
         "genome_facts" => "application/json",
         "vcf" => "application/gzip",
         "tbi" => "application/octet-stream",
@@ -57,13 +58,25 @@ pub fn mime(kind: &str) -> Option<&'static str> {
 /// The mime of the document a Garmin export's import stores: its readings as JSON lines, not the zip.
 pub const GARMIN_READINGS_MIME: &str = "application/x-ndjson";
 
-/// The mime of the document an upload kind's import stores: the upload's own, except a Garmin export,
-/// whose document holds the readings it read from the zip.
+/// The mime of the projected Strava readings, used to route moves and replays.
+pub const STRAVA_READINGS_MIME: &str = "application/vnd.ownhealth.strava+ndjson";
+
+/// The stored mime of an upload. Garmin and Strava exports keep a projection of the archive.
 pub fn stored_mime(kind: &str) -> Option<&'static str> {
-    if kind == "garmin_zip" {
-        return Some(GARMIN_READINGS_MIME);
+    match kind {
+        "garmin_zip" => Some(GARMIN_READINGS_MIME),
+        "strava_zip" => Some(STRAVA_READINGS_MIME),
+        _ => mime(kind),
     }
-    mime(kind)
+}
+
+/// The flag and lock key for imports that release their original archive.
+pub(crate) fn projected_export(kind: &str) -> Option<&'static str> {
+    match kind {
+        "garmin_zip" => Some("garmin"),
+        "strava_zip" => Some("strava"),
+        _ => None,
+    }
 }
 
 /// Recognized outer members of a Garmin account export. The leading directories vary between
@@ -127,7 +140,38 @@ fn classify_zip(reader: impl Read + Seek) -> UploadKind {
             kind = "garmin_zip";
         }
     }
+    if kind == "unknown" && strava_manifest(&archive).is_some() {
+        return "strava_zip";
+    }
     kind
+}
+
+/// Find activities.csv beside the activity files, including in a repacked export with a wrapper
+/// directory. Directory entries alone do not identify a Strava export.
+pub fn strava_manifest(archive: &zip::ZipArchive<impl Read + Seek>) -> Option<String> {
+    let roots: std::collections::HashSet<_> = archive
+        .file_names()
+        .flatten()
+        .filter_map(|name| {
+            let root = name.strip_suffix("activities.csv")?;
+            (root.is_empty() || root.ends_with('/')).then(|| root.to_owned())
+        })
+        .collect();
+    if roots.is_empty() {
+        return None;
+    }
+    archive.file_names().flatten().find_map(|name| {
+        if name.ends_with('/') {
+            return None;
+        }
+        for (i, _) in name.match_indices("activities/") {
+            let root = &name[..i];
+            if roots.contains(root) {
+                return Some(format!("{root}activities.csv"));
+            }
+        }
+        None
+    })
 }
 
 /// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.
@@ -153,6 +197,12 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
             .and_then(|path| std::fs::File::open(path).ok())
             .map_or("unknown", classify_zip)
     })
+}
+
+pub(crate) fn sniff_reader(filename: &str, mut reader: impl Read + Seek) -> Result<UploadKind> {
+    let mut head = Vec::with_capacity(4096);
+    (&mut reader).take(4096).read_to_end(&mut head)?;
+    Ok(sniff_with_zip(filename, &head, || classify_zip(reader)))
 }
 
 fn sniff_with_zip(filename: &str, head: &[u8], zip_kind: impl FnOnce() -> UploadKind) -> UploadKind {
@@ -578,14 +628,9 @@ pub async fn dispatch_upload_in_zone(
         );
         // Off the runtime: a plain file of an older install is hashed once when it opens.
         // ZIP classification only needs the central directory, even for a sealed blob.
-        let kind = tokio::task::spawn_blocking(move || -> Result<UploadKind> {
-            let mut head = Vec::with_capacity(4096);
-            let mut reader = store.open_seek(owner, &sha)?;
-            (&mut reader).take(4096).read_to_end(&mut head)?;
-            Ok(sniff_with_zip(&name, &head, || classify_zip(reader)))
-        })
-        .await
-        .map_err(std::io::Error::other)??;
+        let kind = tokio::task::spawn_blocking(move || sniff_reader(&name, store.open_seek(owner, &sha)?))
+            .await
+            .map_err(std::io::Error::other)??;
         kinds.push((f, kind));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");

@@ -1,21 +1,25 @@
-// The result of a Garmin account export import (job import.garmin_zip, slice 30): the files it read, the
-// readings they added, and the files left out with their reasons. Pure: tests/garmin_import.test.ts runs
-// it under node; GarminResult.svelte turns it into text with t/tp.
+// Results shared by Garmin and Strava activity exports. GarminResult.svelte renders the counts
+// and the files left out with their reasons.
 
-export type GarminSummary = {
+export type ActivityExportSummary = {
 	files_imported: number;
 	gps_left_out: boolean;
+	rows_without_file?: number;
+	files_without_row?: number;
 	not_imported: { member: string; reason: string }[];
 };
 
-/** The `garmin` details of a job result or of a document's flags; null for anything else. */
-export function garminSummary(value: unknown): GarminSummary | null {
-	const summary = value as Partial<GarminSummary> | null;
+/** The archive details of a job result or a document's flags. */
+export function exportSummary(value: unknown): ActivityExportSummary | null {
+	const details = value as { garmin?: unknown; strava?: unknown } | null | undefined;
+	const summary = (details?.strava ?? details?.garmin) as Partial<ActivityExportSummary> | undefined;
 	if (typeof summary?.files_imported !== 'number' || !Array.isArray(summary.not_imported)) return null;
 	return {
 		files_imported: summary.files_imported,
 		gps_left_out: summary.gps_left_out === true,
-		not_imported: summary.not_imported
+		not_imported: summary.not_imported,
+		...(typeof summary.rows_without_file === 'number' && { rows_without_file: summary.rows_without_file }),
+		...(typeof summary.files_without_row === 'number' && { files_without_row: summary.files_without_row })
 	};
 }
 
@@ -32,9 +36,13 @@ export function garminReadings(result: unknown): { key: string; n: number } | nu
 	return duplicate > 0 ? { key: 'i2_garmin_nothing_new', n: duplicate } : null;
 }
 
+export function isActivityExportJob(kind: string | undefined): boolean {
+	return kind === 'import.garmin_zip' || kind === 'import.strava_zip';
+}
+
 /** A finished import that read no file of readings: its pill says so instead of "Imported". */
-export function garminNothing(job: { kind?: string; state?: string; result?: unknown } | undefined): boolean {
-	if (!job || job.kind !== 'import.garmin_zip' || job.state !== 'done') return false;
-	const summary = garminSummary((job.result as Record<string, unknown> | null | undefined)?.garmin);
+export function exportNothing(job: { kind?: string; state?: string; result?: unknown } | undefined): boolean {
+	if (!job || !isActivityExportJob(job.kind) || job.state !== 'done') return false;
+	const summary = exportSummary(job.result);
 	return summary !== null && summary.files_imported === 0;
 }

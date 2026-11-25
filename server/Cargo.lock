@@ -4193,6 +4193,7 @@ dependencies = [
  "ownhealth-core",
  "ownhealth-ingest-structured",
  "ownhealth-normalize",
+ "quick-xml",
  "rusqlite",
  "serde",
  "serde_json",

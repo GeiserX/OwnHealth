@@ -26,6 +26,7 @@ pub mod hae;
 pub mod nightscout;
 pub mod scores;
 pub mod store;
+pub mod strava_zip;
 pub mod synthetic;
 
 use chrono::{DateTime, NaiveDate, Utc};
@@ -38,6 +39,7 @@ pub fn register() {
     nightscout::register();
     fit::register();
     garmin_zip::register();
+    strava_zip::register();
     ownhealth_core::demo::register_demo_hook("devices_cgm", demo::ORDER, demo::seed_boxed);
 }
 
