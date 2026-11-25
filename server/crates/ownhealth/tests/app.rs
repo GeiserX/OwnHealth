@@ -254,3 +254,209 @@ fn the_dev_secret_key_is_refused_outside_dev_and_demo() -> R {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn ow_paths_outside_the_get_allowlist_never_fall_through_to_the_ui() -> R {
+    let db = TestDb::empty().await?;
+    let dir = tempfile::tempdir()?;
+    let app = build_app(runtime(&db, dir.path(), true).await?);
+    for path in [
+        "/ow",
+        "/ow/",
+        "/ow/api/v1/users",
+        "/ow/api/v1/oauth/providers",
+        "/ow/api/v1/oauth/whoop/authorize",
+        "/ow/api/v1/oauth/strava/callback",
+        "/ow/api/v1/oauth/apple_health/callback",
+        "/ow/api/v1/oauth/WHOOP/callback",
+        "/ow/api/v1/oauth/whoop/callback/",
+        "/ow/api/v1/oauth/whoop%2Fextra/callback",
+        "/ow/api/v1/oauth/success?provider=garmin",
+    ] {
+        assert_eq!(call(&app, get(path)?).await?.0, StatusCode::NOT_FOUND, "{path}");
+    }
+    for method in ["POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE"] {
+        let req = Request::builder()
+            .method(method)
+            .uri("/ow/api/v1/oauth/whoop/callback")
+            .body(Body::empty())?;
+        assert_eq!(call(&app, req).await?.0, StatusCode::METHOD_NOT_ALLOWED, "{method}");
+    }
+    // Withings' HEAD probe gets no answer while the proxy is off, like the GET
+    let head = Request::head("/ow/api/v1/oauth/withings/callback").body(Body::empty())?;
+    assert_eq!(call(&app, head).await?.0, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R {
+    use axum::http::{Method, Uri, header};
+    use axum::response::IntoResponse;
+    use axum::routing::get as on_get;
+    use ownhealth_core::config::Settings;
+    use std::collections::HashMap;
+
+    let fake = axum::Router::new()
+        .route(
+            "/api/v1/oauth/whoop/callback",
+            on_get(|req: Request<Body>| async move {
+                let (parts, body) = req.into_parts();
+                if parts.method != Method::GET
+                    || parts.uri.query() != Some("code=abc%2Bdef&state=xyz")
+                    || [
+                        header::AUTHORIZATION,
+                        header::COOKIE,
+                        header::ORIGIN,
+                        header::REFERER,
+                        header::FORWARDED,
+                    ]
+                    .iter()
+                    .any(|name| parts.headers.contains_key(name))
+                    || parts.headers.contains_key("x-open-wearables-api-key")
+                    || !to_bytes(body, 1024).await.is_ok_and(|bytes| bytes.is_empty())
+                {
+                    return StatusCode::BAD_REQUEST.into_response();
+                }
+                (
+                    StatusCode::SEE_OTHER,
+                    [
+                        (header::LOCATION, "/api/v1/oauth/success?provider=whoop&user_id=demo"),
+                        (header::SET_COOKIE, "fake=sidecar; Path=/"),
+                    ],
+                )
+                    .into_response()
+            }),
+        )
+        .route(
+            "/api/v1/oauth/success",
+            on_get(|uri: Uri| async move { axum::Json(json!({"success": true, "query": uri.query()})) }),
+        )
+        .route(
+            "/api/v1/oauth/error",
+            on_get(|| async { axum::Json(json!({"success": false})) }),
+        )
+        .route(
+            "/api/v1/oauth/oura/callback",
+            on_get(|| async { (StatusCode::SEE_OTHER, [(header::LOCATION, "/api/v1/users")]) }),
+        )
+        .route(
+            "/api/v1/oauth/polar/callback",
+            on_get(|| async {
+                (
+                    StatusCode::SEE_OTHER,
+                    [(header::LOCATION, "/api/v1/oauth/success?provider=whoop&user_id=demo")],
+                )
+            }),
+        )
+        .route(
+            "/api/v1/oauth/withings/callback",
+            on_get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    "<script>alert(1)</script>",
+                )
+            })
+            .head(|uri: Uri| async move {
+                if uri.query() == Some("redirect-probe=1") {
+                    return (
+                        StatusCode::SEE_OTHER,
+                        [(header::LOCATION, "/api/v1/oauth/success?provider=withings")],
+                    )
+                        .into_response();
+                }
+                StatusCode::NO_CONTENT.into_response()
+            }),
+        )
+        .fallback(|| async { StatusCode::IM_A_TEAPOT });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let task = tokio::spawn(async move { axum::serve(listener, fake).await });
+    let db = TestDb::empty().await?;
+    let dir = tempfile::tempdir()?;
+    let settings = db.settings(dir.path())?;
+    let overrides = HashMap::from([
+        ("OWNHEALTH_OW_URL".into(), origin),
+        ("OWNHEALTH_DATA_DIR".into(), settings.data_dir.display().to_string()),
+        ("OWNHEALTH_SECRETS_KEY".into(), settings.secrets_key.unwrap_or_default()),
+    ]);
+    let app = build_app(Runtime::with_pool(Settings::from(&overrides)?, db.pool.clone())?);
+    let req = Request::get("/ow/api/v1/oauth/whoop/callback?code=abc%2Bdef&state=xyz")
+        .header(header::AUTHORIZATION, "Bearer synthetic")
+        .header(header::COOKIE, "synthetic=x")
+        .header(header::ORIGIN, "https://ownhealth.invalid")
+        .header(header::REFERER, "https://ownhealth.invalid/connections")
+        .header(header::FORWARDED, "for=192.0.2.1")
+        .header("x-open-wearables-api-key", "synthetic")
+        .body(Body::from("must not forward"))?;
+    let res = app.clone().oneshot(req).await?;
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(res.headers()[header::REFERRER_POLICY], "no-referrer");
+    assert!(!res.headers().contains_key(header::SET_COOKIE));
+    let location = res.headers()[header::LOCATION].to_str()?;
+    assert_eq!(location, "/ow/api/v1/oauth/success?provider=whoop&user_id=demo");
+    let (status, bytes, _) = call(&app, get(location)?).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_of(&bytes),
+        json!({"success": true, "query": "provider=whoop&user_id=demo"})
+    );
+    let (status, bytes, _) = call(&app, get("/ow/api/v1/oauth/error?message=declined")?).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_of(&bytes), json!({"success": false}));
+    for path in [
+        "/ow/api/v1/oauth/success?provider=whoop&provider=garmin",
+        "/ow/api/v1/oauth/success?provider=garmin",
+        "/ow/api/v1/oauth/success",
+        "/ow/api/v1/oauth/error?provider=strava",
+    ] {
+        assert_eq!(call(&app, get(path)?).await?.0, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert_eq!(
+        call(&app, get("/ow/api/v1/oauth/oura/callback")?).await?.0,
+        StatusCode::BAD_GATEWAY
+    );
+    // a callback may only send the browser to its own provider's result page
+    assert_eq!(
+        call(&app, get("/ow/api/v1/oauth/polar/callback?code=c&state=s")?)
+            .await?
+            .0,
+        StatusCode::BAD_GATEWAY
+    );
+    // a result that is not JSON reaches the browser as sandboxed plain text
+    let res = app.clone().oneshot(get("/ow/api/v1/oauth/withings/callback")?).await?;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert!(
+        res.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()?
+            .starts_with("sandbox;")
+    );
+    // The fake returns a distinct status for HEAD so a local 200 or a forwarded GET fails.
+    let head = Request::head("/ow/api/v1/oauth/withings/callback").body(Body::empty())?;
+    let (status, body, cache) = call(&app, head).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    let redirect_probe = Request::head("/ow/api/v1/oauth/withings/callback?redirect-probe=1").body(Body::empty())?;
+    let res = app.clone().oneshot(redirect_probe).await?;
+    assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    assert!(!res.headers().contains_key(header::LOCATION));
+
+    // HEAD stays refused everywhere else
+    for (path, want) in [
+        (
+            "/ow/api/v1/oauth/success?provider=whoop",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("/ow/api/v1/oauth/error", StatusCode::METHOD_NOT_ALLOWED),
+        ("/ow/api/v1/oauth/strava/callback", StatusCode::NOT_FOUND),
+        ("/ow/api/v1/oauth/whoop/authorize", StatusCode::NOT_FOUND),
+        ("/ow/api/v1/users", StatusCode::NOT_FOUND),
+    ] {
+        let head = Request::head(path).body(Body::empty())?;
+        assert_eq!(call(&app, head).await?.0, want, "{path}");
+    }
+    task.abort();
+    Ok(())
+}

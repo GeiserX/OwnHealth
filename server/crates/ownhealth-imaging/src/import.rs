@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
+use zip::result::ZipError;
 
 use crate::orthanc::{FILE_CHUNK, Orthanc, OrthancError, SeriesInfo, Stored, resource_id};
 use crate::part10::{Header, Part10Error, encapsulated_file, is_part10, read_header};
@@ -125,13 +126,13 @@ pub struct StudyScan {
     pub series: BTreeMap<String, usize>,
     sops: BTreeSet<(String, String)>,
     /// The ZIP entries of the study, in ZIP order.
-    entries: Vec<Instance>,
+    pub(crate) entries: Vec<Instance>,
 }
 
 #[derive(Debug, Clone)]
-struct Instance {
-    index: usize,
-    sop_uid: String,
+pub(crate) struct Instance {
+    pub(crate) index: usize,
+    pub(crate) sop_uid: String,
     expected_id: Option<String>,
     report: bool,
 }
@@ -158,11 +159,18 @@ pub struct Scan {
     pub not_dicom: usize,
     pub directories: usize,
     pub damaged: usize,
+    /// Entries whose study could not be identified because of an I/O failure.
+    pub(crate) unreadable_entries: usize,
     pub too_large: usize,
     pub studies: BTreeMap<String, StudyScan>,
 }
 
 impl Scan {
+    fn note_entry_error(&mut self, error: &ZipError) {
+        self.damaged += 1;
+        self.unreadable_entries += usize::from(entry_io_failed(error));
+    }
+
     /// Every patient the disc holds, by PatientID.
     pub fn patients(&self) -> BTreeSet<&str> {
         self.studies
@@ -172,10 +180,15 @@ impl Scan {
     }
 }
 
-fn read_entry(zip: &mut zip::ZipArchive<BlobReader>, i: usize, limit: u64) -> Result<Vec<u8>, String> {
-    let entry = zip.by_index(i).map_err(|e| e.to_string())?;
+// The ZIP reader reports a bad CRC as InvalidData. The import skips such damaged content.
+fn entry_io_failed(error: &ZipError) -> bool {
+    matches!(error, ZipError::Io(e) if e.kind() != io::ErrorKind::InvalidData)
+}
+
+fn read_entry(zip: &mut zip::ZipArchive<BlobReader>, i: usize, limit: u64) -> Result<Vec<u8>, ZipError> {
+    let entry = zip.by_index(i)?;
     let mut out = Vec::new();
-    entry.take(limit).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    entry.take(limit).read_to_end(&mut out)?;
     Ok(out)
 }
 
@@ -185,7 +198,10 @@ pub fn scan(reader: BlobReader) -> Result<Scan, JobError> {
 }
 
 fn open_archive(reader: BlobReader) -> Result<zip::ZipArchive<BlobReader>, JobError> {
-    zip::ZipArchive::new(reader).map_err(|e| JobError::permanent(format!("the upload is not a zip that reads: {e}")))
+    zip::ZipArchive::new(reader).map_err(|e| match e {
+        zip::result::ZipError::Io(_) => JobError::retry(format!("the upload zip could not be read: {e}")),
+        _ => JobError::permanent(format!("the upload is not a zip that reads: {e}")),
+    })
 }
 
 fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError> {
@@ -200,9 +216,9 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
     for i in 0..zip.len() {
         let (is_dir, size) = match zip.by_index_raw(i) {
             Ok(e) => (e.is_dir(), e.size()),
-            Err(_) => {
+            Err(e) => {
                 s.files += 1;
-                s.damaged += 1;
+                s.note_entry_error(&e);
                 continue;
             }
         };
@@ -214,9 +230,12 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
             s.too_large += 1;
             continue;
         }
-        let Ok(mut head) = read_entry(zip, i, HEAD_BYTES) else {
-            s.damaged += 1;
-            continue;
+        let mut head = match read_entry(zip, i, HEAD_BYTES) {
+            Ok(head) => head,
+            Err(e) => {
+                s.note_entry_error(&e);
+                continue;
+            }
         };
         if !is_part10(&head) {
             s.not_dicom += 1;
@@ -227,8 +246,8 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
             // a header that does not end in the first bytes: read further, as far as the cap
             match read_entry(zip, i, MAX_HEADER_BYTES) {
                 Ok(more) => head = more,
-                Err(_) => {
-                    s.damaged += 1;
+                Err(e) => {
+                    s.note_entry_error(&e);
                     continue;
                 }
             }
@@ -259,15 +278,22 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
 /// Only repeated SOPs require a full read during the scan. Verify the ZIP CRC and compare hashes
 /// of the original bytes before any study is sent.
 fn entry_hash(zip: &mut zip::ZipArchive<BlobReader>, index: usize) -> Result<[u8; 32], JobError> {
-    let unreadable = || JobError::permanent("a duplicate DICOM entry could not be read");
-    let entry = zip.by_index(index).map_err(|_| unreadable())?;
+    let read_error = |error: ZipError| {
+        let message = format!("a duplicate DICOM entry could not be read: {error}");
+        if entry_io_failed(&error) {
+            JobError::retry(message)
+        } else {
+            JobError::permanent(message)
+        }
+    };
+    let entry = zip.by_index(index).map_err(read_error)?;
     let expected = entry.size();
     let mut entry = entry.take(MAX_FILE_BYTES + 1);
     let mut digest = Sha256::new();
     let mut count = 0;
     let mut buf = [0; FILE_CHUNK];
     loop {
-        let n = entry.read(&mut buf).map_err(|_| unreadable())?;
+        let n = entry.read(&mut buf).map_err(|e| read_error(e.into()))?;
         if n == 0 {
             break;
         }
@@ -275,7 +301,7 @@ fn entry_hash(zip: &mut zip::ZipArchive<BlobReader>, index: usize) -> Result<[u8
         digest.update(&buf[..n]);
     }
     if count != expected || count > MAX_FILE_BYTES {
-        return Err(unreadable());
+        return Err(JobError::permanent("a duplicate DICOM entry could not be read"));
     }
     Ok(digest.finalize().into())
 }
@@ -378,7 +404,7 @@ pub(crate) fn job(ctx: JobContext, job: Job) -> BoxFuture<'static, HandlerResult
     Box::pin(run(ctx, job))
 }
 
-fn retry(e: OrthancError) -> JobError {
+pub(crate) fn retry(e: OrthancError) -> JobError {
     JobError::typed("OrthancError", e.0)
 }
 
@@ -468,7 +494,13 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
             Outcome::Refused => refused += 1,
         }
     }
+    // A person may have closed the upload's last held study while this ran: that close found the
+    // import running and left the upload, so it goes now (crate::remove::settle_after_import).
+    let mut tx = ctx.pool.begin().await?;
+    let upload_removed = crate::remove::settle_after_import(&mut tx, import_id, job.id).await?;
+    tx.commit().await?;
     Ok(Some(json!({
+        "upload_removed": upload_removed,
         "files": scan.files,
         "not_dicom": scan.not_dicom,
         "directories": scan.directories,
@@ -487,19 +519,19 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
 }
 
 /// One ZIP directory for the job. Only blocking tasks touch the seekable reader.
-struct StudyFiles {
+pub(crate) struct StudyFiles {
     zip: Arc<Mutex<zip::ZipArchive<BlobReader>>>,
     dir: PathBuf,
 }
 
-struct Staged {
-    file: File,
-    size: u64,
+pub(crate) struct Staged {
+    pub(crate) file: File,
+    pub(crate) size: u64,
     sha256: Vec<u8>,
 }
 
 impl StudyFiles {
-    async fn open(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<(Self, Scan), JobError> {
+    pub(crate) async fn open(blobs: &BlobStore, owner: BlobOwner, sha: &str) -> Result<(Self, Scan), JobError> {
         let blobs = blobs.clone();
         let sha = sha.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -524,7 +556,7 @@ impl StudyFiles {
         .map_err(|e| JobError::retry(format!("the zip reader stopped: {e}")))?
     }
 
-    async fn stage_instance(&self, index: usize) -> Result<Option<Staged>, JobError> {
+    pub(crate) async fn stage_instance(&self, index: usize) -> Result<Option<Staged>, JobError> {
         let zip = Arc::clone(&self.zip);
         let dir = self.dir.clone();
         tokio::task::spawn_blocking(move || stage(&zip, &dir, index))
@@ -764,7 +796,7 @@ struct PendingPost {
 /// Under the UID lock, take back every newly written instance of an unverified attempt. A reply
 /// that named the new ID is authoritative. For a lost reply, look up the original SOP and exclude
 /// every ID that already existed before this POST. An unexpected ID needs byte-for-byte evidence.
-async fn recover_posts(
+pub(crate) async fn recover_posts(
     conn: &mut PgConnection,
     journal: &mut Option<PgConnection>,
     pool: &PgPool,
@@ -1056,6 +1088,14 @@ async fn import_study(
         }
         Some(_) => {}
     }
+    // This upload holds the study now: its removal is refused, and a rebuild replays it.
+    sqlx::query(
+        "insert into imaging_import_study (import_id, study_instance_uid) values ($1, $2) on conflict do nothing",
+    )
+    .bind(import.id)
+    .bind(uid)
+    .execute(&mut *tx)
+    .await?;
     if added && keep_until_commit {
         sqlx::query("delete from imaging_import_post where study_instance_uid = $1 and import_id = $2")
             .bind(uid)
@@ -1108,8 +1148,8 @@ async fn record_reports(
             .map_err(retry)?;
         let blobs = ctx.blobs.clone();
         let stored = tokio::task::spawn_blocking(move || {
-            let pdf = encapsulated_file(file).ok().flatten();
-            pdf.map(|p| blobs.put_reader(owner, p))
+            report_pdf(file)?
+                .map(|p| blobs.put_reader(owner, p))
                 .transpose()
                 .map_err(|e| JobError::from(Error::from(e)))
         })
@@ -1117,16 +1157,28 @@ async fn record_reports(
         .map_err(|e| JobError::retry(format!("storing a report stopped: {e}")))??;
         if let Some((sha, size)) = stored {
             let id = record_report(conn, import, profile, study, &sha, size).await?;
-            sqlx::query("insert into imaging_import_report (study_instance_uid, sop_instance_uid) values ($1, $2)")
-                .bind(uid)
-                .bind(sop)
-                .execute(&mut *conn)
-                .await?;
             first.get_or_insert(id);
             reports += 1;
         }
+        // Filed or not (a report whose content holds no PDF stays unfiled), the SOP is handled: a
+        // replay does not download it again.
+        sqlx::query("insert into imaging_import_report (study_instance_uid, sop_instance_uid) values ($1, $2)")
+            .bind(uid)
+            .bind(sop)
+            .execute(&mut *conn)
+            .await?;
     }
     Ok((first, reports))
+}
+
+/// The PDF a staged report instance holds, if any. A read that failed says nothing about the report:
+/// the job tries again, and the SOP is not marked handled. Content that holds no PDF is `None`.
+fn report_pdf(file: File) -> Result<Option<std::io::Take<File>>, JobError> {
+    match encapsulated_file(file) {
+        Ok(pdf) => Ok(pdf),
+        Err(Part10Error::Io(e)) => Err(JobError::retry(format!("reading a report failed: {e}"))),
+        Err(_) => Ok(None),
+    }
 }
 
 /// An Encapsulated PDF of the study: stored for the profile and filed as an `imaging_report` document
@@ -1342,6 +1394,10 @@ async fn to_review_item(
     Ok(())
 }
 
+/// The refusal of an Accept whose upload was removed (crate::remove). The API answers it with a code
+/// of its own, `upload_removed`, so a page can say it in the person's language.
+pub const UPLOAD_REMOVED: &str = "This upload was removed. Upload the disc again to add this study.";
+
 /// Accepting an `imaging_study` item: a study whose patient did not match the profile, that came on a
 /// disc with other patients, or whose patient text did not decode, is imported as it is. The other reasons cannot be accepted: another
 /// profile or another patient holds the UID. The refusal names neither, since the item's reviewer may
@@ -1365,11 +1421,16 @@ pub async fn accept(
     ) else {
         return Err(Error::Review("this item names no upload and study".into()));
     };
-    let filename: Option<String> = sqlx::query_scalar("select filename from imaging_import where id = $1")
-        .bind(import_id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .flatten();
+    // A shared lock: the removal of the upload (crate::remove) waits for this accept, or this accept
+    // sees the upload gone.
+    let upload: Option<Option<String>> =
+        sqlx::query_scalar("select filename from imaging_import where id = $1 for share")
+            .bind(import_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(filename) = upload else {
+        return Err(Error::Review(UPLOAD_REMOVED.into()));
+    };
     let payload = json!({
         "import_id": import_id.to_string(),
         "profile_id": profile_id.to_string(),
@@ -1379,4 +1440,29 @@ pub async fn accept(
     let key = format!("{JOB}:{import_id}:accept:{uid}");
     enqueue(&mut *conn, JOB, &payload, EnqueueOptions::dedupe(&key)).await?;
     Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_report_that_cannot_be_read_retries_and_one_with_no_pdf_is_handled() {
+        let dir = tempfile::tempdir().expect("staging directory");
+        let path = dir.path().join("staged");
+        std::fs::write(&path, vec![0u8; 256]).expect("staged bytes");
+        // opened for writing only: every read fails, as a failing disk does
+        let unreadable = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("staged file");
+        let read = report_pdf(unreadable).map(|pdf| pdf.is_some());
+        assert!(
+            matches!(&read, Err(e) if !e.permanent),
+            "an unreadable report was not retried: {read:?}"
+        );
+        // the same bytes, read: not DICOM, so no PDF, and the SOP counts as handled
+        let readable = File::open(&path).expect("staged file");
+        assert!(matches!(report_pdf(readable), Ok(None)));
+    }
 }

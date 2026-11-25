@@ -318,7 +318,7 @@ fn device(fields: &[fitparser::FitDataField]) -> Device {
     }
 }
 
-fn in_time(t: DateTime<Utc>, latest: DateTime<Utc>) -> bool {
+pub(crate) fn in_time(t: DateTime<Utc>, latest: DateTime<Utc>) -> bool {
     t.timestamp() >= EARLIEST && t <= latest
 }
 
@@ -410,20 +410,7 @@ fn take(out: &mut Read, kind: MesgNum, fields: &[fitparser::FitDataField], lates
                 out.bad_time += 1;
                 return;
             };
-            if !in_time(t, latest) {
-                out.bad_time += 1;
-            } else if !(HR.0..=HR.1).contains(&hr) {
-                out.bad_hr += 1;
-            } else {
-                let minute = t.timestamp().div_euclid(60) * 60;
-                if out.hr.len() >= MAX_MINUTES && !out.hr.contains_key(&minute) {
-                    out.over_limit += 1;
-                    return;
-                }
-                let e = out.hr.entry(minute).or_insert((0.0, 0));
-                e.0 += hr;
-                e.1 += 1;
-            }
+            archive_heart_rate(out, t, hr, latest);
         }
         MesgNum::Session => {
             if out.sessions.len() >= MAX_ACTIVITIES {
@@ -822,6 +809,24 @@ fn activity(read: &Read) -> Result<(Vec<Sample>, BTreeMap<&'static str, i64>)> {
         return Err(no_activity());
     }
     Ok((all, reasons))
+}
+
+/// Keep an activity's heart rate on the same minute buckets and limits for every file format.
+pub(crate) fn archive_heart_rate(out: &mut Read, t: DateTime<Utc>, hr: f64, latest: DateTime<Utc>) {
+    if !in_time(t, latest) {
+        out.bad_time += 1;
+    } else if !(HR.0..=HR.1).contains(&hr) {
+        out.bad_hr += 1;
+    } else {
+        let minute = t.timestamp().div_euclid(60) * 60;
+        if out.hr.len() >= MAX_MINUTES && !out.hr.contains_key(&minute) {
+            out.over_limit += 1;
+            return;
+        }
+        let e = out.hr.entry(minute).or_insert((0.0, 0));
+        e.0 += hr;
+        e.1 += 1;
+    }
 }
 
 /// Project a FIT activity for a bulk export without retaining its binary or device metadata.

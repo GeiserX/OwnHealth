@@ -89,12 +89,20 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 | HL7 v2 ORU^R01 | Some LIS exports and lab portals | `python-hl7`-style segment parser, OBX → Observation | v2 |
 | CSV with column mapper | Lab portals, spreadsheets people already keep, vendor CSV exports | Saved mapping per source (column → LOINC, unit, date format) | v2 (with the HL7 v2 importer) |
 | DICOM (CD, zip, folder) | Hospital CDs, private imaging portals | Pushed to Orthanc (`imaging` profile); report text linked to the study | v1.0 |
-| Google Takeout (Fitbit) | takeout.google.com | Lenient per-metric JSON/CSV parser; layout changes over time | v1.0 |
+| Google Takeout (Fitbit) | takeout.google.com | Heart rate, resting heart rate, RMSSD heart rate variability and SpO2 from legacy Fitbit exports and Google Data CSVs | v1.0 |
 | Garmin "Export Your Data" | Garmin account GDPR export: FIT + JSON | FIT via `fitparser` (MIT): heart rate per minute, distance for running, walking and hiking, energy per activity, never a position (`ownhealth_devices::fit`); the JSON files later | v1.0 |
 | Gadgetbridge SQLite | Android app, fully offline, no vendor cloud | Read device tables by device type | v0.2 |
 | Vendor GDPR exports (Clue JSON, Flo, Natural Cycles, Samsung Health CSV, Huawei, Withings CSV, Polar Flow, Dexcom Clarity CSV, LibreView CSV) | Account settings or a GDPR Art. 15/20 request | One small parser each, registered as a T1 connector | LibreView and Dexcom Clarity CSV v1.0; cycle, nutrition and training exports v2; the rest not scheduled |
 | Taiwan My Health Bank (HTML/XML/JSON) | NHI portal download | JSON parser | v2 |
 | Consumer genome files, VCF | 23andMe, MyHeritage, Ancestry, WGS | Not a connector here: OwnGenome ingests them and emits `genome-facts.json` | v0.1 (facts ingest) |
+
+#### Fitbit history from Google Takeout
+
+In [Google Takeout](https://support.google.com/googlehealth/answer/14236615), select Fitbit or Google Health and request a ZIP. In OwnHealth, select the profile that owns the Fitbit history, then upload the ZIP in **Import review**. OwnHealth reads legacy JSON files in `Global Export Data` and the HRV and daily SpO2 CSVs in `Heart Rate Variability` and `Oxygen Saturation (SpO2)`. It also reads the newer CSVs in `Physical Activity_GoogleData` or `Google Data`. A ZIP that holds both a `Fitbit` and a `Google Health` folder is read whole, and a reading present in both is kept once. Readings appear in **Wearables** under Fitbit.
+
+Times follow what the exports write. The `Global Export Data` JSON files hold UTC times without saying so, and the Google Data CSVs write UTC with `Z`. OwnHealth stores them as UTC and takes the local offset from `Your Profile/Profile.csv` in the same product folder. A folder without a profile uses a shared time zone when the other usable profiles agree. An offset written in the file is kept. OwnHealth uses the profile zone to place local times in legacy HRV detail CSVs. The result counts rows with an unreadable time, an unknown local time zone, or an ambiguous time during a clock change. The rest of the ZIP still imports. A daily value, such as resting heart rate or a daily SpO2 or HRV summary, keeps its calendar day.
+
+A ZIP with no supported files or usable readings shows an import error. The result lists each file OwnHealth did not read, with the reason. A Mac adds `__MACOSX` copies when it compresses a folder; OwnHealth ignores them. OwnHealth keeps one heart-rate reading per minute, using the mean of the distinct timestamps in that minute. If values disagree at the same timestamp, the first member path in alphabetical order supplies the value. The ZIP limit is 500,000 distinct readings. Heart-rate CSVs can contain a full month of five-second data. For larger exports, use smaller ZIPs that preserve the Fitbit or Google Health folder. Keep `Your Profile/Profile.csv` in each part, so its local times can be placed. OwnHealth keeps a readings document with the source member names and releases the original ZIP.
 
 ### 2.3 T2: live APIs a self-hoster can register for
 

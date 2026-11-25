@@ -1049,7 +1049,7 @@ pub(crate) async fn accept_identity(
 
 /// Structured files run their own import again; everything else (PDF, image) the PDF one. A CGM export
 /// (`cgm`: its flags hold `cgm_csv`) runs the CGM import of the stored document, which reads the file in
-/// the zone it keeps. A Garmin export's document holds its readings, which its import reads again.
+/// the zone it keeps. Garmin, Strava and Fitbit Takeout exports store readings for replay.
 fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
     if cgm {
         return "import.cgm_csv";
@@ -1059,6 +1059,8 @@ fn reimport_kind(mime: &str, cgm: bool) -> &'static str {
         "application/zip" => "import.apple_health",
         ownhealth_ingest_structured::ccda::MIME => ownhealth_ingest_structured::ccda::JOB,
         ownhealth_core::documents::GARMIN_READINGS_MIME => "import.garmin_zip",
+        ownhealth_core::documents::STRAVA_READINGS_MIME => "import.strava_zip",
+        ownhealth_core::documents::FITBIT_READINGS_MIME => "import.fitbit_takeout",
         _ => "import.pdf",
     }
 }

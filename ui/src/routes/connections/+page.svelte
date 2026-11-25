@@ -2,7 +2,7 @@
 	// The Connections screen (v1.0, slice 55): every health record and device connection of the
 	// profiles this person manages, with its status, last sync, when its sign-in and access token end,
 	// open sync-gap alerts, and Reconnect. The connector callback lands here with ?connected=<id> or
-	// ?connector_error=<code>. The add wizard (slice 19) launches new connections.
+	// ?connector_error=<code>. Add connection opens the add wizard (slice 19, ./add), which launches new ones.
 	import '#lib/components/pages2/pages2.css';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
@@ -29,6 +29,7 @@
 		refreshUntilFirstPull,
 		renewsItself,
 		endedVendors,
+		mayManageConnections,
 		runWords,
 		shownConnections,
 		statusWord,
@@ -36,6 +37,7 @@
 		type ConnectionRow,
 		type ConnectionState
 	} from '#lib/logic/connections';
+	import { manageable } from '#lib/logic/inbox';
 	import { app, setProfile } from '#lib/state/app.svelte';
 
 	// One clock for every date on the screen: it moves on each minute and on each load, so a grant that
@@ -203,7 +205,9 @@
 <PageHeader title={t('con_nav')} sub={t('con_sub')}>
 	{#snippet right()}
 		<PhaseChip phase="v1.0" />
+		{#if mayManageConnections(app.me?.profiles)}<a class="btn" href="/connections/wearables">{t('ow_setup_index')}</a>{/if}
 		<a class="btn" href="/inbox">{t('fu_inbox')}</a>
+		{#if manageable(app.me?.profiles ?? []).length}<a class="btn pri" href="/connections/add">{t('con_add')}</a>{/if}
 	{/snippet}
 </PageHeader>
 

@@ -21,6 +21,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/ZIP could not be read/i, 'err_zip_unreadable'],
 	[/ZIP holds too many files to import/i, 'err_zip_too_many'],
 	[/^garmin_zip_limit$/i, 'err_garmin_zip_limit'],
+	[/^strava_zip_unreadable$/i, 'err_strava_zip_unreadable'],
+	[/^strava_zip_limit$/i, 'err_strava_zip_limit'],
 	[/^not a readable LibreView or Dexcom Clarity export/i, 'err_cgm_unreadable'],
 	[/^the export holds more than \d+ readings/i, 'err_cgm_too_many'],
 	[/^the export is larger than \d+ MB/i, 'err_cgm_too_large'],
@@ -85,6 +87,7 @@ export function errKey(code: string | null | undefined, message: string, has: (k
 	if (code && has('err_' + code)) return 'err_' + code;
 	if (errorName(message) === 'PasswordError') return 'err_pdf_password';
 	const m = stripErrorName(message);
+	if (m.startsWith('fitbit_takeout_') && has('err_' + m)) return 'err_' + m;
 	for (const [re, key] of PATTERNS) if (re.test(m) && has(key)) return key;
 	return null;
 }

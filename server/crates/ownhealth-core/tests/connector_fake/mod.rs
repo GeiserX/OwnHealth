@@ -2,6 +2,9 @@
 //! loopback with SMART discovery, a token endpoint (authorization code with PKCE S256, refresh tokens
 //! that rotate and die once used) and RFC 7009 revocation. It never calls out, and every token is
 //! synthetic. The core tests and the API tests share it.
+//!
+//! [`Fake::recorded`] plays one vendor of `data/connectors/connectors.yaml` instead: that vendor's
+//! recorded discovery document and its token answers, from `fixtures/connectors/<vendor>/`.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -46,6 +49,12 @@ pub struct Behaviour {
     pub authorize_url: Option<String>,
     pub token_url: Option<String>,
     pub revoke_url: Option<String>,
+    /// A vendor's recorded discovery document, served with the fake's own endpoints in it.
+    pub discovery: Option<Value>,
+    /// The sign-in's and a refresh's token answer, `$ACCESS`, `$REFRESH` and `$PATIENT` filled in.
+    /// A refresh answer without `refresh_token` keeps the old token unless `rotate` retires it.
+    pub code_reply: Option<Value>,
+    pub refresh_reply: Option<Value>,
 }
 
 impl Default for Behaviour {
@@ -64,6 +73,9 @@ impl Default for Behaviour {
             authorize_url: None,
             token_url: None,
             revoke_url: None,
+            discovery: None,
+            code_reply: None,
+            refresh_reply: None,
         }
     }
 }
@@ -159,6 +171,26 @@ impl Fake {
         }
     }
 
+    /// One vendor of `connectors.yaml`, from its recorded fixtures: its discovery document, and
+    /// refresh tokens that rotate when its refresh answer carries a new one.
+    pub async fn recorded(vendor: &str) -> Fake {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../fixtures/connectors");
+        let read = |file: &str| -> Value {
+            let path = format!("{dir}/{vendor}/{file}");
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"))
+        };
+        let (discovery, tokens) = (read("smart-configuration.json"), read("tokens.json"));
+        let fake = Fake::start().await;
+        fake.set(|b| {
+            b.rotate = tokens["refresh"].get("refresh_token").is_some();
+            b.discovery = Some(discovery);
+            b.code_reply = Some(tokens["code"].clone());
+            b.refresh_reply = Some(tokens["refresh"].clone());
+        });
+        fake
+    }
+
     /// The FHIR base, which is the SMART issuer.
     pub fn issuer(&self) -> String {
         format!("{}/fhir", self.base)
@@ -184,6 +216,19 @@ impl Fake {
 async fn discovery(State(s): State<Shared>) -> Json<Value> {
     let b = lock(&s.behaviour).clone();
     lock(&s.book).requests += 1;
+    if let Some(mut doc) = b.discovery.clone() {
+        // the vendor's own document, with each endpoint it names moved here
+        for (field, path) in [
+            ("authorization_endpoint", "authorize"),
+            ("token_endpoint", "token"),
+            ("revocation_endpoint", "revoke"),
+        ] {
+            if doc.get(field).is_some() {
+                doc[field] = json!(format!("{}/{path}", s.base));
+            }
+        }
+        return Json(doc);
+    }
     let mut meta = json!({
         "authorization_endpoint": b.authorize_url.clone().unwrap_or_else(|| format!("{}/authorize", s.base)),
         "token_endpoint": b.token_url.clone().unwrap_or_else(|| format!("{}/token", s.base)),
@@ -217,7 +262,10 @@ fn client_auth(headers: &HeaderMap, form: &HashMap<String, String>) -> Option<&'
     }
 }
 
-fn mint(s: &Shared, b: &Behaviour, with_refresh: bool) -> Value {
+/// A token answer: the fake's own, or `template` with its `$` words filled in. A template decides by
+/// itself whether a refresh token comes back.
+fn mint(s: &Shared, b: &Behaviour, with_refresh: bool, template: Option<&Value>) -> Value {
+    let with_refresh = template.map_or(with_refresh, |t| t.get("refresh_token").is_some());
     let mut book = lock(&s.book);
     book.minted += 1;
     let n = book.minted;
@@ -237,7 +285,25 @@ fn mint(s: &Shared, b: &Behaviour, with_refresh: bool) -> Value {
             out["refresh_token_expires_in"] = json!(r);
         }
     }
-    out
+    let Some(template) = template else {
+        return out;
+    };
+    let mut filled = template.clone();
+    if let Some(m) = filled.as_object_mut() {
+        for v in m.values_mut() {
+            let word = match v.as_str() {
+                Some("$ACCESS") => out["access_token"].clone(),
+                Some("$REFRESH") => out["refresh_token"].clone(),
+                Some("$PATIENT") => json!(PATIENT),
+                _ => continue,
+            };
+            *v = word;
+        }
+        if let Some(r) = out.get("refresh_token_expires_in") {
+            m.insert("refresh_token_expires_in".into(), r.clone());
+        }
+    }
+    filled
 }
 
 async fn token(State(s): State<Shared>, headers: HeaderMap, Form(form): Form<HashMap<String, String>>) -> Response {
@@ -271,7 +337,7 @@ fn answer(s: &Shared, b: &Behaviour, headers: &HeaderMap, form: &HashMap<String,
             if field("redirect_uri") != REDIRECT || s256(&field("code_verifier")) != challenge {
                 return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "PKCE verifier mismatch");
             }
-            Json(mint(s, b, true)).into_response()
+            Json(mint(s, b, true, b.code_reply.as_ref())).into_response()
         }
         Some("refresh_token") => {
             lock(&s.book).refresh_calls += 1;
@@ -292,7 +358,7 @@ fn answer(s: &Shared, b: &Behaviour, headers: &HeaderMap, form: &HashMap<String,
             if b.rotate {
                 lock(&s.book).live.remove(&old);
             }
-            Json(mint(s, b, b.rotate)).into_response()
+            Json(mint(s, b, b.rotate, b.refresh_reply.as_ref())).into_response()
         }
         _ => oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "no"),
     }

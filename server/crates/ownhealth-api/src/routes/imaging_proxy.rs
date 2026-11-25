@@ -381,6 +381,13 @@ fn retracted() -> ApiError {
     refused("study_retracted", "This study was retracted.")
 }
 
+fn closed() -> ApiError {
+    refused(
+        "study_closed",
+        "This study's images stay closed: its profile was deleted, and a restore brought back only its records.",
+    )
+}
+
 fn not_bound() -> ApiError {
     refused(
         "study_not_bound",
@@ -456,7 +463,16 @@ async fn open(
         let profile_id = perm.profile.id;
         (profile_id, bound_study(&mut conn, profile_id, &uid).await?)
     };
-    bind_check(imaging, &uid, &orthanc_id).await?;
+    let studies = studies_under(imaging, &uid).await?;
+    // After a restore the rebuild sends the study back to Orthanc: say that, not that it is ambiguous.
+    if studies.is_empty() && rebuilding(&rt, profile_id).await? {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "study_rebuilding",
+            "OwnHealth is putting this study's images back in the image store. Try again in a few minutes.",
+        ));
+    }
+    bound(&studies, &orthanc_id)?;
     // Then the same checks again in the audit transaction: the record must still name the Orthanc
     // study that Orthanc just confirmed.
     let mut tx = rt.pool.begin().await?;
@@ -536,22 +552,32 @@ async fn bound_study(conn: &mut PgConnection, profile_id: Uuid, uid: &str) -> Re
             "This profile has no study with that UID.",
         )),
         Some((s, _)) if s == "retracted" => Err(retracted()),
+        Some((s, _)) if s == CLOSED => Err(closed()),
         Some((_, None)) => Err(not_bound()),
         Some((_, Some(id))) => Ok(id),
     }
 }
 
-/// The study's status and Orthanc id in that profile (`study_instance_uid` is unique).
+/// The status [`study_row`] gives a study of a profile whose key a delete shredded: a restore of a
+/// backup taken before that delete brought its row back, and its images stay closed (slice 43).
+const CLOSED: &str = "closed";
+
+/// The study's status ([`CLOSED`] when its profile's key is shredded) and Orthanc id in that profile
+/// (`study_instance_uid` is unique).
 async fn study_row(
     conn: &mut PgConnection,
     profile_id: Uuid,
     uid: &str,
 ) -> Result<Option<(String, Option<String>)>, sqlx::Error> {
-    sqlx::query_as("select status, orthanc_id from imaging_study where profile_id = $1 and study_instance_uid = $2")
-        .bind(profile_id)
-        .bind(uid)
-        .fetch_optional(conn)
-        .await
+    sqlx::query_as(
+        "select case when exists (select 1 from profile_key k where k.profile_id = s.profile_id \
+         and k.wrapped_dek is null) then 'closed' else s.status end, s.orthanc_id \
+         from imaging_study s where s.profile_id = $1 and s.study_instance_uid = $2",
+    )
+    .bind(profile_id)
+    .bind(uid)
+    .fetch_optional(conn)
+    .await
 }
 
 /// The principal of a live session, by id: the same rules as `sessions::resolve_session` (not revoked,
@@ -627,6 +653,7 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Autho
     match study_row(&mut conn, link.profile_id, &link.study_uid).await? {
         None => Err(study_not_available()),
         Some((s, _)) if s == "retracted" => Err(retracted()),
+        Some((s, _)) if s == CLOSED => Err(closed()),
         Some((_, id)) if id.as_deref() != Some(link.orthanc_id.as_str()) => Err(study_not_available()),
         Some(_) => Ok(Authorized { link, touch }),
     }
@@ -634,6 +661,11 @@ async fn authorize(rt: &Runtime, imaging: &Imaging, token: &str) -> Result<Autho
 
 /// Orthanc's `/tools/lookup` must find exactly one study under `uid`, and it must be `orthanc_id`.
 async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<(), ApiError> {
+    bound(&studies_under(imaging, uid).await?, orthanc_id)
+}
+
+/// The Orthanc studies that `/tools/lookup` finds under `uid`.
+async fn studies_under(imaging: &Imaging, uid: &str) -> Result<Vec<String>, ApiError> {
     let (orthanc, http) = imaging.orthanc()?;
     let upstream = http
         .post(format!("{}/tools/lookup", orthanc.url))
@@ -648,11 +680,16 @@ async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<()
     }
     let found: Vec<Value> =
         serde_json::from_slice(&read_limited(upstream, 1 << 20).await?).map_err(|_| orthanc_down())?;
-    let studies: Vec<&str> = found
+    Ok(found
         .iter()
         .filter(|r| r["Type"] == "Study")
         .filter_map(|r| r["ID"].as_str())
-        .collect();
+        .map(str::to_string)
+        .collect())
+}
+
+/// Exactly the recorded study, or nothing passes.
+fn bound(studies: &[String], orthanc_id: &str) -> Result<(), ApiError> {
     if studies != [orthanc_id] {
         tracing::warn!(
             studies = studies.len(),
@@ -661,6 +698,19 @@ async fn bind_check(imaging: &Imaging, uid: &str, orthanc_id: &str) -> Result<()
         return Err(not_bound());
     }
     Ok(())
+}
+
+/// Whether an `imaging.rebuild` of the profile is queued or running (slice 43).
+async fn rebuilding(rt: &Runtime, profile_id: Uuid) -> Result<bool, ApiError> {
+    let mut conn = rt.pool.acquire().await?;
+    Ok(sqlx::query_scalar(
+        "select exists (select 1 from job where kind = $1 and state in ('queued', 'running') \
+         and payload->>'profile_id' = $2)",
+    )
+    .bind(ownhealth_imaging::rebuild::JOB)
+    .bind(profile_id.to_string())
+    .fetch_one(&mut *conn)
+    .await?)
 }
 
 /// `/ohif/*`: the viewer's files from Orthanc's OHIF plugin, under a live link only.

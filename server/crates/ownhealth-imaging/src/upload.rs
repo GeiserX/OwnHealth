@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use ownhealth_core::Result;
-use ownhealth_core::blobs::sha256_hex_to_bytes;
+use ownhealth_core::blobs::{BlobOwner, BlobStore, sha256_hex_to_bytes};
 use ownhealth_core::documents::lock_blob;
 use ownhealth_core::jobs::{EnqueueOptions, enqueue};
+use ownhealth_core::{Error, Result};
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -132,11 +132,19 @@ pub struct Recorded {
     pub job_id: Option<i64>,
 }
 
+/// The refusal of an upload whose stored zip went before it was recorded. The API answers it with a
+/// code of its own, `upload_lost`, so a page can say it in the person's language.
+pub const UPLOAD_LOST: &str = "The upload was removed while it was being saved. Upload the disc again.";
+
 /// Records a stored zip as an `imaging_import` of the profile and queues its import, in the caller's
 /// transaction. The same zip again is the same import; its job runs again and finds every study it
-/// recorded already, so it sends nothing.
+/// recorded already, so it sends nothing. The zip must still be in `blobs`: the release of an upload
+/// of the same bytes that was removed (`remove::release`) can delete it after the route stored it and
+/// before this takes the lock, and then nothing is recorded ([`UPLOAD_LOST`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn record(
     conn: &mut PgConnection,
+    blobs: &BlobStore,
     profile_id: Uuid,
     sha256: &str,
     size: i64,
@@ -147,6 +155,10 @@ pub async fn record(
     // the lock an upload of these bytes takes (documents::create_document): a profile's copy of them is
     // never removed while this upload names them
     lock_blob(&mut *conn, profile_id, sha256, true).await?;
+    // a release holds the lock exclusively while it deletes: under the shared lock the file stays
+    if !blobs.exists(BlobOwner::Profile(profile_id), sha256) {
+        return Err(Error::Review(UPLOAD_LOST.into()));
+    }
     let sha = sha256_hex_to_bytes(sha256)?;
     let filename: Option<String> = filename.map(|f| f.chars().take(255).collect());
     let new: Option<Uuid> = sqlx::query_scalar(

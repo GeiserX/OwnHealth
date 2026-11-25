@@ -911,3 +911,92 @@ async fn no_log_line_carries_a_token_on_the_happy_or_the_failing_paths() -> R {
     t.assert_no_secret("the log", &text);
     Ok(())
 }
+
+#[tokio::test]
+async fn the_wearables_guide_names_the_setting_to_fix_instead_of_a_wrong_redirect_uri() -> R {
+    // `docker compose --profile wearables` with a callback origin Open Wearables writes differently:
+    // the app starts, and the guide shows what to correct, never a URI the vendor would refuse.
+    let mut env = env().await?;
+    let vars: std::collections::HashMap<String, String> = [
+        ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+        ("OWNHEALTH_OW_PUBLIC_URL", "https://Share.Example.test:443"),
+        ("OWNHEALTH_OW_COMPOSE_FALLBACK", "https://health.example.test"),
+        ("OWNHEALTH_OW_COMPOSE_FALLBACK_VAR", "OWNHEALTH_DOMAIN"),
+        ("COMPOSE_PROFILES", ""),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let configured = ownhealth_core::config::Settings::from(&vars)?;
+    env.settings.ow_url = configured.ow_url;
+    env.settings.ow_public_url = configured.ow_public_url;
+    env.settings.ow_origin_fix = configured.ow_origin_fix;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex.get("/api/wearables/setup").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(
+        r.json["origin_fix"],
+        json!({"setting": "OWNHEALTH_OW_PUBLIC_URL", "value": "https://share.example.test"})
+    );
+    assert!(r.json["api_base_url"].is_null(), "{}", r.json);
+    let providers = r.json["providers"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !providers.is_empty() && providers.iter().all(|p| p["redirect_uri"].is_null()),
+        "{}",
+        r.json
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_an_owner_or_guardian_reads_the_wearables_setup_guide() -> R {
+    let env = env().await?;
+    let mut alex = env.as_user(env.user("alex")).await?;
+    let r = alex.get("/api/wearables/setup").await?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["api_base_url"], "https://testserver/ow");
+    assert!(r.json["origin_fix"].is_null(), "{}", r.json);
+    let whoop = r.json["providers"]
+        .as_array()
+        .and_then(|list| list.iter().find(|p| p["id"] == "whoop"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        whoop["redirect_uri"],
+        "https://testserver/ow/api/v1/oauth/whoop/callback"
+    );
+    // Pat views Alex's profile and manages none: the operator guide is not for Pat
+    let pat = {
+        let h = household(&env, env.profile("alex")).await?;
+        let mut c = env.pool().acquire().await?;
+        let pat = ownhealth_core::access::create_user(&mut c, h, "Pat Rivera", "en", None).await?;
+        ownhealth_core::access::set_grant(
+            &mut c,
+            pat,
+            env.profile("alex"),
+            "viewer",
+            None,
+            Some(env.user("alex")),
+            None,
+        )
+        .await?;
+        pat
+    };
+    let mut pat = env.as_user(pat).await?;
+    let r = pat.get("/api/wearables/setup").await?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.json);
+    assert!(r.json.get("api_base_url").is_none() && r.json.get("providers").is_none());
+    assert_eq!(
+        env.anon().get("/api/wearables/setup").await?.status,
+        StatusCode::UNAUTHORIZED
+    );
+    let reads: Vec<(Option<Uuid>, String, String, String)> =
+        sqlx::query_as("select actor_id, actor_kind, via, action from audit_event where tool = 'wearables_setup'")
+            .fetch_all(env.pool())
+            .await?;
+    assert_eq!(
+        reads,
+        vec![(Some(env.user("alex")), "user".into(), "ui".into(), "read".into())]
+    );
+    Ok(())
+}

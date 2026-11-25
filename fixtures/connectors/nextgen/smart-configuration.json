@@ -1,0 +1,40 @@
+{
+  "capabilities": [
+    "launch-ehr",
+    "launch-standalone",
+    "client-public",
+    "client-confidential-symmetric",
+    "client-confidential-asymmetric",
+    "context-banner",
+    "context-style",
+    "context-ehr-patient",
+    "context-ehr-encounter",
+    "context-standalone-patient",
+    "context-standalone-encounter",
+    "permission-offline",
+    "permission-patient",
+    "permission-user",
+    "permission-v1",
+    "permission-v2",
+    "sso-openid-connect",
+    "authorize-post"
+  ],
+  "authorization_endpoint": "https://fhir.nextgen.com/nge/prod/patient-oauth/authorize",
+  "token_endpoint": "https://fhir.nextgen.com/nge/prod/patient-oauth/token",
+  "revocation_endpoint": "https://fhir.nextgen.com/nge/prod/patient-oauth/token/revoke",
+  "grant_types_supported": [
+    "authorization_code",
+    "client_credentials",
+    "refresh_token"
+  ],
+  "code_challenge_methods_supported": [
+    "S256"
+  ],
+  "scopes_supported": [
+    "openid",
+    "offline_access",
+    "launch/patient"
+  ],
+  "issuer": "https://fhir.nextgen.com/nge/prod/patient-oauth",
+  "jwks_uri": "https://fhir.nextgen.com/nge/prod/fhir-api-r4/.well-known/jwks.json"
+}

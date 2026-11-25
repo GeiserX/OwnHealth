@@ -174,11 +174,13 @@ test('a FIT document shows what its file holds, from its flags', () => {
 
 test('an import.fit result hidden from this member gets its one dim line, nothing else does', () => {
 	assert.equal(fitHidden({ kind: 'import.fit', state: 'done', result: null }), true);
+	assert.equal(fitHidden({ kind: 'import.fitbit_takeout', state: 'done', result: null }), true);
 	for (const j of [
 		undefined,
 		{ kind: 'import.fit', state: 'done', result: run },
 		{ kind: 'import.fit', state: 'running', result: null },
 		{ kind: 'import.fit', state: 'dead', result: null },
+		{ kind: 'import.fitbit_takeout', state: 'done', result: { accepted: 1 } },
 		{ kind: 'import.gadgetbridge', state: 'done', result: null }
 	]) {
 		assert.equal(fitHidden(j), false, JSON.stringify(j));

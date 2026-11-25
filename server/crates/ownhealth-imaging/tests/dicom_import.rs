@@ -73,17 +73,21 @@ async fn env() -> anyhow::Result<Env> {
 impl Env {
     /// Stores the disc as `POST /api/imaging/import` does and queues its import.
     async fn upload(&self, slug: &str, files: &[(String, Vec<u8>)]) -> anyhow::Result<Recorded> {
-        let zip = zip_files(files);
+        self.upload_zip(slug, &zip_files(files), files.len()).await
+    }
+
+    async fn upload_zip(&self, slug: &str, zip: &[u8], files: usize) -> anyhow::Result<Recorded> {
         let profile = self.fam.profile(slug);
-        let sha = self.rt.blobs.put_bytes(BlobOwner::Profile(profile), &zip)?;
+        let sha = self.rt.blobs.put_bytes(BlobOwner::Profile(profile), zip)?;
         let mut tx = self.rt.pool.begin().await?;
         let r = upload::record(
             &mut tx,
+            &self.rt.blobs,
             profile,
             &sha,
             i64::try_from(zip.len())?,
             Some("cd.zip"),
-            files.len(),
+            files,
             None,
         )
         .await?;
@@ -796,6 +800,28 @@ async fn round3_duplicate_instances_are_counted_once() -> R {
     let (_, result, _) = e.job(up.job_id).await?;
     assert_eq!(result["instances"], 1, "{result}");
     assert_eq!(result["submitted_files"], 2, "{result}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_duplicate_entry_with_a_bad_crc_fails_the_import_on_the_first_attempt() -> R {
+    let e = env().await?;
+    let mut image = support::image(&Study::new(U1, ALEX), 0, 0, support::EXPLICIT_LE);
+    // The header scan reads only the first MiB. Hashing the duplicate reads through to its CRC.
+    image.resize((1 << 20) + 1, 0);
+    let mut zip = zip_files(&[("one".into(), image.clone()), ("two".into(), image)]);
+    support::damage_last_zip_entry_crc(&mut zip)?;
+    let up = e.upload_zip("alex", &zip, 2).await?;
+
+    assert_eq!(e.run().await?, 1);
+    let (state, _, error) = e.job(up.job_id).await?;
+    assert_eq!(state, "dead", "{error:?}");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("a duplicate DICOM entry could not be read"))
+    );
+    assert_eq!(e.orthanc.posts(), 0);
     Ok(())
 }
 
@@ -1733,5 +1759,91 @@ async fn round8_deflated_transfer_syntax_fails_with_a_visible_reason() -> R {
     assert_eq!(state, "dead", "{result} {error:?}");
     assert!(error.is_some_and(|err| err.contains("deflated DICOM transfer syntax")));
     assert_eq!(e.orthanc.posts(), 0);
+    Ok(())
+}
+
+/// PR 87 recheck L1 (slice 43): an accepted study whose PatientID does not decode keeps its POST
+/// journal until its record commits (`keep_until_commit`). When the record fails after the send (the
+/// metadata warm fails), the retry trusts only the journal: without it, the retry would find an
+/// Orthanc study it cannot prove is this upload's and hold the accepted study again.
+#[tokio::test]
+async fn an_accepted_study_with_an_unreadable_patient_id_survives_a_failed_warm() -> R {
+    use dicom_dictionary_std::tags;
+    use dicom_object::OpenFileOptions;
+
+    let e = env().await?;
+    let st = Study {
+        person: Person { id: "TEST-ID1", ..ALEX },
+        charset: "ISO 2022 IR 100",
+        ..Study::new(U1, ALEX)
+    };
+    let mut files = [("image".into(), support::image(&st, 0, 0, support::EXPLICIT_LE))];
+    patch(&mut files, b"TEST-ID1", b"\x1b-A\xc9-1  ");
+    let obj = OpenFileOptions::new().from_reader(files[0].1.as_slice())?;
+    let raw_id = obj
+        .element(tags::PATIENT_ID)?
+        .to_str()?
+        .trim_end_matches([char::from(0), char::from(32)])
+        .to_string();
+    *e.orthanc.misread_patient.lock().map_err(|_| anyhow::anyhow!("lock"))? = Some((raw_id, "É-1".into()));
+    e.upload("alex", &files).await?;
+    e.run().await?;
+    assert_eq!(e.in_review("alex").await?, [(U1.into(), "unsupported_charset".into())]);
+    let mut conn = e.rt.pool.acquire().await?;
+    let item = sqlx::query_scalar("select id from review_item where kind = $1")
+        .bind(REVIEW_KIND)
+        .fetch_one(&mut *conn)
+        .await?;
+    ownhealth_core::review::accept(&mut conn, item, e.fam.user("alex"), None).await?;
+    drop(conn);
+    *e.orthanc.metadata_fails.lock().map_err(|_| anyhow::anyhow!("lock"))? = true;
+    e.run().await?;
+    let job: i64 = sqlx::query_scalar("select max(id) from job where kind = $1")
+        .bind(JOB)
+        .fetch_one(&e.rt.pool)
+        .await?;
+    assert_eq!(e.job(Some(job)).await?.0, "queued");
+    assert!(e.recorded(U1).await?.is_none());
+    *e.orthanc.metadata_fails.lock().map_err(|_| anyhow::anyhow!("lock"))? = false;
+    e.retry_now(Some(job)).await?;
+    let (state, result, error) = e.job(Some(job)).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    let review = e.in_review("alex").await?;
+    assert!(review.is_empty(), "the accepted study is held again: {review:?}");
+    assert_eq!(e.recorded(U1).await?.map(|r| r.0), Some(e.fam.profile("alex")));
+    Ok(())
+}
+
+/// PR 87 recheck L4 (slice 43): a retained report whose PDF does not extract is handled once; a
+/// replay of the disc does not download it from Orthanc again.
+#[tokio::test]
+async fn a_report_whose_pdf_does_not_extract_is_read_once() -> R {
+    let e = env().await?;
+    let st = Study::new(U1, ALEX);
+    let mut disc = study_files(&st, "DICOM");
+    disc.push((
+        "DICOM/REPORT/I0001".into(),
+        support::pdf_instance(&st, b"synthetic report that is not a PDF"),
+    ));
+    let first = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(first.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["reports"], 0, "{result}");
+    let reads = |e: &Env| {
+        e.orthanc
+            .held()
+            .log
+            .into_iter()
+            .filter(|(m, p)| m == "GET" && p.ends_with("/file"))
+            .count()
+    };
+    assert_eq!(reads(&e), 1);
+    let replay = e.upload("alex", &disc).await?;
+    e.run().await?;
+    let (state, result, error) = e.job(replay.job_id).await?;
+    assert_eq!(state, "done", "{result} {error:?}");
+    assert_eq!(result["already"], 1, "{result}");
+    assert_eq!(reads(&e), 1, "the report that does not extract was downloaded again");
     Ok(())
 }

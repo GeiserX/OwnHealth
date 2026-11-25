@@ -14,6 +14,10 @@
 //!   rotated token, commits, and only then hands the access token out. A second caller waits on the
 //!   lock and reuses the first one's result. A reply with no refresh token keeps the old one.
 //!   `invalid_grant` sets `reconsent_needed_at`; so does a rotated token that could not be stored.
+//!   The vendor's profile in `data/connectors/connectors.yaml` ([`profiles`]) says how its tokens
+//!   behave: a rotating vendor's answer without a new refresh token retired the old one, which is then
+//!   dropped; a single-use vendor's refresh takes the careful path below; the sign-in ends a number of
+//!   days after the last refresh; an answer without `expires_in` lasts the profile's time.
 //!   Blue Button persists that marker before sending its single-use token and clears it atomically
 //!   with the replacement, so a lost reply or interrupted refresh can never spend it twice. A request
 //!   that provably never left (no connection, a name that does not resolve) clears it again and
@@ -37,6 +41,7 @@ use sqlx::{Connection, PgConnection, PgPool};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+use crate::connector_profiles::{self as profiles, Rotation, Vendor};
 use crate::error::Error;
 use crate::net::{self, Egress, Fetched, NetError};
 use crate::secrets::{self, SecretBox, SecretString};
@@ -79,8 +84,8 @@ pub fn v1_scopes(scopes: &str) -> String {
 /// CMS Blue Button v3 requests only the three resources the poller reads.
 pub const BLUEBUTTON_SCOPES: &str =
     "launch/patient patient/Patient.rs patient/Coverage.rs patient/ExplanationOfBenefit.rs";
-const BLUEBUTTON_ISSUER: &str = "https://api.bluebutton.cms.gov/v3/fhir";
-const BLUEBUTTON_SANDBOX: &str = "https://sandbox.bluebutton.cms.gov/v3/fhir";
+pub const BLUEBUTTON_ISSUER: &str = "https://api.bluebutton.cms.gov/v3/fhir";
+pub const BLUEBUTTON_SANDBOX: &str = "https://sandbox.bluebutton.cms.gov/v3/fhir";
 
 /// The switch that lets a debug build with dev auth reach a fake vendor on loopback.
 pub const DEV_LOOPBACK_SWITCH: &str = "OWNHEALTH_DEV_CONNECTOR_LOOPBACK";
@@ -946,8 +951,10 @@ pub async fn save_connection(
         ));
     }
     let config = config_for(p, t);
-    let access_at = access_until(t, now);
-    let grant_at = after(now, t.refresh_expires_in);
+    let quirks = profiles::vendor(&client.vendor);
+    let access_at = access_until(t, now, quirks);
+    // the vendor's own word on the grant, else its documented unused expiry (a refresh token to use)
+    let grant_at = after(now, t.refresh_expires_in).or_else(|| t.refresh.as_ref().and(unused_until(now, quirks)));
     let grant_id = Uuid::new_v4();
     let source_id = p.source_id.unwrap_or_else(Uuid::new_v4);
     let seal_access = secrets::seal_source_access(sb, Some(p.profile_id), source_id, Some(grant_id), &t.access);
@@ -1064,8 +1071,19 @@ pub async fn save_connection(
 /// The source and its grant, including sources that predate grant identities.
 type Grant = (Uuid, Option<Uuid>);
 
-fn access_until(tokens: &TokenSet, now: DateTime<Utc>) -> DateTime<Utc> {
-    now + Duration::seconds(tokens.expires_in.unwrap_or(UNKNOWN_LIFETIME_SECONDS))
+/// When an access token ends: the answer's `expires_in`, else the vendor's documented lifetime, else
+/// [`UNKNOWN_LIFETIME_SECONDS`].
+fn access_until(tokens: &TokenSet, now: DateTime<Utc>, quirks: Option<&Vendor>) -> DateTime<Utc> {
+    let documented = quirks.and_then(|q| q.access_token_seconds).map(i64::from);
+    now + Duration::seconds(tokens.expires_in.or(documented).unwrap_or(UNKNOWN_LIFETIME_SECONDS))
+}
+
+/// When a refresh token used at `now` ends unused, for a vendor that documents it.
+fn unused_until(now: DateTime<Utc>, quirks: Option<&Vendor>) -> Option<DateTime<Utc>> {
+    quirks?
+        .refresh
+        .unused_expiry_days
+        .map(|d| now + Duration::days(i64::from(d)))
 }
 
 async fn needs_reconsent(conn: &mut PgConnection, grant: Grant, now: DateTime<Utc>) -> Result<bool, sqlx::Error> {
@@ -1170,13 +1188,21 @@ async fn access_token_inner(
     }
     let kinds: Vec<&str> = OAUTH_KINDS.to_vec();
     let mut conn = pool.acquire().await?;
-    let single_use = sqlx::query_scalar::<_, bool>("select kind = 'bluebutton' from source where id = $1")
-        .bind(source_id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .unwrap_or(false);
-    // The session lock spans both transactions of a Blue Button refresh. Other callers wait
-    // and reuse the committed result. A dropped future releases the lock.
+    let (bluebutton, vendor) = sqlx::query_as::<_, (bool, Option<String>)>(
+        "select s.kind = 'bluebutton', c.vendor from source s \
+         left join connector_client c on c.id = s.connector_client_id where s.id = $1",
+    )
+    .bind(source_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .unwrap_or((false, None));
+    // how this vendor's tokens behave (connectors.yaml); a vendor the file does not name keeps the
+    // plain path
+    let quirks = vendor.as_deref().and_then(profiles::vendor);
+    let rotation = quirks.map(|q| q.refresh.rotation);
+    let single_use = bluebutton || rotation == Some(Rotation::SingleUse);
+    // The session lock spans both transactions of a single-use refresh (Blue Button). Other callers
+    // wait and reuse the committed result. A dropped future releases the lock.
     let mut guard;
     let conn: &mut PgConnection = if single_use {
         guard = PgAdvisoryLock::new(format!("connector.refresh:{source_id}"))
@@ -1261,7 +1287,7 @@ async fn access_token_inner(
             "This process cannot open the profile's key, so it cannot store this connection's next token.",
         ));
     }
-    if single_use {
+    if bluebutton {
         check_bluebutton_client(&client, &endpoints, egress)?;
     }
     let refresh = secrets::read_secret(&mut tx, sb, household, secret_id).await?;
@@ -1330,7 +1356,16 @@ async fn access_token_inner(
         }
         Err(e) => return Err(e),
     };
-    let rotated = t.refresh.is_some();
+    // a rotating vendor retired the token it was sent; with no new one there is nothing left to
+    // refresh with, and sending the retired one again could end the whole grant at the vendor
+    let retired = t.refresh.is_none() && rotation == Some(Rotation::Rotating);
+    let rotated = t.refresh.is_some() || retired;
+    let access_at = access_until(&t, now, quirks);
+    let grant_at = if retired {
+        Some(access_at)
+    } else {
+        after(now, t.refresh_expires_in).or_else(|| unused_until(now, quirks))
+    };
     let stored: Result<(), OAuthError> = async {
         // A profile's token goes under the profile's key, also when the token it replaces was sealed
         // under the secrets key; a vendor that does not rotate keeps the same token, which is sealed
@@ -1338,6 +1373,14 @@ async fn access_token_inner(
         // only on the profile's key row, which a profile delete takes only after it removed the source
         // rows, so the source row held here cannot close a cycle with a delete.
         match (profile, &t.refresh) {
+            _ if retired => {
+                tracing::warn!(%source_id, "the vendor retired the refresh token and sent no new one: it is dropped");
+                sqlx::query("update source set secret_id = null where id = $1")
+                    .bind(source_id)
+                    .execute(&mut *tx)
+                    .await?;
+                secrets::delete_secret(&mut tx, household, secret_id).await?;
+            }
             (Some(p), Some(r)) => secrets::replace_profile_secret(&mut tx, sb, secret_id, p, r).await?,
             (Some(p), None) => {
                 if !secrets::sealed_for_profile(&mut tx, secret_id, p).await? {
@@ -1354,8 +1397,8 @@ async fn access_token_inner(
              oauth_access_token = $5, reconsent_needed_at = null where id = $1",
         )
         .bind(source_id)
-        .bind(access_until(&t, now))
-        .bind(after(now, t.refresh_expires_in))
+        .bind(access_at)
+        .bind(grant_at)
         .bind(&t.scope)
         .bind(&access)
         .execute(&mut *tx)

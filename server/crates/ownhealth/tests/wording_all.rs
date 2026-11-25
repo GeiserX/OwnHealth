@@ -29,6 +29,7 @@ const SLUGS: [&str; 4] = ["alex", "sam", "lucia", "carmen"];
 /// Every user-facing output we compute. One line per source.
 const SOURCES: &[(&str, Source)] = &[
     ("status", |s| Box::pin(status(s))),
+    ("fitbit_takeout", |_| Box::pin(async { fitbit_takeout_words() })),
     ("dashboard", |s| Box::pin(dashboards(s))),
     ("check_drug", |s| Box::pin(drug_checks(s))),
     ("summary", |s| Box::pin(summaries(s))),
@@ -73,21 +74,41 @@ const SOURCES: &[(&str, Source)] = &[
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::shl_receive::phrases()]) })
     }),
     ("session_report", |_| Box::pin(async { session_report_words() })),
+    ("wearables_setup", |_| Box::pin(async { dict_words("ow_setup_") })),
     ("smart_poller", |_| {
         Box::pin(async { Ok(vec![ownhealth_ingest_structured::smart::phrases()]) })
     }),
 ];
 
-fn session_report_words() -> anyhow::Result<Vec<Value>> {
+fn fitbit_takeout_words() -> anyhow::Result<Vec<Value>> {
     let dict = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../ui/src/lib/i18n/dict.ts"));
-    let mut words = vec![ownhealth_api::routes::session_report::phrases()];
-    for line in dict.lines().filter(|line| line.trim_start().starts_with("i2_sr_")) {
+    dict.lines()
+        .filter_map(|line| {
+            let (key, value) = line.trim_start().split_once(':')?;
+            (["i2_ik_fitbit_takeout", "fu_k_fitbit_takeout"].contains(&key)
+                || key.starts_with("err_fitbit_takeout_")
+                || key.starts_with("i2_fitbit_"))
+            .then(|| serde_json::from_str(value.trim().trim_end_matches(',')).map_err(anyhow::Error::from))
+        })
+        .collect()
+}
+
+fn session_report_words() -> anyhow::Result<Vec<Value>> {
+    let mut words = dict_words("i2_sr_")?;
+    words.push(ownhealth_api::routes::session_report::phrases());
+    Ok(words)
+}
+
+fn dict_words(prefix: &str) -> anyhow::Result<Vec<Value>> {
+    let dict = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../ui/src/lib/i18n/dict.ts"));
+    let mut words = Vec::new();
+    for line in dict.lines().filter(|line| line.trim_start().starts_with(prefix)) {
         let (_, text) = line
             .split_once(':')
-            .ok_or_else(|| anyhow::anyhow!("Bad session report string: {line}"))?;
+            .ok_or_else(|| anyhow::anyhow!("Bad UI string: {line}"))?;
         words.push(serde_json::from_str(text.trim().trim_end_matches(','))?);
     }
-    anyhow::ensure!(words.len() > 1, "Session report UI strings are missing");
+    anyhow::ensure!(!words.is_empty(), "UI strings starting with {prefix} are missing");
     Ok(words)
 }
 

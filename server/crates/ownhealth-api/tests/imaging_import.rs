@@ -637,3 +637,228 @@ async fn round5_reading_a_held_study_audits_only_the_authorized_item() -> R {
     assert_eq!(rows, [(Some(a.family.profile("carmen")), Some(vec![id.to_string()]))]);
     Ok(())
 }
+
+/// A study of upload `import_id` held in review on `who`'s profile, as the import files it.
+async fn held_study(a: &App, who: &str, import_id: Uuid, uid: &str) -> anyhow::Result<Uuid> {
+    let mut c = a.conn().await?;
+    Ok(ownhealth_core::review::create_item(
+        &mut c,
+        &ownhealth_core::review::ReviewItemIn {
+            kind: "imaging_study".into(),
+            household_id: Some(a.family.household_id),
+            profile_id: Some(a.family.profile(who)),
+            payload: json!({"import_id": import_id, "study_uid": uid, "reason": "identity_mismatch",
+                "patient_name": "ORTEGA CARMEN", "modality": "CT", "series": 1, "instances": 3}),
+            reasons: vec!["identity_mismatch".into()],
+            ref_table: Some("imaging_import".into()),
+            ref_id: Some(import_id),
+            ..Default::default()
+        },
+    )
+    .await?)
+}
+
+/// Uploads a disc to alex's profile and lets its import end, as it does once Orthanc answered.
+async fn uploaded(a: &App) -> anyhow::Result<(Uuid, String)> {
+    let (s, v) = post(a, "alex", "/imaging/import", &[("profile", "alex")], &disc()).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let import_id: Uuid = serde_json::from_value(v["import_id"].clone())?;
+    sqlx::query("update job set state = 'done', finished_at = now() where kind = 'import.dicom'")
+        .execute(&a.rt.pool)
+        .await?;
+    let sha = imports(a, a.family.profile("alex")).await?[0].1.clone();
+    Ok((import_id, hex(&sha)))
+}
+
+async fn delete(a: &App, who: &str, uri: &str) -> anyhow::Result<(StatusCode, Value)> {
+    let req = Request::delete(uri)
+        .header(header::COOKIE, a.cookie(who).await?)
+        .body(Body::empty())?;
+    a.send(req).await
+}
+
+/// Runs the queued release of a removed upload's zip.
+async fn release(a: &App) -> anyhow::Result<usize> {
+    ownhealth_imaging::register();
+    let kinds = [ownhealth_imaging::remove::RELEASE_JOB.to_string()];
+    Ok(ownhealth_core::jobs::drain(&a.rt.job_context(), "core", 5, Some(&kinds)).await?)
+}
+
+#[tokio::test]
+async fn an_upload_that_went_to_the_wrong_profile_is_removed_with_its_held_studies_and_its_zip() -> R {
+    let a = imaging_app().await?;
+    let alex = a.family.profile("alex");
+    let (s, v) = post(&a, "alex", "/imaging/import", &[("profile", "alex")], &disc()).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let import_id = v["import_id"].as_str().unwrap_or_default().to_string();
+    let uri = format!("/imaging/imports/{import_id}");
+    // its import has not run yet
+    let (s, v) = delete(&a, "alex", &uri).await?;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["detail"]["code"], "upload_importing", "{v}");
+
+    sqlx::query("update job set state = 'done', finished_at = now() where kind = 'import.dicom'")
+        .execute(&a.rt.pool)
+        .await?;
+    let import_id: Uuid = import_id.parse()?;
+    let first = held_study(&a, "alex", import_id, "1.2.826.0.1.3680043.10.999.43.7").await?;
+    let second = held_study(&a, "alex", import_id, "1.2.826.0.1.3680043.10.999.43.8").await?;
+    let sha = hex(&imports(&a, alex).await?[0].1);
+    // sam views alex's profile: he may not remove its uploads
+    let (s, v) = delete(&a, "sam", &uri).await?;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let (s, v) = delete(&a, "alex", &format!("/imaging/imports/{}", Uuid::new_v4())).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+
+    let (s, v) = delete(&a, "alex", &uri).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({"import_id": import_id, "removed": true, "dismissed": 2}));
+    assert!(imports(&a, alex).await?.is_empty());
+    for id in [first, second] {
+        let status: String = sqlx::query_scalar("select status from review_item where id = $1")
+            .bind(id)
+            .fetch_one(&a.rt.pool)
+            .await?;
+        assert_eq!(status, "dismissed");
+    }
+    let audited = a
+        .count("select count(*) from audit_event where action = 'imaging.remove_upload'")
+        .await?;
+    assert_eq!(audited, 1);
+    assert!(a.rt.blobs.exists(BlobOwner::Profile(alex), &sha));
+    assert_eq!(release(&a).await?, 1);
+    assert!(!a.rt.blobs.exists(BlobOwner::Profile(alex), &sha), "the zip stayed");
+    let (s, v) = delete(&a, "alex", &uri).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn closing_the_last_held_study_of_an_upload_removes_the_upload() -> R {
+    let a = imaging_app().await?;
+    let (import_id, sha) = uploaded(&a).await?;
+    let first = held_study(&a, "alex", import_id, "1.2.826.0.1.3680043.10.999.43.7").await?;
+    let second = held_study(&a, "alex", import_id, "1.2.826.0.1.3680043.10.999.43.8").await?;
+    let (s, v) = a.post("alex", &format!("/review/{first}/dismiss"), None).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v, json!({"id": first, "status": "dismissed"}));
+    assert_eq!(imports(&a, a.family.profile("alex")).await?.len(), 1);
+    let (s, v) = a
+        .post(
+            "alex",
+            &format!("/review/{second}/reject"),
+            Some(json!({"reason": "not Alex"})),
+        )
+        .await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["upload_removed"], json!(true), "{v}");
+    assert!(imports(&a, a.family.profile("alex")).await?.is_empty());
+    // the removal is in the audit log as a DELETE's is
+    let audited: Vec<(Option<Uuid>, Option<Vec<String>>)> =
+        sqlx::query_as("select profile_id, resource_ids from audit_event where action = 'imaging.remove_upload'")
+            .fetch_all(&a.rt.pool)
+            .await?;
+    assert_eq!(
+        audited,
+        [(Some(a.family.profile("alex")), Some(vec![import_id.to_string()]))]
+    );
+    assert_eq!(release(&a).await?, 1);
+    assert!(!a.rt.blobs.exists(BlobOwner::Profile(a.family.profile("alex")), &sha));
+    // reopened, the held study refuses Accept with a message the person can act on
+    let (s, v) = a.post("alex", &format!("/review/{second}/reopen"), None).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = a
+        .post("alex", &format!("/review/{second}/accept"), Some(json!({})))
+        .await?;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    // a code of its own, so the page says it in the person's language
+    assert_eq!(v["detail"]["code"], "upload_removed", "{v}");
+    assert!(v.to_string().contains("This upload was removed"), "{v}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_dicom_import_in_review_shows_only_to_those_who_may_read_records() -> R {
+    let a = imaging_app().await?;
+    let payload = json!({"job_id": 1, "kind": "import.dicom", "attempts": 5,
+        "error": "OrthancError: Synthetic failure for cd-ortega.zip", "payload_document_id": null});
+    let id = item(&a, "carmen", "job_failed", Some(payload), json!({})).await?;
+    let other = item(
+        &a,
+        "carmen",
+        "job_failed",
+        Some(json!({"job_id": 2, "kind": "import.pdf", "attempts": 5, "error": "Synthetic"})),
+        json!({}),
+    )
+    .await?;
+    let (s, listed) = a.get("alex", "/review?profile=carmen").await?;
+    assert_eq!(s, StatusCode::OK, "{listed}");
+    assert!(listed.to_string().contains(&id.to_string()), "{listed}");
+    // alex, carmen's caregiver, now reads her labs only: the DICOM failure is withheld, the other is not
+    narrow(&a, "alex", "carmen", &["read:summary", "read:labs"]).await?;
+    let (s, listed) = a.get("alex", "/review?profile=carmen").await?;
+    assert_eq!(s, StatusCode::OK, "{listed}");
+    assert!(!listed.to_string().contains(&id.to_string()), "{listed}");
+    assert!(!listed.to_string().contains("cd-ortega"), "{listed}");
+    assert!(listed.to_string().contains(&other.to_string()), "{listed}");
+    let (s, one) = a.get("alex", &format!("/review/{id}")).await?;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{one}");
+    Ok(())
+}
+
+/// Waits until a session of this test's database waits on a lock.
+async fn until_a_lock_wait(a: &App) -> anyhow::Result<()> {
+    for _ in 0..400 {
+        let waiting = a
+            .count(
+                "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+            )
+            .await?;
+        if waiting > 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("nothing waited on a lock")
+}
+
+#[tokio::test]
+async fn a_removal_that_finds_a_new_held_study_says_the_upload_changed() -> R {
+    let a = imaging_app().await?;
+    let (import_id, _) = uploaded(&a).await?;
+    held_study(&a, "alex", import_id, "1.2.826.0.1.3680043.10.999.43.7").await?;
+    // an accept in flight reads the upload with a shared lock: the removal waits on it
+    let mut reading = a.rt.pool.begin().await?;
+    sqlx::query("select id from imaging_import where id = $1 for share")
+        .bind(import_id)
+        .execute(&mut *reading)
+        .await?;
+    let uri = format!("/imaging/imports/{import_id}");
+    let (answer, added) = tokio::join!(delete(&a, "alex", &uri), async {
+        until_a_lock_wait(&a).await?;
+        // meanwhile a replay of the import holds one more study and ends
+        ownhealth_core::review::create_item(
+            &mut reading,
+            &ownhealth_core::review::ReviewItemIn {
+                kind: "imaging_study".into(),
+                household_id: Some(a.family.household_id),
+                profile_id: Some(a.family.profile("alex")),
+                payload: json!({"import_id": import_id, "study_uid": "1.2.826.0.1.3680043.10.999.43.8",
+                    "reason": "identity_mismatch"}),
+                reasons: vec!["identity_mismatch".into()],
+                ref_table: Some("imaging_import".into()),
+                ref_id: Some(import_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+        reading.commit().await?;
+        anyhow::Ok(())
+    });
+    added?;
+    let (s, v) = answer?;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(v["detail"]["code"], "upload_changed", "{v}");
+    assert_eq!(imports(&a, a.family.profile("alex")).await?.len(), 1);
+    Ok(())
+}

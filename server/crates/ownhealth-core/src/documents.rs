@@ -5,6 +5,7 @@
 //! handles it.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::io::{Read, Seek};
 use std::path::Path;
 
@@ -18,7 +19,8 @@ use crate::ids::token_hex;
 use crate::jobs::{EnqueueOptions, enqueue};
 
 /// pdf | image | apple_health_zip | fhir_json | fhir_ndjson | genome_facts | vcf | tbi | gadgetbridge_db |
-/// libreview_csv | dexcom_clarity_csv | garmin_zip | broken_zip | zip_directory_limit | ccda | unknown
+/// libreview_csv | dexcom_clarity_csv | garmin_zip | strava_zip | fitbit_takeout | broken_zip | zip_directory_limit |
+/// ccda | unknown
 pub type UploadKind = &'static str;
 
 /// Job kind per upload kind. Handlers: import.pdf (lane B), import.fhir_bundle and
@@ -29,6 +31,8 @@ pub fn job_kind(kind: &str) -> Option<&'static str> {
         "fit" | "fit_gz" => "import.fit",
         "apple_health_zip" => "import.apple_health",
         "garmin_zip" => "import.garmin_zip",
+        "strava_zip" => "import.strava_zip",
+        "fitbit_takeout" => "import.fitbit_takeout",
         "fhir_json" | "fhir_ndjson" => "import.fhir_bundle",
         "genome_facts" => "import.genome_facts",
         "gadgetbridge_db" => "import.gadgetbridge",
@@ -45,7 +49,7 @@ pub fn mime(kind: &str) -> Option<&'static str> {
         "fit_gz" => "application/gzip",
         "fhir_json" => "application/fhir+json",
         "fhir_ndjson" => "application/fhir+ndjson",
-        "apple_health_zip" | "garmin_zip" => "application/zip",
+        "apple_health_zip" | "garmin_zip" | "strava_zip" | "fitbit_takeout" => "application/zip",
         "genome_facts" => "application/json",
         "vcf" => "application/gzip",
         "tbi" => "application/octet-stream",
@@ -59,13 +63,51 @@ pub fn mime(kind: &str) -> Option<&'static str> {
 /// The mime of the document a Garmin export's import stores: its readings as JSON lines, not the zip.
 pub const GARMIN_READINGS_MIME: &str = "application/x-ndjson";
 
-/// The mime of the document an upload kind's import stores: the upload's own, except a Garmin export,
-/// whose document holds the readings it read from the zip.
+/// The mime of the projected Strava readings, used to route moves and replays.
+pub const STRAVA_READINGS_MIME: &str = "application/vnd.ownhealth.strava+ndjson";
+
+/// The mime of the projected Fitbit Takeout readings, used to route moves and replays.
+pub const FITBIT_READINGS_MIME: &str = "application/vnd.ownhealth.fitbit-readings+ndjson";
+
+/// The stored mime of an upload. Garmin, Strava and Fitbit Takeout exports keep a projection of the archive.
 pub fn stored_mime(kind: &str) -> Option<&'static str> {
-    if kind == "garmin_zip" {
-        return Some(GARMIN_READINGS_MIME);
+    match kind {
+        "garmin_zip" => Some(GARMIN_READINGS_MIME),
+        "strava_zip" => Some(STRAVA_READINGS_MIME),
+        "fitbit_takeout" => Some(FITBIT_READINGS_MIME),
+        _ => mime(kind),
     }
-    mime(kind)
+}
+
+/// The flag and lock key for imports that release their original archive.
+pub(crate) fn projected_export(kind: &str) -> Option<&'static str> {
+    match kind {
+        "garmin_zip" => Some("garmin"),
+        "strava_zip" => Some("strava"),
+        "fitbit_takeout" => Some("fitbit_takeout"),
+        _ => None,
+    }
+}
+
+/// The service folder and relative member path of a Fitbit or Google Health Takeout export.
+/// The archive may contain the service folder directly or inside a Takeout directory. The
+/// AppleDouble twins a Mac adds (`__MACOSX/…`, `._name`) hold no readings and are not members.
+pub fn fitbit_takeout_path(name: &str) -> Option<(&str, &str)> {
+    if name.starts_with("__MACOSX/") || name.rsplit('/').next().is_some_and(|base| base.starts_with("._")) {
+        return None;
+    }
+    let mut start = 0;
+    let mut parent: &str = "";
+    for (end, _) in name.match_indices('/') {
+        let part = &name[start..end];
+        let service = part.eq_ignore_ascii_case("Fitbit") || part.eq_ignore_ascii_case("Google Health");
+        if service && (start == 0 || parent.eq_ignore_ascii_case("Takeout")) {
+            return Some((&name[..end], &name[end + 1..]));
+        }
+        start = end + 1;
+        parent = part;
+    }
+    None
 }
 
 /// Recognized outer members of a Garmin account export. The leading directories vary between
@@ -120,16 +162,49 @@ fn classify_zip(reader: impl Read + Seek) -> UploadKind {
         Err(_) => return "broken_zip",
     };
     let mut kind = "unknown";
+    let mut fitbit = false;
     for name in archive.file_names().flatten() {
         // Preserve Apple Health's existing marker and precedence.
         if name.ends_with("export.xml") {
             return "apple_health_zip";
         }
+        fitbit |= fitbit_takeout_path(&name).is_some();
         if GarminMember::from_name(&name).is_some() {
             kind = "garmin_zip";
         }
     }
+    if fitbit {
+        return "fitbit_takeout";
+    }
+    if kind == "unknown" && strava_manifest(&archive).is_some() {
+        return "strava_zip";
+    }
     kind
+}
+
+/// Find activities.csv beside the activities folder, including in a repacked export with a wrapper
+/// directory. An export of manual activities only has the folder entry and no activity file.
+pub fn strava_manifest(archive: &zip::ZipArchive<impl Read + Seek>) -> Option<String> {
+    let roots: std::collections::HashSet<_> = archive
+        .file_names()
+        .flatten()
+        .filter_map(|name| {
+            let root = name.strip_suffix("activities.csv")?;
+            (root.is_empty() || root.ends_with('/')).then(|| root.to_owned())
+        })
+        .collect();
+    if roots.is_empty() {
+        return None;
+    }
+    archive.file_names().flatten().find_map(|name| {
+        for (i, _) in name.match_indices("activities/") {
+            let root = &name[..i];
+            if roots.contains(root) {
+                return Some(format!("{root}activities.csv"));
+            }
+        }
+        None
+    })
 }
 
 /// Whether `head` starts a zip, the one kind `sniff` reads further than the first bytes of.
@@ -155,6 +230,12 @@ pub fn sniff(filename: &str, head: &[u8], blob_path: Option<&Path>) -> UploadKin
             .and_then(|path| std::fs::File::open(path).ok())
             .map_or("unknown", classify_zip)
     })
+}
+
+pub(crate) fn sniff_reader(filename: &str, mut reader: impl Read + Seek) -> Result<UploadKind> {
+    let mut head = Vec::with_capacity(4096);
+    (&mut reader).take(4096).read_to_end(&mut head)?;
+    Ok(sniff_with_zip(filename, &head, || classify_zip(reader)))
 }
 
 fn sniff_with_zip(filename: &str, head: &[u8], zip_kind: impl FnOnce() -> UploadKind) -> UploadKind {
@@ -519,6 +600,54 @@ pub async fn lock_blob(conn: &mut PgConnection, profile: Uuid, sha256: &str, sha
     Ok(())
 }
 
+/// The start of the status reason of a row retracted with its document (`POST
+/// /api/documents/{id}/retract`). An imaging study with that reason comes back when a person who may
+/// change its profile uploads the document again ([`restore_studies`]).
+pub const RETRACTED_WITH_DOCUMENT: &str = "document retracted: ";
+
+/// The profile of each imaging study retracted with document `document_id` (its report), each study
+/// locked: the profiles [`restore_studies`] could bring a study back on, for the caller to check its
+/// grant on. None while the document itself is not active: the status is read under its row lock,
+/// which a retraction holds until it commits, so an upload that found the document active (and did
+/// not bring it back) brings back no study a retraction took meanwhile.
+pub async fn retracted_study_profiles(conn: &mut PgConnection, document_id: Uuid) -> Result<BTreeSet<Uuid>> {
+    let status: Option<String> = sqlx::query_scalar("select status from document where id = $1 for share")
+        .bind(document_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if status.as_deref() != Some("active") {
+        return Ok(BTreeSet::new());
+    }
+    let rows: Vec<Uuid> = sqlx::query_scalar(
+        "select profile_id from imaging_study where report_document_id = $1 and status = 'retracted' \
+         and starts_with(status_reason, $2) order by id for update",
+    )
+    .bind(document_id)
+    .bind(RETRACTED_WITH_DOCUMENT)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Brings back each imaging study on one of `profiles` that was retracted with document
+/// `document_id` (its report), with the status it had (`retracted_from`); its row and its pixels
+/// stayed. A study retracted for another reason, or on another profile, stays retracted. The number
+/// brought back.
+pub async fn restore_studies(conn: &mut PgConnection, document_id: Uuid, profiles: &[Uuid]) -> Result<u64> {
+    let done = sqlx::query(
+        "update imaging_study set status = coalesce(retracted_from, 'current'), status_reason = null, \
+         retracted_from = null \
+         where report_document_id = $1 and status = 'retracted' and starts_with(status_reason, $2) \
+         and profile_id = any($3)",
+    )
+    .bind(document_id)
+    .bind(RETRACTED_WITH_DOCUMENT)
+    .bind(profiles)
+    .execute(&mut *conn)
+    .await?;
+    Ok(done.rows_affected())
+}
+
 /// Insert a document or return the existing one for the same profile and bytes.
 pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Result<DocumentRef> {
     let sha = sha256_hex_to_bytes(d.blob_sha256)?;
@@ -541,6 +670,8 @@ pub async fn create_document(conn: &mut PgConnection, d: &NewDocument<'_>) -> Re
             .bind(id)
             .execute(&mut *conn)
             .await?;
+        // An imaging study retracted with it stays retracted here: only a person who may change the
+        // study's profile brings it back ([`restore_studies`], from `POST /api/imports`).
     }
     let (id, created) = match row {
         Some((id, _)) => (id, false),
@@ -643,14 +774,9 @@ pub async fn dispatch_upload_in_zone(
         );
         // Off the runtime: a plain file of an older install is hashed once when it opens.
         // ZIP classification only needs the central directory, even for a sealed blob.
-        let kind = tokio::task::spawn_blocking(move || -> Result<UploadKind> {
-            let mut head = Vec::with_capacity(4096);
-            let mut reader = store.open_seek(owner, &sha)?;
-            (&mut reader).take(4096).read_to_end(&mut head)?;
-            Ok(sniff_with_zip(&name, &head, || classify_zip(reader)))
-        })
-        .await
-        .map_err(std::io::Error::other)??;
+        let kind = tokio::task::spawn_blocking(move || sniff_reader(&name, store.open_seek(owner, &sha)?))
+            .await
+            .map_err(std::io::Error::other)??;
         kinds.push((f, kind));
     }
     let has_facts = kinds.iter().any(|(_, k)| *k == "genome_facts");

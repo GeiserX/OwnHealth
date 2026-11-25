@@ -229,16 +229,26 @@ impl Orthanc {
 
     /// One study's UID and patient as Orthanc read them (`GET /studies/{id}`).
     pub async fn study(&self, id: &str) -> Result<StudyInfo, OrthancError> {
+        self.study_if_held(id)
+            .await?
+            .ok_or_else(|| OrthancError("Orthanc answered 404 Not Found to a study read".into()))
+    }
+
+    /// [`Orthanc::study`], or None when Orthanc holds no such study (any more).
+    pub async fn study_if_held(&self, id: &str) -> Result<Option<StudyInfo>, OrthancError> {
         if !is_orthanc_id(id) {
             return Err(OrthancError("Orthanc named a study with an id that is not one".into()));
         }
         let res = self.send(self.http.get(self.url(&format!("/studies/{id}")))).await?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         let v = Orthanc::json(res, "a study read").await?;
         let tag = |group: &str, name: &str| v[group][name].as_str().unwrap_or_default().trim().to_string();
-        Ok(StudyInfo {
+        Ok(Some(StudyInfo {
             study_instance_uid: tag("MainDicomTags", "StudyInstanceUID"),
             patient_id: tag("PatientMainDicomTags", "PatientID"),
-        })
+        }))
     }
 
     /// The series of one study and their actual instance counts. Ask Orthanc for the computed
@@ -342,6 +352,78 @@ impl Orthanc {
             study: study.into(),
             new,
         })
+    }
+
+    /// Every study Orthanc holds, by id (`GET /studies`, a page at a time).
+    pub async fn study_ids(&self) -> Result<Vec<String>, OrthancError> {
+        const PAGE_SIZE: usize = 500;
+        let mut out: Vec<String> = Vec::new();
+        loop {
+            let res = self
+                .send(
+                    self.http
+                        .get(self.url(&format!("/studies?limit={PAGE_SIZE}&since={}", out.len()))),
+                )
+                .await?;
+            let v = Orthanc::json(res, "the study list").await?;
+            let invalid = || OrthancError("Orthanc returned an invalid study list".into());
+            let page = v.as_array().filter(|p| p.len() <= PAGE_SIZE).ok_or_else(invalid)?;
+            for id in page {
+                let id = id.as_str().filter(|id| is_orthanc_id(id)).ok_or_else(invalid)?;
+                out.push(id.to_string());
+            }
+            if page.len() < PAGE_SIZE {
+                return Ok(out);
+            }
+        }
+    }
+
+    /// The series of one study: each one's Orthanc id and SeriesInstanceUID (`GET /studies/{id}/series`).
+    /// None when Orthanc holds no such study.
+    pub async fn series_ids(&self, id: &str) -> Result<Option<Vec<(String, String)>>, OrthancError> {
+        if !is_orthanc_id(id) {
+            return Err(OrthancError("not an Orthanc id".into()));
+        }
+        let res = self
+            .send(self.http.get(self.url(&format!("/studies/{id}/series"))))
+            .await?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let v = Orthanc::json(res, "a study's series").await?;
+        let invalid = || OrthancError("Orthanc returned an invalid series list".into());
+        let mut out = Vec::new();
+        for s in v.as_array().ok_or_else(invalid)? {
+            let sid = s["ID"].as_str().filter(|id| is_orthanc_id(id)).ok_or_else(invalid)?;
+            let uid = s["MainDicomTags"]["SeriesInstanceUID"]
+                .as_str()
+                .map(str::trim)
+                .filter(|uid| crate::part10::is_uid(uid))
+                .ok_or_else(invalid)?;
+            out.push((sid.to_string(), uid.to_string()));
+        }
+        Ok(Some(out))
+    }
+
+    /// Removes a whole study (`DELETE /studies/{id}`); one that is gone already counts as removed.
+    pub async fn delete_study(&self, id: &str) -> Result<(), OrthancError> {
+        self.delete_resource("studies", id).await
+    }
+
+    /// Removes one series (`DELETE /series/{id}`); one that is gone already counts as removed.
+    pub async fn delete_series(&self, id: &str) -> Result<(), OrthancError> {
+        self.delete_resource("series", id).await
+    }
+
+    async fn delete_resource(&self, level: &str, id: &str) -> Result<(), OrthancError> {
+        if !is_orthanc_id(id) {
+            return Err(OrthancError("not an Orthanc id".into()));
+        }
+        let res = self.send(self.http.delete(self.url(&format!("/{level}/{id}")))).await?;
+        if !res.status().is_success() && res.status() != StatusCode::NOT_FOUND {
+            return Err(OrthancError(format!("Orthanc answered {} to a delete", res.status())));
+        }
+        Ok(())
     }
 
     /// Takes back an instance this import added (`DELETE /instances/{id}`).

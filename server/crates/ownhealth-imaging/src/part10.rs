@@ -37,6 +37,8 @@ pub enum Part10Error {
     Corrupt(String),
     /// The file meta group declares a deflated data set.
     Deflated,
+    /// The file could not be read (an I/O error): this says nothing about its content.
+    Io(String),
 }
 
 impl std::fmt::Display for Part10Error {
@@ -45,6 +47,7 @@ impl std::fmt::Display for Part10Error {
             Part10Error::NotDicom => f.write_str("not a DICOM file"),
             Part10Error::Corrupt(why) => write!(f, "a damaged DICOM file: {why}"),
             Part10Error::Deflated => f.write_str("deflated DICOM transfer syntax is unsupported"),
+            Part10Error::Io(why) => write!(f, "the file could not be read: {why}"),
         }
     }
 }
@@ -157,10 +160,14 @@ impl<R: Read + Seek> Walker<R> {
         if at.checked_add(out.len()).is_none_or(|end| end > self.end) {
             return Err(corrupt("the file ends inside an element"));
         }
+        // the range is inside the file: a read that still fails is the disk's, not the content's
         self.input
             .seek(SeekFrom::Start(at as u64))
             .and_then(|_| self.input.read_exact(out))
-            .map_err(|e| corrupt(format!("reading an element: {e}")))
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::UnexpectedEof => corrupt(format!("reading an element: {e}")),
+                _ => Part10Error::Io(format!("reading an element: {e}")),
+            })
     }
 
     fn u16_at(&mut self, at: usize) -> Result<u16, Part10Error> {
@@ -542,7 +549,7 @@ pub fn encapsulated_document(buf: &[u8]) -> Result<Option<Vec<u8>>, Part10Error>
 
 /// Open the PDF value of a staged Encapsulated PDF instance as a bounded reader.
 pub(crate) fn encapsulated_file(file: File) -> Result<Option<Take<File>>, Part10Error> {
-    let end = file.metadata().map_err(|e| corrupt(e.to_string()))?.len() as usize;
+    let end = file.metadata().map_err(|e| Part10Error::Io(e.to_string()))?.len() as usize;
     let mut input = BufReader::new(file);
     let (ts, _, _, pos) = meta(&mut input, end)?;
     let syntax = syntax_for(&ts)?;
@@ -562,7 +569,7 @@ pub(crate) fn encapsulated_file(file: File) -> Result<Option<Take<File>>, Part10
     }
     let mut file = w.input.into_inner();
     file.seek(SeekFrom::Start(value.start as u64))
-        .map_err(|e| corrupt(e.to_string()))?;
+        .map_err(|e| Part10Error::Io(e.to_string()))?;
     Ok(Some(file.take(value.len() as u64)))
 }
 
@@ -858,6 +865,29 @@ mod tests {
         let bytes = file("1.2.840.10008.1.2.1", &set);
         assert!(matches!(encapsulated_document(&bytes), Err(Part10Error::Corrupt(_))));
         assert!(matches!(read_staged_pdf(&bytes), Err(Part10Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn a_staged_report_that_cannot_be_read_is_an_io_error_not_a_damaged_file() {
+        let bytes = file(
+            "1.2.840.10008.1.2.1",
+            &explicit(false, 0x0042_0011, b"OB", b"%PDF-X!\0"),
+        );
+        let dir = tempfile::tempdir().expect("staging directory");
+        let path = dir.path().join("staged");
+        std::fs::write(&path, &bytes).expect("DICOM bytes");
+        // opened for writing only: every read fails, as a failing disk does
+        let unreadable = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("staged file");
+        let read = encapsulated_file(unreadable).map(|pdf| pdf.is_some());
+        assert!(matches!(read, Err(Part10Error::Io(_))), "{read:?}");
+        // the same bytes, read: a report
+        assert_eq!(
+            read_staged_pdf(&bytes).expect("staged PDF").as_deref(),
+            Some(&b"%PDF-X!"[..])
+        );
     }
 
     #[test]

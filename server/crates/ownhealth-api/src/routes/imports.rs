@@ -32,6 +32,7 @@ use ownhealth_core::pyjson::row_to_json;
 use ownhealth_core::{Error, Runtime, ids};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 use crate::Caller;
 use crate::error::ApiError;
@@ -194,6 +195,18 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
         }
         Err(e) => return Err(e.into()),
     };
+    // a report uploaded again brings back the studies retracted with it that the caller may change
+    let documents: Vec<Uuid> = result
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|i| i.get("document_id").and_then(Value::as_str))
+        .filter_map(|id| Uuid::parse_str(id).ok())
+        .collect();
+    for document_id in documents {
+        crate::routes::documents::restore_studies(&mut tx, principal, document_id).await?;
+    }
     let shas: Vec<String> = result
         .get("items")
         .and_then(Value::as_array)
@@ -217,11 +230,13 @@ async fn upload(State(rt): State<Runtime>, caller: Caller, req: Request) -> R<Js
 
 /// The import jobs whose result counts a profile's wearable samples and names its devices (a CGM
 /// export's result also counts its Low and High readings).
-pub const WEARABLE_JOBS: [&str; 4] = [
+pub const WEARABLE_JOBS: [&str; 6] = [
     "import.fit",
     "import.gadgetbridge",
     "import.cgm_csv",
     ownhealth_devices::garmin_zip::JOB,
+    ownhealth_devices::strava_zip::JOB,
+    ownhealth_devices::takeout_fitbit::JOB,
 ];
 
 /// Import jobs of the caller's profiles, newest first; `ids=1,2,3` to poll specific ones.

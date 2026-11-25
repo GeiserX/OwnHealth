@@ -1,0 +1,72 @@
+{
+  "issuer": "https://authorization.cerner.com/tenants/ec2458f2-1e24-41c8-b71b-0e701af7583d",
+  "authorization_endpoint": "https://authorization.cerner.com/tenants/ec2458f2-1e24-41c8-b71b-0e701af7583d/protocols/oauth2/profiles/smart-v1/personas/patient/authorize",
+  "token_endpoint": "https://authorization.cerner.com/tenants/ec2458f2-1e24-41c8-b71b-0e701af7583d/hosts/fhir-myrecord.cerner.com/protocols/oauth2/profiles/smart-v1/token",
+  "revocation_endpoint": "https://authorization.cerner.com/tenants/ec2458f2-1e24-41c8-b71b-0e701af7583d/protocols/oauth2/profiles/smart-v1/token/revoke",
+  "token_endpoint_auth_methods_supported": [
+    "client_secret_basic",
+    "private_key_jwt"
+  ],
+  "token_endpoint_auth_signing_alg_values_supported": [
+    "RS384",
+    "ES384"
+  ],
+  "jwks_uri": "https://authorization.cerner.com/jwk",
+  "grant_types_supported": [
+    "authorization_code",
+    "client_credentials"
+  ],
+  "scopes_supported": [
+    "fhirUser",
+    "launch/patient",
+    "offline_access",
+    "openid",
+    "patient/AllergyIntolerance.read",
+    "patient/AllergyIntolerance.rs",
+    "patient/Condition.read",
+    "patient/Condition.rs",
+    "patient/DiagnosticReport.read",
+    "patient/DiagnosticReport.rs",
+    "patient/DocumentReference.read",
+    "patient/DocumentReference.rs",
+    "patient/Encounter.read",
+    "patient/Encounter.rs",
+    "patient/Immunization.read",
+    "patient/Immunization.rs",
+    "patient/MedicationRequest.read",
+    "patient/MedicationRequest.rs",
+    "patient/Observation.read",
+    "patient/Patient.read",
+    "patient/Patient.rs",
+    "patient/Procedure.read",
+    "patient/Procedure.rs"
+  ],
+  "response_types_supported": [
+    "code"
+  ],
+  "management_endpoint": "https://authorization.cerner.com/tenants/ec2458f2-1e24-41c8-b71b-0e701af7583d/personas/patient/my-authorizations",
+  "introspection_endpoint": "https://authorization.cerner.com/tokeninfo",
+  "capabilities": [
+    "authorize-post",
+    "launch-ehr",
+    "launch-standalone",
+    "client-public",
+    "client-confidential-asymmetric",
+    "client-confidential-symmetric",
+    "sso-openid-connect",
+    "context-banner",
+    "context-style",
+    "context-standalone-patient",
+    "context-ehr-patient",
+    "permission-patient",
+    "permission-user",
+    "permission-offline",
+    "permission-online",
+    "permission-v1",
+    "permission-v2",
+    "health-cards"
+  ],
+  "code_challenge_methods_supported": [
+    "S256"
+  ]
+}

@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { dict } from '../src/lib/i18n/dict.ts';
 import {
 	GRANT_SOON_DAYS,
+	mayManageConnections,
 	callbackOutcome,
 	canReconnect,
 	cardTitle,
@@ -357,4 +358,12 @@ test('an open sync-gap alert turns a card that would read OK into Watch, never h
 	assert.equal(connectionState(conn({ open_gaps: 1, enabled: false }), NOW), 'off');
 	assert.equal(connectionState(conn({ open_gaps: 1, reconsent_needed_at: inDays(-0.1) }), NOW), 'reconsent');
 	assert.equal(connectionState(conn({ open_gaps: 1, consecutive_failures: 2, last_error_at: inDays(0), last_error: 'x' }), NOW), 'out');
+});
+
+test('the wearables setup button shows only to an owner or guardian (GET /wearables/setup refuses the rest)', () => {
+	assert.equal(mayManageConnections([{ role: 'viewer' }, { role: 'caregiver' }]), false);
+	assert.equal(mayManageConnections([]), false);
+	assert.equal(mayManageConnections(undefined), false);
+	assert.equal(mayManageConnections([{ role: 'viewer' }, { role: 'owner' }]), true);
+	assert.equal(mayManageConnections([{ role: 'guardian' }]), true);
 });

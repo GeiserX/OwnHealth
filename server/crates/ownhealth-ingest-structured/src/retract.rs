@@ -130,12 +130,15 @@ pub fn retract_document_facts<'c>(
 
 /// The upload kinds whose other exports are imported again when one is retracted, with the flag their
 /// import writes: Gadgetbridge (samples adopted with `Conflict::Adopt`), the LibreView and Clarity
-/// CSV exports (one job for both; readings kept by the first file with `Conflict::Keep`) and Garmin
-/// account exports (readings kept by the first export, from the readings document each one stores).
-const REIMPORTED: [(&str, &str); 3] = [
+/// CSV exports (one job for both; readings kept by the first file with `Conflict::Keep`) and Garmin,
+/// Strava and Fitbit Takeout account exports (readings kept by the first export, from the readings
+/// document each one stores).
+const REIMPORTED: [(&str, &str); 5] = [
     ("gadgetbridge_db", "gadgetbridge"),
     ("libreview_csv", "cgm_csv"),
     ("garmin_zip", "garmin"),
+    ("strava_zip", "strava"),
+    ("fitbit_takeout", "fitbit_takeout"),
 ];
 
 /// The exports of the same kind and profile that are still active are imported again, so the samples
@@ -203,13 +206,14 @@ pub async fn queue_after(conn: &mut PgConnection, job: &str, base: &str, payload
     Err(ownhealth_core::Error::Other(why.into()))
 }
 
-/// Take the CGM or Garmin export lock before locking its document row. If a move commits
+/// Take the export lock before locking its document row. If a move commits
 /// while this waits, take the new owner's lock and check the document again.
 pub async fn lock_export_of(conn: &mut PgConnection, document_id: Uuid) -> Result<()> {
     let mut locked = Vec::new();
     loop {
         let export: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
-            "select profile_id, case when flags ? 'cgm_csv' then 'cgm_csv' when flags ? 'garmin' then 'garmin' end \
+            "select profile_id, case when flags ? 'cgm_csv' then 'cgm_csv' when flags ? 'garmin' then 'garmin' when flags ? 'strava' then 'strava' \
+             when flags ? 'fitbit_takeout' then 'fitbit_takeout' end \
              from document where id = $1",
         )
         .bind(document_id)

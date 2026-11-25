@@ -1,0 +1,121 @@
+name: Wearables
+
+on:
+  pull_request:
+    # Every input of the poller: providers.yaml, the core crates, the CLI, migrations and the lock file.
+    paths:
+      - '.github/scripts/wearables-*'
+      - '.github/workflows/wearables.yml'
+      - 'data/**'
+      - 'migrations/**'
+      - 'scripts/fetch-pdfium.sh'
+      - 'server/**'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_seed:
+        description: 'Red control. Skip synthetic data and expect the sample check to fail.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  seeded:
+    name: Wearables (seeded run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_DB: ownhealth
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ownhealth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      COMPOSE_FILE: .github/scripts/wearables-compose.yml
+      COMPOSE_PROJECT_NAME: wearables-ci
+      OW_ADMIN_EMAIL: wearables-ci@example.org
+      OW_SKIP_SEED: ${{ inputs.skip_seed }}
+      RUST_TOOLCHAIN: '1.98.1'
+      OWNHEALTH_BIN: server/target/debug/ownhealth
+      OWNHEALTH_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/ownhealth
+      OWNHEALTH_HOST: 127.0.0.1
+      OWNHEALTH_PORT: 8236
+      OWNHEALTH_BASE_URL: http://127.0.0.1:8236
+      OWNHEALTH_JOB_POLL_SECONDS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: server
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: wearables-${{ hashFiles('server/Cargo.toml') }}
+      - name: Build OwnHealth
+        run: |
+          mkdir -p server/static
+          cargo build --manifest-path server/Cargo.toml --locked -p ownhealth --bin ownhealth
+      - name: PDFium (pinned, sha256-checked), because demo-seed extracts the demo PDFs
+        run: bash scripts/fetch-pdfium.sh linux-x64
+      - name: Set the test data directory and credentials
+        run: |
+          printf 'OWNHEALTH_DATA_DIR=%s/ownhealth-wearables\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for name in OW_DB_PASSWORD OW_SECRET_KEY OW_ADMIN_PASSWORD OWNHEALTH_SECRET_KEY; do
+            value=$(openssl rand -hex 32)
+            echo "::add-mask::$value"
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+          done
+          value=$(openssl rand -base64 32)
+          echo "::add-mask::$value"
+          printf 'OWNHEALTH_SECRETS_KEY=%s\n' "$value" >> "$GITHUB_ENV"
+      - name: Start Open Wearables 0.11.0
+        id: sidecar
+        run: |
+          # OwnHealth uses the same name as the deployment's internal Compose service.
+          printf '127.0.0.1 ow-app\n' | sudo tee -a /etc/hosts >/dev/null
+          docker compose up --detach --wait --wait-timeout 180
+      - name: Start OwnHealth
+        run: |
+          "$OWNHEALTH_BIN" demo-seed
+          nohup "$OWNHEALTH_BIN" serve >"$RUNNER_TEMP/wearables-app.log" 2>&1 </dev/null &
+          pid=$!
+          for _ in {1..60}; do
+            kill -0 "$pid" 2>/dev/null || exit 1
+            if curl -fsS --max-time 2 "$OWNHEALTH_BASE_URL/readyz" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'OwnHealth did not become ready.' >&2
+          exit 1
+      - name: Prepare and link Open Wearables users
+        run: python3 -u .github/scripts/wearables-seed.py
+      - name: Check the finished polls and their samples
+        run: python3 -u .github/scripts/wearables-assert.py
+      - name: Show recent service logs
+        if: ${{ failure() && steps.sidecar.outcome != 'skipped' }}
+        run: |
+          docker compose logs --tail 60 ow-app worker
+          if [[ -f "$RUNNER_TEMP/wearables-app.log" ]]; then
+            tail -n 80 "$RUNNER_TEMP/wearables-app.log"
+          fi
+      - name: Remove the Open Wearables stack
+        if: ${{ always() && steps.sidecar.outcome != 'skipped' }}
+        run: docker compose down --volumes
