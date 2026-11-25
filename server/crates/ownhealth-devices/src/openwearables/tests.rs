@@ -1909,3 +1909,86 @@ async fn an_older_scheduler_pass_cannot_close_an_alert_a_newer_pass_kept() -> an
     assert_eq!(open_gaps(&env, id).await?, [item], "the gap opened a second item");
     Ok(())
 }
+
+async fn alert_reason(env: &Env, item: Uuid) -> anyhow::Result<(String, Option<String>, bool)> {
+    Ok(
+        sqlx::query_as("select status, decision_reason, payload ? 'ended_at' from review_item where id = $1")
+            .bind(item)
+            .fetch_one(&env.ctx.pool)
+            .await?,
+    )
+}
+
+/// A manager switches a source off and on again before the next gap check. Switching it off ended the
+/// episode: an open alert does not survive it, an acknowledged one keeps its decision and does not hide
+/// the next gap, and switching back on opens a new alert only while a gap still qualifies.
+#[tokio::test]
+async fn switching_a_source_off_and_on_before_a_gap_check_ends_the_episode() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let mut conn = env.ctx.pool.acquire().await?;
+    let switch = |enabled: bool| sources::SourcePatch {
+        enabled: Some(enabled),
+        ..sources::SourcePatch::default()
+    };
+    let user: Uuid = sqlx::query_scalar(
+        "select u.id from app_user u join source s on s.household_id = u.household_id where s.id = $1 limit 1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    env.fake().connections = json!([["polar", "expired"]]);
+    poll(&env.ctx, &env.base, id).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    let open = open_gaps(&env, id).await?;
+    let [first] = open[..] else {
+        anyhow::bail!("one alert expected");
+    };
+    for enabled in [false, true] {
+        sources::update_source(&mut conn, id, &switch(enabled)).await?;
+    }
+    assert_eq!(
+        alert_reason(&env, first).await?,
+        ("dismissed".into(), Some("source_unavailable".into()), true),
+        "an open alert survived the switch-off"
+    );
+    sources::scheduler_tick(&env.ctx).await?;
+    let open = open_gaps(&env, id).await?;
+    let [second] = open[..] else {
+        anyhow::bail!("the gap still qualifies: one new alert expected, got {open:?}");
+    };
+    assert_ne!(first, second);
+
+    ownhealth_core::review::dismiss(&mut conn, second, user, Some("acknowledged")).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    assert!(open_gaps(&env, id).await?.is_empty(), "the gap is still in progress");
+    for enabled in [false, true] {
+        sources::update_source(&mut conn, id, &switch(enabled)).await?;
+    }
+    assert_eq!(
+        alert_reason(&env, second).await?,
+        ("dismissed".into(), Some("acknowledged".into()), true),
+        "the switch-off did not end the acknowledged episode"
+    );
+    sources::scheduler_tick(&env.ctx).await?;
+    let open = open_gaps(&env, id).await?;
+    let [third] = open[..] else {
+        anyhow::bail!("an acknowledged alert hid the next gap: {open:?}");
+    };
+
+    sources::update_source(&mut conn, id, &switch(false)).await?;
+    env.fake().connections = json!([["polar", "active", Utc::now()]]);
+    sources::update_source(&mut conn, id, &switch(true)).await?;
+    assert_eq!(
+        alert_reason(&env, third).await?,
+        ("dismissed".into(), Some("source_unavailable".into()), true)
+    );
+    poll(&env.ctx, &env.base, id).await?;
+    sources::scheduler_tick(&env.ctx).await?;
+    assert!(
+        open_gaps(&env, id).await?.is_empty(),
+        "no gap qualifies after the switch-on"
+    );
+    Ok(())
+}

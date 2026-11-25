@@ -180,6 +180,7 @@ pub async fn update_source(conn: &mut PgConnection, id: Uuid, p: &SourcePatch) -
            poll_seconds = case when $9 then $10 else poll_seconds end \
          where id = $1 returning {COLS}"
     );
+    let mut tx = sqlx::Connection::begin(conn).await?;
     let row: Option<Source> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .bind(&p.label)
@@ -191,9 +192,37 @@ pub async fn update_source(conn: &mut PgConnection, id: Uuid, p: &SourcePatch) -
         .bind(p.enabled)
         .bind(p.poll_seconds.is_some())
         .bind(p.poll_seconds.flatten())
-        .fetch_optional(conn)
+        .fetch_optional(&mut *tx)
         .await?;
-    row.ok_or_else(|| Error::NotFound("Unknown source.".into()))
+    let row = row.ok_or_else(|| Error::NotFound("Unknown source.".into()))?;
+    if p.enabled == Some(false) {
+        // The update holds the row lock a gap check takes, and this statement reads with a fresh snapshot,
+        // so it also ends an alert that check filed while the update waited. Switching the source back on
+        // before the next check then starts a new episode.
+        end_gap_episode(&mut tx, id, row.household_id).await?;
+    }
+    tx.commit().await?;
+    Ok(row)
+}
+
+/// End the episode of a switched-off source's sync alert: an open alert closes as unavailable, and a
+/// decided one keeps the person's decision. Either way the next gap opens a new alert. The stamp comes
+/// from the clock the gap checks read, not the database's, since a check compares it with its own.
+async fn end_gap_episode(conn: &mut PgConnection, id: Uuid, household_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "update review_item set payload = jsonb_set(payload, '{ended_at}', to_jsonb($3::timestamptz)), \
+         decided_at = coalesce(decided_at, $3), \
+         decision_reason = case when status = 'open' then 'source_unavailable' else decision_reason end, \
+         status = case when status = 'open' then 'dismissed' else status end \
+         where household_id = $2 and kind = 'source_gap' and ref_table = 'source' and ref_id = $1 \
+         and payload->>'ended_at' is null and (status = 'open' or decided_by is not null)",
+    )
+    .bind(id)
+    .bind(household_id)
+    .bind(Utc::now())
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 pub async fn delete_source(conn: &mut PgConnection, id: Uuid) -> Result<bool> {
