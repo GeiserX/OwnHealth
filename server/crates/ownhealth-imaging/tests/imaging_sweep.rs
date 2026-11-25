@@ -1615,7 +1615,7 @@ async fn the_sweep_links_an_upload_from_before_the_links_so_one_with_no_recorded
 
 #[tokio::test]
 async fn the_sweep_retries_legacy_links_after_a_zip_entry_fails_to_read() -> R {
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, ErrorKind, Read};
 
     let e = env().await?;
     let study = Study {
@@ -1631,13 +1631,15 @@ async fn the_sweep_retries_legacy_links_after_a_zip_entry_fails_to_read() -> R {
     as_before_the_links(&e, &[later.import_id]).await?;
 
     let mut zip = zip_files(&extra);
-    let header = zip
-        .windows(4)
-        .rposition(|bytes| bytes == b"PK\x01\x02")
-        .ok_or_else(|| anyhow::anyhow!("no ZIP central directory"))?;
-    zip[header + 16] ^= 1; // the image entry's central directory CRC
+    let header = support::last_zip_entry_header(&zip)?;
+    // Keep the directory readable and cut the image's compressed stream short.
+    zip[header + 20..header + 24].copy_from_slice(&1u32.to_le_bytes());
     let mut archive = zip::ZipArchive::new(Cursor::new(&zip))?;
-    assert!(archive.by_index(1)?.read_to_end(&mut Vec::new()).is_err());
+    let read = archive.by_index(1)?.read_to_end(&mut Vec::new());
+    assert!(
+        matches!(&read, Err(e) if e.kind() == ErrorKind::UnexpectedEof),
+        "{read:?}"
+    );
     let owner = BlobOwner::Profile(e.fam.profile("alex"));
     let damaged = e.rt.blobs.put_bytes(owner, &zip)?;
     let point_to = "update imaging_import set zip_blob = $2 where id = $1";
@@ -1660,6 +1662,46 @@ async fn the_sweep_retries_legacy_links_after_a_zip_entry_fails_to_read() -> R {
     assert_eq!(e.sweep().await?["links_completed"], 1);
     assert_eq!(links(&e, later.import_id, U1).await?, 1);
     assert_eq!(remove_now(&e, later.import_id).await?, Removal::Recorded);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_sweep_completes_legacy_links_when_an_entry_has_a_bad_crc() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    let fields = [(
+        "DICOM/extra".into(),
+        support::image(&Study::new(U2, ALEX), 0, 0, EXPLICIT_LE),
+    )];
+    let mut zip = zip_files(&fields);
+    support::damage_last_zip_entry_crc(&mut zip)?;
+    let alex = e.fam.profile("alex");
+    let sha = e.rt.blobs.put_bytes(BlobOwner::Profile(alex), &zip)?;
+    let mut tx = e.rt.pool.begin().await?;
+    let upload = upload::record(
+        &mut tx,
+        &e.rt.blobs,
+        alex,
+        &sha,
+        i64::try_from(zip.len())?,
+        Some("cd.zip"),
+        1,
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    e.import().await?;
+    assert!(e.recorded(U2).await?.is_none());
+    as_before_the_links(&e, &[upload.import_id]).await?;
+    assert_eq!(remove_now(&e, upload.import_id).await?, Removal::Recorded);
+
+    let swept = e.sweep().await?;
+    assert_eq!(swept["links_completed"], 2, "{swept}");
+    assert!(matches!(
+        remove_now(&e, upload.import_id).await?,
+        Removal::Removed { .. }
+    ));
     Ok(())
 }
 

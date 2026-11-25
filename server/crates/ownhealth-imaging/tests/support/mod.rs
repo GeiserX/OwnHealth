@@ -310,6 +310,19 @@ pub fn zip_files(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     out.into_inner()
 }
 
+/// Offset of the last central directory entry in a fixture from [zip_files].
+pub fn last_zip_entry_header(zip: &[u8]) -> anyhow::Result<usize> {
+    zip.windows(4)
+        .rposition(|bytes| bytes == b"PK\x01\x02")
+        .ok_or_else(|| anyhow::anyhow!("no ZIP central directory"))
+}
+
+pub fn damage_last_zip_entry_crc(zip: &mut [u8]) -> anyhow::Result<()> {
+    let header = last_zip_entry_header(zip)?;
+    zip[header + 16] ^= 1;
+    Ok(())
+}
+
 // ------------------------------------------------------------------------------------- Orthanc ----
 
 pub const USER: &str = "ownhealth";

@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{Read, Seek, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
+use zip::result::ZipError;
 
 use crate::orthanc::{FILE_CHUNK, Orthanc, OrthancError, SeriesInfo, Stored, resource_id};
 use crate::part10::{Header, Part10Error, encapsulated_file, is_part10, read_header};
@@ -158,13 +159,18 @@ pub struct Scan {
     pub not_dicom: usize,
     pub directories: usize,
     pub damaged: usize,
-    /// Entries whose ZIP data could not be read far enough to identify the study.
+    /// Entries whose study could not be identified because of an I/O failure.
     pub(crate) unreadable_entries: usize,
     pub too_large: usize,
     pub studies: BTreeMap<String, StudyScan>,
 }
 
 impl Scan {
+    fn note_entry_error(&mut self, error: &ZipError) {
+        self.damaged += 1;
+        self.unreadable_entries += usize::from(entry_io_failed(error));
+    }
+
     /// Every patient the disc holds, by PatientID.
     pub fn patients(&self) -> BTreeSet<&str> {
         self.studies
@@ -174,10 +180,15 @@ impl Scan {
     }
 }
 
-fn read_entry(zip: &mut zip::ZipArchive<BlobReader>, i: usize, limit: u64) -> Result<Vec<u8>, String> {
-    let entry = zip.by_index(i).map_err(|e| e.to_string())?;
+// The ZIP reader reports a bad CRC as InvalidData. The import skips such damaged content.
+fn entry_io_failed(error: &ZipError) -> bool {
+    matches!(error, ZipError::Io(e) if e.kind() != io::ErrorKind::InvalidData)
+}
+
+fn read_entry(zip: &mut zip::ZipArchive<BlobReader>, i: usize, limit: u64) -> Result<Vec<u8>, ZipError> {
+    let entry = zip.by_index(i)?;
     let mut out = Vec::new();
-    entry.take(limit).read_to_end(&mut out).map_err(|e| e.to_string())?;
+    entry.take(limit).read_to_end(&mut out)?;
     Ok(out)
 }
 
@@ -205,10 +216,9 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
     for i in 0..zip.len() {
         let (is_dir, size) = match zip.by_index_raw(i) {
             Ok(e) => (e.is_dir(), e.size()),
-            Err(_) => {
+            Err(e) => {
                 s.files += 1;
-                s.damaged += 1;
-                s.unreadable_entries += 1;
+                s.note_entry_error(&e);
                 continue;
             }
         };
@@ -220,10 +230,12 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
             s.too_large += 1;
             continue;
         }
-        let Ok(mut head) = read_entry(zip, i, HEAD_BYTES) else {
-            s.damaged += 1;
-            s.unreadable_entries += 1;
-            continue;
+        let mut head = match read_entry(zip, i, HEAD_BYTES) {
+            Ok(head) => head,
+            Err(e) => {
+                s.note_entry_error(&e);
+                continue;
+            }
         };
         if !is_part10(&head) {
             s.not_dicom += 1;
@@ -234,9 +246,8 @@ fn scan_archive(zip: &mut zip::ZipArchive<BlobReader>) -> Result<Scan, JobError>
             // a header that does not end in the first bytes: read further, as far as the cap
             match read_entry(zip, i, MAX_HEADER_BYTES) {
                 Ok(more) => head = more,
-                Err(_) => {
-                    s.damaged += 1;
-                    s.unreadable_entries += 1;
+                Err(e) => {
+                    s.note_entry_error(&e);
                     continue;
                 }
             }
