@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, sync::LazyLock};
 
 use chrono::{DateTime, Duration, Utc};
-use ownhealth_core::sources;
+use ownhealth_core::{langs, sources};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -33,7 +33,7 @@ const SHIPPED: &str = include_str!(concat!(
 ));
 
 /// Read a sync-gap policy. Every Open Wearables vendor needs a window, and every window a vendor.
-/// Every alert text needs English and Spanish.
+/// Every alert text needs every language of the registry.
 fn parse(text: &str) -> Result<Policy, String> {
     let mut policy: Policy = serde_json::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
     let no_window = |key: &str| format!("{FILE}: {key} has no freshness window");
@@ -49,10 +49,12 @@ fn parse(text: &str) -> Result<Policy, String> {
         ("openwearables_down", &policy.openwearables_down),
         ("dexcom", &policy.dexcom),
     ] {
-        if let Some(lang) = ["en", "es"]
-            .into_iter()
-            .find(|lang| texts.get(*lang).is_none_or(|text| text.trim().is_empty()))
-        {
+        let have: Vec<&str> = texts
+            .iter()
+            .filter(|(_, text)| !text.trim().is_empty())
+            .map(|(lang, _)| lang.as_str())
+            .collect();
+        if let Some(lang) = langs::missing(&have, &langs::LANGS).first() {
             return Err(format!("{FILE}: {section} has no {lang} text"));
         }
     }
@@ -239,11 +241,11 @@ mod tests {
         }
     }
 
-    /// Every alert text exists in English and Spanish, so no alert opens without its guidance.
+    /// Every alert text exists in every registry language, so no alert opens without its guidance.
     #[test]
-    fn every_alert_text_needs_english_and_spanish() {
+    fn every_alert_text_needs_every_registry_language() {
         for section in ["openwearables", "openwearables_down", "dexcom"] {
-            for lang in ["en", "es"] {
+            for lang in langs::LANGS {
                 let shipped: Value = serde_json::from_str(SHIPPED).expect("the shipped policy is JSON");
                 let mut missing = shipped.clone();
                 missing[section]
