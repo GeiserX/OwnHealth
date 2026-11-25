@@ -20,12 +20,13 @@ const GPX: &[u8] = br#"<gpx xmlns="http://www.topografix.com/GPX/1/1"
  <trkpt lat="40.124456" lon="-3.123458"><time>2024-01-08T08:00:50Z</time>
  <extensions><gpxtpx:TrackPointExtension><gpxtpx:hr>140</gpxtpx:hr></gpxtpx:TrackPointExtension></extensions></trkpt>
  </trkseg></trk></gpx>"#;
+/// An indoor activity with no position. It is the last file of the test archive that imports, so the
+/// route line must keep the GPS of the files read before it.
 const TCX: &[u8] = br#"<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
  <Activities><Activity Sport="Running"><Id>2024-01-09T08:00:00Z</Id>
  <Lap StartTime="2024-01-09T08:00:00Z"><TotalTimeSeconds>1800</TotalTimeSeconds>
  <DistanceMeters>4400</DistanceMeters><Calories>320</Calories>
  <Track><Trackpoint><Time>2024-01-09T08:00:15Z</Time>
- <Position><LatitudeDegrees>40.123456</LatitudeDegrees><LongitudeDegrees>-3.123456</LongitudeDegrees></Position>
  <HeartRateBpm><Value>147</Value></HeartRateBpm></Trackpoint></Track>
  </Lap></Activity></Activities></TrainingCenterDatabase>"#;
 

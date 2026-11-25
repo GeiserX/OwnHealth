@@ -618,4 +618,36 @@ mod tests {
         }
         assert!(gpx_distance("1").is_empty(), "a ride brings no walking or running distance");
     }
+
+    #[test]
+    fn a_tcx_position_reports_a_route() {
+        let tcx = |position: &str| {
+            format!(
+                r#"<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+                <Activities><Activity Sport="Running"><Lap StartTime="2024-01-09T08:00:00Z">
+                <Track><Trackpoint><Time>2024-01-09T08:00:15Z</Time>{position}
+                <HeartRateBpm><Value>147</Value></HeartRateBpm></Trackpoint></Track>
+                </Lap></Activity></Activities></TrainingCenterDatabase>"#
+            )
+        };
+        let gps = |source: String| xml_readings(Format::Tcx, source.as_bytes()).expect("well-formed TCX").1;
+        assert!(gps(tcx(
+            "<Position><LatitudeDegrees>40.1</LatitudeDegrees><LongitudeDegrees>-3.1</LongitudeDegrees></Position>"
+        )));
+        assert!(!gps(tcx("")));
+    }
+
+    #[test]
+    fn the_filename_column_is_the_one_whose_paths_are_in_the_archive() -> anyhow::Result<()> {
+        // A free-text column holds more activity paths than the Filename column, but none of them
+        // is in the archive.
+        let files = BTreeMap::from([("activities/1.gpx".to_owned(), 1), ("activities/2.gpx".to_owned(), 2)]);
+        let csv = b"Description,Filename\n\
+            activities/a.gpx,activities/1.gpx\n\
+            activities/b.gpx,activities/2.gpx\n\
+            activities/c.gpx,\n";
+        let counts = join_manifest(csv, &files)?;
+        assert_eq!((counts.rows_without_file, counts.files_without_row), (1, 0));
+        Ok(())
+    }
 }
