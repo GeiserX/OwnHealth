@@ -552,6 +552,16 @@ async fn test_a_sync_gap_alert_shows_only_to_who_manages_the_connection() -> R {
     let (s, v) = a.get("alex", "/review?profile=carmen").await?;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(!listed(&v, carmen), "{v}");
+    // the hidden alert is not counted as withheld, so the list does not reveal that it exists
+    let (s, v) = a.get("alex", "/review?profile=carmen&kind=source_gap").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["withheld"], json!(0), "{v}");
+    // nor does it take a page slot from an item Alex reviews
+    let row = item(&a, "carmen", "candidate_row", None, json!({})).await?;
+    let (s, v) = a.get("alex", "/review?profile=carmen&limit=1").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(listed(&v, row), "{v}");
+    assert_eq!(v["withheld"], json!(0), "{v}");
     assert_eq!(
         a.get("alex", &format!("/review/{carmen}")).await?.0,
         StatusCode::NOT_FOUND
