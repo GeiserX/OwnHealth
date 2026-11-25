@@ -380,7 +380,8 @@ pub async fn begin_run(conn: &mut PgConnection, source_id: Uuid, trigger: &str, 
 /// Close a run with what it did, or with the error that stopped it (type and message only, cut at
 /// 500 characters). Updates the source's health and cursor only if the grant still matches.
 /// A run with problems where something still arrived is `partial` and counts as a success for "last successful sync"; a run where every item it
-/// saw failed is an `error` (nothing arrived, and the cursor stays so the items are retried).
+/// saw failed is an `error` (nothing arrived, and the cursor stays so the items are retried); its error
+/// is then its first problem, which tells it from a run the poller ended with an error of its own.
 /// The run row and the source row commit together, so a health read never sees one without the other.
 pub async fn finish_run(
     conn: &mut PgConnection,
@@ -748,10 +749,15 @@ async fn pull_failed_for_interval(
     // alert, and one late failure after a long interval does not immediately raise it. The scheduler
     // queues the retry of a failed poll and runs this check in the same pass, so the check always
     // comes before that retry ends: a gap needs the retry to have failed too.
+    // Only a run the poller itself ended with an error counts: the source did not answer, or every part
+    // of it failed. A run that is an error only because every item it saw failed (`finish_run` stores
+    // its first problem as its error) reached the source, as when one Open Wearables vendor fails and
+    // another sends only rows that do not read; each vendor's own clock covers that.
     Ok(sqlx::query_scalar(
         "select count(*) >= 2 and min(finished_at) < $3 from source_run where source_id = $1 \
          and oauth_grant_id is not distinct from $2 and trigger in ('poll', 'manual') and status = 'error' \
-         and finished_at is not null and ($4::timestamptz is null or finished_at > $4)",
+         and finished_at is not null and ($4::timestamptz is null or finished_at > $4) \
+         and error is distinct from left((errors -> 0 ->> 'code') || ': ' || (errors -> 0 ->> 'message'), 500)",
     )
     .bind(id)
     .bind(source.oauth_grant_id)

@@ -2043,3 +2043,76 @@ async fn a_gap_check_reads_its_clock_once_it_holds_the_source() -> anyhow::Resul
     );
     Ok(())
 }
+
+/// Begin a poll run, poll, and finish the run as the poll job does, dated `at`.
+async fn record_poll(env: &Env, source: Uuid, at: DateTime<Utc>) -> anyhow::Result<String> {
+    let run = sources::begin_run(&mut *env.ctx.pool.acquire().await?, source, "poll", None).await?;
+    let result = poll(&env.ctx, &env.base, source).await;
+    let mut conn = env.ctx.pool.acquire().await?;
+    match &result {
+        Ok(o) => sources::finish_run(&mut conn, run, Ok(o)).await?,
+        Err(e) => sources::finish_run(&mut conn, run, Err(&e.text())).await?,
+    }
+    let status: String =
+        sqlx::query_scalar("update source_run set started_at = $2, finished_at = $2 where id = $1 returning status")
+            .bind(run)
+            .bind(at)
+            .fetch_one(&mut *conn)
+            .await?;
+    sqlx::query(
+        "update source set last_run_at = $2, \
+         last_success_at = case when $3 then $2 else last_success_at end where id = $1",
+    )
+    .bind(source)
+    .bind(at)
+    .bind(status != "error")
+    .execute(&mut *conn)
+    .await?;
+    Ok(status)
+}
+
+/// Open Wearables answers, but Polar's reads fail and WHOOP sends only a row that does not read: the run
+/// is an error, since nothing arrived. The sidecar responded, so that is no outage of the service; Polar
+/// stays on its own clock. Once the sidecar itself stops answering, the outage alert opens.
+#[tokio::test]
+async fn vendor_read_failures_are_not_an_open_wearables_outage() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let t0 = Utc::now();
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["polar", "active", t0], ["whoop", "active", t0]]);
+        fake.unavailable_for = Some("polar".into());
+        let mut unreadable = sample("raw", "whoop", "workout_effort_score", 0., "score", fake.t);
+        unreadable["value"] = json!("n/a");
+        fake.rows = vec![unreadable];
+        fake.scores.clear();
+    }
+    for minutes in [0, 15, 30] {
+        let status = record_poll(&env, id, t0 + Duration::minutes(minutes)).await?;
+        assert_eq!(status, "error", "nothing arrived");
+    }
+    sources::scheduler_tick_at(&env.ctx, t0 + Duration::minutes(31)).await?;
+    assert!(
+        open_gaps(&env, id).await?.is_empty(),
+        "a vendor's read failures raised the outage alert"
+    );
+
+    // positive control: the sidecar refuses every request, so the connection report fails too
+    env.fake().key = token_hex(20);
+    for minutes in [45, 60] {
+        record_poll(&env, id, t0 + Duration::minutes(minutes)).await?;
+    }
+    sources::scheduler_tick_at(&env.ctx, t0 + Duration::minutes(61)).await?;
+    let open = open_gaps(&env, id).await?;
+    let [item] = open[..] else {
+        anyhow::bail!("one outage alert expected, got {open:?}");
+    };
+    let message: String = sqlx::query_scalar("select payload #>> '{message,en}' from review_item where id = $1")
+        .bind(item)
+        .fetch_one(&env.ctx.pool)
+        .await?;
+    assert!(message.contains("is running"), "{message}");
+    Ok(())
+}

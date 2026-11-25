@@ -148,7 +148,8 @@ fn openwearables_gap(cursor: Option<&Value>, pull_failed: bool, now: DateTime<Ut
     if !providers.is_empty() {
         Some(ow_message(policy, &providers.join(", ")))
     } else {
-        // The sidecar itself does not answer: reconnecting accounts would not help.
+        // OwnHealth's pull itself fails (the sidecar does not answer, or no vendor reads): reconnecting
+        // accounts would not help.
         pull_failed.then(|| json!({"message": policy.openwearables_down}))
     }
 }
