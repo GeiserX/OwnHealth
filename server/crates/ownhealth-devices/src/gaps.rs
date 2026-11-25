@@ -120,6 +120,9 @@ impl ConnectionHealth {
 }
 
 pub(crate) const CURSOR_KEY: &str = "connections";
+/// The cursor key that holds when the connection report first failed, in the current streak of polls
+/// whose report failed. A poll whose report reads removes it.
+pub(crate) const REPORT_FAILED_KEY: &str = "report_failed_at";
 pub(crate) type Connections = BTreeMap<String, ConnectionHealth>;
 
 /// Whether a vendor was in a gap when a report last included it.
@@ -141,14 +144,16 @@ pub(crate) fn observed_connections(cursor: Option<&Value>) -> Connections {
 fn openwearables_gap(cursor: Option<&Value>, pull_failed: bool, now: DateTime<Utc>) -> Option<Value> {
     let policy = policy()?;
     let connections = observed_connections(cursor);
+    // While the connection report fails, nothing new is known about any vendor. Judge each one as of the
+    // last report that included it, so a service outage does not age into a vendor's gap.
+    let report_failed = cursor.is_some_and(|c| c.get(REPORT_FAILED_KEY).is_some());
     let providers: Vec<_> = super::PROVIDERS
         .iter()
         .filter_map(|key| {
             let provider = policy.providers.get(*key)?;
-            connections
-                .get(*key)?
-                .is_gap(provider, now)
-                .then_some(provider.name.as_str())
+            let health = connections.get(*key)?;
+            let at = if report_failed { health.observed_at? } else { now };
+            health.is_gap(provider, at).then_some(provider.name.as_str())
         })
         .collect();
     if !providers.is_empty() {

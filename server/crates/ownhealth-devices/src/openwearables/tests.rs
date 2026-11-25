@@ -2117,6 +2117,51 @@ async fn vendor_read_failures_are_not_an_open_wearables_outage() -> anyhow::Resu
     Ok(())
 }
 
+/// While Open Wearables does not answer, no new report says anything about a vendor. The last report
+/// only ages, so the alert keeps asking for the service to be checked, even past a vendor's window, and
+/// closes once the service answers with fresh syncs.
+#[tokio::test]
+async fn an_outage_past_a_vendor_window_still_asks_to_check_the_service() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let t0 = Utc::now();
+    env.fake().connections = json!([["polar", "active", t0]]);
+    assert_eq!(record_poll(&env, id, t0).await?, "ok");
+    let key = std::mem::replace(&mut env.fake().key, token_hex(20));
+    for hours in [1, 2] {
+        assert_eq!(record_poll(&env, id, t0 + Duration::hours(hours)).await?, "error");
+    }
+    let message = || async {
+        let open = open_gaps(&env, id).await?;
+        let [item] = open[..] else {
+            anyhow::bail!("one alert expected, got {open:?}");
+        };
+        let text: String = sqlx::query_scalar("select payload #>> '{message,en}' from review_item where id = $1")
+            .bind(item)
+            .fetch_one(&env.ctx.pool)
+            .await?;
+        anyhow::Ok((item, text))
+    };
+    sources::scheduler_tick_at(&env.ctx, t0 + Duration::hours(3)).await?;
+    let (item, text) = message().await?;
+    assert!(text.contains("is running"), "{text}");
+    sources::scheduler_tick_at(&env.ctx, t0 + Duration::hours(21)).await?;
+    let (still, text) = message().await?;
+    assert_eq!(still, item);
+    assert!(
+        text.contains("is running") && !text.contains("Polar"),
+        "an outage turned into a vendor problem: {text}"
+    );
+
+    env.fake().key = key;
+    env.fake().connections = json!([["polar", "active", t0 + Duration::hours(21)]]);
+    assert_eq!(record_poll(&env, id, t0 + Duration::hours(21)).await?, "ok");
+    sources::scheduler_tick_at(&env.ctx, t0 + Duration::hours(21) + Duration::minutes(1)).await?;
+    assert!(open_gaps(&env, id).await?.is_empty(), "the service answers again");
+    Ok(())
+}
+
 /// A vendor that was inside its window when a poll last saw it, and is missing from the next report, is
 /// dropped even if its window passed in between: it was not in a gap when it was last seen.
 #[tokio::test]

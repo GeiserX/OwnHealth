@@ -673,8 +673,17 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
         to: now,
         remaining: MAX_BYTES_PER_DAY,
     };
+    let report = match pull.read::<Vec<Connection>>("connections", &[]).await {
+        Ok(report) => report,
+        Err(err) => {
+            if let Err(error) = note_failed_report(ctx, source, &binding, now).await {
+                tracing::warn!(%error, "could not note the failed Open Wearables connection report");
+            }
+            return Err(err);
+        }
+    };
     let mut connections = Connections::new();
-    for row in pull.read::<Vec<Connection>>("connections", &[]).await? {
+    for row in report {
         if !allowed(&row.provider) {
             continue;
         }
@@ -812,6 +821,9 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
     }
     let mut next = cursor.unwrap_or_else(|| json!({}));
     next[gaps::CURSOR_KEY] = json!(observed);
+    if let Some(next) = next.as_object_mut() {
+        next.shift_remove(gaps::REPORT_FAILED_KEY);
+    }
     sqlx::query(
         "update source set cursor = $3,
            reconsent_needed_at = case when $2 then coalesce(reconsent_needed_at, now()) else null end
@@ -849,6 +861,25 @@ async fn poll(ctx: &JobContext, base: &Url, source: Uuid) -> Result<RunOutcome> 
         Some(err) => Err(err),
         None => Ok(out),
     }
+}
+
+/// Note in the cursor that the connection report failed, from the first poll of the streak, under the
+/// same binding guard as a stored day. Nothing is written when the binding changed.
+async fn note_failed_report(ctx: &JobContext, source: Uuid, binding: &Binding, now: DateTime<Utc>) -> Result<()> {
+    let mut tx = ctx.pool.begin().await?;
+    if lock_live_binding(&mut tx, source, binding, binding.cursor.as_ref()).await? {
+        sqlx::query(
+            "update source set cursor = jsonb_set(coalesce(cursor, '{}'), array[$2], \
+             coalesce(cursor -> $2, to_jsonb($3::timestamptz))) where id = $1",
+        )
+        .bind(source)
+        .bind(gaps::REPORT_FAILED_KEY)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 fn binding_changed() -> JobError {
