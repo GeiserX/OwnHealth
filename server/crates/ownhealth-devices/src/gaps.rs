@@ -33,6 +33,7 @@ const SHIPPED: &str = include_str!(concat!(
 ));
 
 /// Read a sync-gap policy. Every Open Wearables vendor needs a window, and every window a vendor.
+/// Every alert text needs English and Spanish.
 fn parse(text: &str) -> Result<Policy, String> {
     let mut policy: Policy = serde_json::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
     let no_window = |key: &str| format!("{FILE}: {key} has no freshness window");
@@ -42,6 +43,18 @@ fn parse(text: &str) -> Result<Policy, String> {
         provider.window = Duration::try_hours(provider.stale_hours)
             .filter(|window| *window > Duration::zero())
             .ok_or_else(|| no_window(key))?;
+    }
+    for (section, texts) in [
+        ("openwearables", &policy.openwearables),
+        ("openwearables_down", &policy.openwearables_down),
+        ("dexcom", &policy.dexcom),
+    ] {
+        if let Some(lang) = ["en", "es"]
+            .into_iter()
+            .find(|lang| texts.get(*lang).is_none_or(|text| text.trim().is_empty()))
+        {
+            return Err(format!("{FILE}: {section} has no {lang} text"));
+        }
     }
     if let Some(key) = policy
         .providers
@@ -211,6 +224,30 @@ mod tests {
                 err.starts_with(FILE) && err.contains("polar has no freshness window"),
                 "{hours}: {err}"
             );
+        }
+    }
+
+    /// Every alert text exists in English and Spanish, so no alert opens without its guidance.
+    #[test]
+    fn every_alert_text_needs_english_and_spanish() {
+        for section in ["openwearables", "openwearables_down", "dexcom"] {
+            for lang in ["en", "es"] {
+                let shipped: Value = serde_json::from_str(SHIPPED).expect("the shipped policy is JSON");
+                let mut missing = shipped.clone();
+                missing[section]
+                    .as_object_mut()
+                    .expect("a message map")
+                    .shift_remove(lang);
+                let mut blank = shipped;
+                blank[section][lang] = json!("  ");
+                for broken in [missing, blank] {
+                    let err = parse(&broken.to_string()).err().unwrap_or_default();
+                    assert!(
+                        err.starts_with(FILE) && err.contains(&format!("{section} has no {lang} text")),
+                        "{section} {lang}: {err}"
+                    );
+                }
+            }
         }
     }
 }
