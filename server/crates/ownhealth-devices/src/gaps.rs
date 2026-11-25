@@ -11,6 +11,9 @@ use serde_json::{Value, json};
 struct Provider {
     name: String,
     stale_hours: i64,
+    /// `stale_hours` as a duration, checked when the policy is read.
+    #[serde(skip)]
+    window: Duration,
 }
 
 type Localized = BTreeMap<String, String>;
@@ -31,11 +34,14 @@ const SHIPPED: &str = include_str!(concat!(
 
 /// Read a sync-gap policy. Every Open Wearables vendor needs a window, and every window a vendor.
 fn parse(text: &str) -> Result<Policy, String> {
-    let policy: Policy = serde_json::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
+    let mut policy: Policy = serde_json::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
+    let no_window = |key: &str| format!("{FILE}: {key} has no freshness window");
     for key in super::PROVIDERS {
-        if policy.providers.get(key).is_none_or(|p| p.stale_hours <= 0) {
-            return Err(format!("{FILE}: {key} has no freshness window"));
-        }
+        let provider = policy.providers.get_mut(key).ok_or_else(|| no_window(key))?;
+        // a window chrono cannot hold is refused here, not at the first gap check
+        provider.window = Duration::try_hours(provider.stale_hours)
+            .filter(|window| *window > Duration::zero())
+            .ok_or_else(|| no_window(key))?;
     }
     if let Some(key) = policy
         .providers
@@ -90,7 +96,7 @@ impl ConnectionHealth {
             Status::Active => [self.last_synced_at.or(self.seen_since), self.failing_since]
                 .into_iter()
                 .flatten()
-                .any(|since| now - since > Duration::hours(provider.stale_hours)),
+                .any(|since| now - since > provider.window),
             Status::Unknown => false,
         }
     }
@@ -191,6 +197,20 @@ mod tests {
         ] {
             let err = parse(&broken.to_string()).err().unwrap_or_default();
             assert!(err.starts_with(FILE) && err.contains(wanted), "{err}");
+        }
+    }
+
+    /// A window chrono cannot hold would panic at the first gap check; the policy is refused instead.
+    #[test]
+    fn a_window_too_long_to_measure_is_refused() {
+        for hours in [i64::MAX, i64::MAX / 3_600_000 + 1] {
+            let mut policy: Value = serde_json::from_str(SHIPPED).expect("the shipped policy is JSON");
+            policy["providers"]["polar"]["stale_hours"] = json!(hours);
+            let err = parse(&policy.to_string()).err().unwrap_or_default();
+            assert!(
+                err.starts_with(FILE) && err.contains("polar has no freshness window"),
+                "{hours}: {err}"
+            );
         }
     }
 }
