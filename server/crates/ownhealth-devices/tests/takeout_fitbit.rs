@@ -1080,3 +1080,60 @@ async fn a_heart_rate_row_with_only_a_date_is_left_out_and_a_daily_value_keeps_i
     )
     .await
 }
+
+/// Rewrite the compression method or set the encryption flag of one member, in its local and its
+/// central header. The reader is built with deflate only, so any other method cannot be opened.
+fn unreadable_member(bytes: &mut [u8], name: &str, method: Option<u16>, encrypt: bool) {
+    let mut headers = 0;
+    for at in 0..bytes.len().saturating_sub(46) {
+        // (name offset, flag offset, method offset, name length offset) of each header kind
+        let (name_at, flag_at, method_at, length_at) = match &bytes[at..at + 4] {
+            b"PK\x03\x04" => (30, 6, 8, 26),
+            b"PK\x01\x02" => (46, 8, 10, 28),
+            _ => continue,
+        };
+        let length = u16::from_le_bytes([bytes[at + length_at], bytes[at + length_at + 1]]) as usize;
+        if bytes.get(at + name_at..at + name_at + length) != Some(name.as_bytes()) {
+            continue;
+        }
+        if let Some(method) = method {
+            bytes[at + method_at..at + method_at + 2].copy_from_slice(&method.to_le_bytes());
+        }
+        if encrypt {
+            bytes[at + flag_at] |= 1;
+        }
+        headers += 1;
+    }
+    assert_eq!(headers, 2, "local and central header of {name}");
+}
+
+#[tokio::test]
+async fn a_member_the_reader_cannot_open_is_listed_and_the_other_members_import() -> R {
+    let env = Env::new().await?;
+    let profile_path = "Takeout/Fitbit/Your Profile/Profile.csv";
+    let lzma = "Takeout/Fitbit/Google Data/Heart Rate/2024-07.csv";
+    let encrypted = "Takeout/Fitbit/Global Export Data/heart_rate-2024-07-05.json";
+    let mut bytes = stored_archive(&[
+        (profile_path, &profile("Europe/Madrid")),
+        (lzma, "timestamp,bpm\n2024-07-12T08:00:05Z,123\n"),
+        (encrypted, r#"[{"dateTime":"07/05/24 08:10:00","value":{"bpm":91}}]"#),
+        (
+            "Takeout/Google Health/Google Data/Heart Rate/2024-07.csv",
+            "timestamp,bpm\n2024-07-12T09:00:15Z,70\n",
+        ),
+    ])?;
+    unreadable_member(&mut bytes, profile_path, Some(12), false);
+    unreadable_member(&mut bytes, lzma, Some(14), false);
+    unreadable_member(&mut bytes, encrypted, None, true);
+    let (state, error, result) = upload_bytes(&env, &bytes).await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(
+        omitted(&result),
+        [
+            (encrypted.to_string(), "invalid_member".to_string()),
+            (lzma.to_string(), "invalid_member".to_string()),
+            (profile_path.to_string(), "invalid_member".to_string()),
+        ]
+    );
+    assert_readings(&env, result, &[("hr", 70.0, "2024-07-12T09:00:00Z", 0)]).await
+}

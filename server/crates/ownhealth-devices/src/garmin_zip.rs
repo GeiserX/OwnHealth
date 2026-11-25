@@ -242,10 +242,15 @@ pub(crate) fn read_member(reader: impl Read, size: u64, out: &mut impl Write) ->
     }
 }
 
+/// The ZIP reader is built with deflate only. A member in any other compression method fails on
+/// its first read with `Unsupported`, so that kind marks the member as unreadable too.
 fn damaged_member(error: &io::Error) -> bool {
     matches!(
         error.kind(),
-        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof
+        io::ErrorKind::InvalidData
+            | io::ErrorKind::InvalidInput
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::Unsupported
     )
 }
 
@@ -1007,6 +1012,12 @@ mod tests {
         let damaged = || io::Error::new(io::ErrorKind::InvalidData, "invalid bytes");
         assert!(!read_member(FailedRead(damaged), 10, &mut Vec::new()).expect("damaged member"));
         let storage = ArchiveReader(FailedRead(damaged));
+        assert!(read_member(storage, 10, &mut Vec::new()).is_err());
+
+        // The reader is built with deflate only and reports any other method on the first read.
+        let method = || io::Error::new(io::ErrorKind::Unsupported, "compression method not supported");
+        assert!(!read_member(FailedRead(method), 10, &mut Vec::new()).expect("member in another method"));
+        let storage = ArchiveReader(FailedRead(method));
         assert!(read_member(storage, 10, &mut Vec::new()).is_err());
     }
 
