@@ -77,7 +77,8 @@ def seed_user(provider, types, developer, api_key):
         raise SystemExit(f"Open Wearables did not dispatch the seed for {provider}")
     result = seed_result(UUID(job["task_id"]), provider)
     samples = result["time_series_samples"]
-    if result["users"] != 1 or result["connections"] != 1 or (samples > 0) != bool(types):
+    # Every provider must hold data, or the check that drop providers import nothing proves nothing.
+    if result["users"] != 1 or result["connections"] != 1 or not types or samples == 0:
         raise SystemExit(f"Unexpected Open Wearables seed result for {provider}: {result}")
 
     users = request(f"/users?{urlencode({'provider': provider, 'search': f'[SEED:{seed}|custom]'})}",
