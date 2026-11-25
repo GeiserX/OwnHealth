@@ -16,8 +16,9 @@ SERIES = {
     "whoop": ["resting_heart_rate"],
     "polar": ["resting_heart_rate"],
     "withings": ["weight"],
-    "strava": [],
-    "garmin": [],
+    # Open Wearables holds data for these two, so the 0 that OwnHealth stores shows the drop.
+    "strava": ["resting_heart_rate"],
+    "garmin": ["resting_heart_rate"],
 }
 
 
@@ -87,7 +88,7 @@ def seed_user(provider, types, developer, api_key):
     connections = request(f"/users/{user}/connections", headers=api_key)
     if [(connection["provider"], connection["status"]) for connection in connections] != [(provider, "active")]:
         raise SystemExit(f"Expected one active Open Wearables connection for {provider}")
-    print(f"Seeded {provider} user with {samples} samples in Open Wearables")
+    print(f"Seeded {provider} user with {samples} sample{'' if samples == 1 else 's'} in Open Wearables")
     return user
 
 

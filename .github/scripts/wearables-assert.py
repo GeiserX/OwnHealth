@@ -52,9 +52,11 @@ def assert_samples():
         ) counted
     """)
     allowed = {"oura", "whoop", "polar", "withings"}
-    expected = allowed | {"strava", "garmin"}
-    for provider in sorted(expected | counts.keys()):
-        print(f"{provider}: {counts.get(provider, 0)} samples")
+    dropped = {"strava", "garmin"}
+    for provider in sorted(allowed | dropped | counts.keys()):
+        samples = counts.get(provider, 0)
+        why = " (Open Wearables holds data, but providers.yaml says ingest: drop)" if provider in dropped else ""
+        print(f"{provider}: {samples} sample{'' if samples == 1 else 's'}{why}")
     missing = sorted(allowed - counts.keys())
     unexpected = sorted(counts.keys() - allowed)
     if missing or unexpected:
