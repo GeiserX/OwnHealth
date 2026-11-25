@@ -18,8 +18,9 @@
 //! An upload that went to the wrong profile holds studies that wait in review. `DELETE` removes it
 //! with its held studies and, by job, its zip (`ownhealth_imaging::remove`). It needs the `import`
 //! action and `read:records` on the caller's own grant, and refuses with 409 `upload_recorded` while a
-//! study of the upload is on the record and 409 `upload_importing` while its import is queued or
-//! running. Closing the last held study of such an upload in review removes it too.
+//! study of the upload is on the record, 409 `upload_importing` while its import is queued or running,
+//! and 409 `upload_changed` when a new held study of it appeared while the removal waited. Closing the
+//! last held study of such an upload in review removes it too.
 
 use std::path::PathBuf;
 
