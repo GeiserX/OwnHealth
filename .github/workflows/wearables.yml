@@ -68,6 +68,8 @@ jobs:
         run: |
           mkdir -p server/static
           cargo build --manifest-path server/Cargo.toml --locked -p ownhealth --bin ownhealth
+      - name: PDFium (pinned, sha256-checked), because demo-seed extracts the demo PDFs
+        run: bash scripts/fetch-pdfium.sh linux-x64
       - name: Set the test data directory and credentials
         run: |
           printf 'OWNHEALTH_DATA_DIR=%s/ownhealth-wearables\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
