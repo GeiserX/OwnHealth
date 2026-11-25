@@ -1473,6 +1473,27 @@ async fn the_sweep_links_an_upload_from_before_the_links_so_one_with_no_recorded
 }
 
 #[tokio::test]
+async fn the_sweep_does_not_link_an_upload_whose_part_of_a_recorded_study_waits_in_review() -> R {
+    let e = env().await?;
+    e.upload("alex", &study_files(&Study::new(U1, ALEX), "DICOM")).await?;
+    e.import().await?;
+    // a disc of another patient under the same UID, to the same profile: held, never recorded
+    let other = Study {
+        series: 3,
+        ..Study::new(U1, CARMEN)
+    };
+    let (held, _) = e.upload("alex", &series_files(&other, &[2], "DICOM")).await?;
+    e.import().await?;
+    assert_eq!(e.in_review("alex").await?.len(), 1);
+    as_before_the_links(&e, &[]).await?;
+    let swept = e.sweep().await?;
+    assert_eq!(swept["links_completed"], 2, "{swept}");
+    assert_eq!(links(&e, held.import_id, U1).await?, 0, "a held part was linked");
+    assert!(matches!(remove_now(&e, held.import_id).await?, Removal::Removed { .. }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_upload_a_close_left_while_its_import_ran_goes_at_the_next_sweep() -> R {
     let e = env().await?;
     let alex = e.fam.profile("alex");
