@@ -353,10 +353,19 @@ impl Settings {
         let ow_url = env_or(env, "OW_URL")?
             .map(|s| ow_origin(&s, "OWNHEALTH_OW_URL"))
             .transpose()?;
+        // The Compose files give Open Wearables this value with /ow appended (falling back to
+        // OWNHEALTH_BASE_URL), so a trailing slash would make its redirect URI differ from the guide's.
         let ow_public_url = env_or(env, "OW_PUBLIC_URL")?
             .map(|s| {
                 ow_origin(&s, "OWNHEALTH_OW_PUBLIC_URL")?;
-                Ok::<_, Error>(s.trim_end_matches('/').to_string())
+                if s.ends_with('/') {
+                    return Err(Error::Invalid(
+                        "OWNHEALTH_OW_PUBLIC_URL must be written without a trailing slash. The Compose \
+                         files use OWNHEALTH_BASE_URL when it is unset, so remove the slash there too."
+                            .into(),
+                    ));
+                }
+                Ok(s)
             })
             .transpose()?;
         let threshold: f64 = parse(env, "AUTO_ACCEPT_THRESHOLD", d.auto_accept_threshold)?;
@@ -668,5 +677,41 @@ mod tests {
         assert!(Settings::from(&env(&[])).expect("settings").trusted_proxies.is_empty());
         let err = Settings::from(&env(&[("OWNHEALTH_TRUSTED_PROXIES", "caddy")])).expect_err("refused");
         assert!(err.to_string().contains("OWNHEALTH_TRUSTED_PROXIES"));
+    }
+
+    #[test]
+    fn open_wearables_urls_are_bare_origins() {
+        let s = Settings::from(&env(&[
+            ("OWNHEALTH_OW_URL", "http://ow-app:8000"),
+            ("OWNHEALTH_OW_PUBLIC_URL", "https://cb.example.test"),
+        ]))
+        .expect("settings");
+        assert_eq!(s.ow_url.map(String::from).as_deref(), Some("http://ow-app:8000/"));
+        assert_eq!(s.ow_public_url.as_deref(), Some("https://cb.example.test"));
+        let bad = [
+            "http://ow-app:8000/api",
+            "http://user:secret@ow-app:8000",
+            "http://ow-app:8000?x=1",
+            "http://ow-app:8000#top",
+            "ftp://ow-app:8000",
+            "ow-app:8000",
+        ];
+        for setting in ["OWNHEALTH_OW_URL", "OWNHEALTH_OW_PUBLIC_URL"] {
+            for value in bad {
+                let err = Settings::from(&env(&[(setting, value)])).expect_err(value).to_string();
+                assert!(
+                    err.contains(setting) && !err.contains("secret"),
+                    "{setting}={value}: {err}"
+                );
+            }
+        }
+        // Open Wearables appends /ow to the raw value, so a trailing slash would give it //ow while
+        // the guide shows /ow. Compose falls back to OWNHEALTH_BASE_URL, so this catches that too.
+        for value in ["https://cb.example.test/", "http://localhost:8080/"] {
+            let err = Settings::from(&env(&[("OWNHEALTH_OW_PUBLIC_URL", value)]))
+                .expect_err(value)
+                .to_string();
+            assert!(err.contains("without a trailing slash"), "{value}: {err}");
+        }
     }
 }

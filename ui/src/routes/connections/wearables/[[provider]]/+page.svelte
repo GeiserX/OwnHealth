@@ -123,9 +123,6 @@
 				{#if vendor.publicHttps}
 					<p class="dim">{tf('ow_setup_https', { vendor: vendor.name })}</p>
 				{/if}
-				{#if provider.id === 'withings'}
-					<p class="dim">{t('ow_setup_withings_probe')}</p>
-				{/if}
 			</li>
 			<li>
 				<h2>{t('ow_setup_register')}</h2>

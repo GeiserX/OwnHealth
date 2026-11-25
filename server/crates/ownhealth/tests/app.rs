@@ -275,13 +275,16 @@ async fn ow_paths_outside_the_get_allowlist_never_fall_through_to_the_ui() -> R 
     ] {
         assert_eq!(call(&app, get(path)?).await?.0, StatusCode::NOT_FOUND, "{path}");
     }
-    for method in ["HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE"] {
+    for method in ["POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE"] {
         let req = Request::builder()
             .method(method)
             .uri("/ow/api/v1/oauth/whoop/callback")
             .body(Body::empty())?;
         assert_eq!(call(&app, req).await?.0, StatusCode::METHOD_NOT_ALLOWED, "{method}");
     }
+    // Withings' HEAD probe gets no answer while the proxy is off, like the GET
+    let head = Request::head("/ow/api/v1/oauth/withings/callback").body(Body::empty())?;
+    assert_eq!(call(&app, head).await?.0, StatusCode::NOT_FOUND);
     Ok(())
 }
 
@@ -336,6 +339,24 @@ async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R 
             "/api/v1/oauth/oura/callback",
             on_get(|| async { (StatusCode::SEE_OTHER, [(header::LOCATION, "/api/v1/users")]) }),
         )
+        .route(
+            "/api/v1/oauth/polar/callback",
+            on_get(|| async {
+                (
+                    StatusCode::SEE_OTHER,
+                    [(header::LOCATION, "/api/v1/oauth/success?provider=whoop&user_id=demo")],
+                )
+            }),
+        )
+        .route(
+            "/api/v1/oauth/withings/callback",
+            on_get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    "<script>alert(1)</script>",
+                )
+            }),
+        )
         .route("/api/v1/users", on_get(|| async { "private upstream route" }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
@@ -385,6 +406,45 @@ async fn ow_callback_passes_the_query_only_and_keeps_the_result_under_ow() -> R 
         call(&app, get("/ow/api/v1/oauth/oura/callback")?).await?.0,
         StatusCode::BAD_GATEWAY
     );
+    // a callback may only send the browser to its own provider's result page
+    assert_eq!(
+        call(&app, get("/ow/api/v1/oauth/polar/callback?code=c&state=s")?)
+            .await?
+            .0,
+        StatusCode::BAD_GATEWAY
+    );
+    // a result that is not JSON reaches the browser as sandboxed plain text
+    let res = app.clone().oneshot(get("/ow/api/v1/oauth/withings/callback")?).await?;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert!(
+        res.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()?
+            .starts_with("sandbox;")
+    );
+    // Withings' registration probe: an empty 200 on an allowed callback, answered here. The fake's
+    // WHOOP, Oura and Polar callbacks answer a forwarded request with 400 or a refused redirect.
+    for provider in ["withings", "whoop", "oura", "polar"] {
+        let head = Request::head(format!("/ow/api/v1/oauth/{provider}/callback")).body(Body::empty())?;
+        let (status, body, cache) = call(&app, head).await?;
+        assert_eq!(status, StatusCode::OK, "{provider}");
+        assert!(body.is_empty(), "{provider}");
+        assert_eq!(cache.as_deref(), Some("no-store"));
+    }
+    // HEAD stays refused everywhere else
+    for (path, want) in [
+        (
+            "/ow/api/v1/oauth/success?provider=whoop",
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        ("/ow/api/v1/oauth/error", StatusCode::METHOD_NOT_ALLOWED),
+        ("/ow/api/v1/oauth/strava/callback", StatusCode::NOT_FOUND),
+        ("/ow/api/v1/oauth/whoop/authorize", StatusCode::NOT_FOUND),
+        ("/ow/api/v1/users", StatusCode::NOT_FOUND),
+    ] {
+        let head = Request::head(path).body(Body::empty())?;
+        assert_eq!(call(&app, head).await?.0, want, "{path}");
+    }
     task.abort();
     Ok(())
 }

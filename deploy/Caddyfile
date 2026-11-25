@@ -30,7 +30,7 @@
 
 # The public site block for SMART Health Links (docs/design/security-privacy.md section 11). It
 # passes the manifest (POST and OPTIONS), file (GET), and direct ICE card file (GET).
-# The Open Wearables callback and its result pages are opt-in (GET only).
+# The Open Wearables callback and its result pages are opt-in (GET, and HEAD on the callback).
 # Caddy matches the cleaned path, so a raw path such as /login/../api/shl/<id> also matches.
 # Each route is rewritten to its canonical path. The direct file and OAuth routes keep their queries.
 # compose.homelab.yaml publishes this port on 127.0.0.1 only. Point a tunnel (Tailscale Funnel,
@@ -54,6 +54,12 @@ http://:8090 {
 		path_regexp ow ^/ow/api/v1/oauth/((?:oura|polar|whoop|withings)/callback|success|error)$
 		expression "{$OWNHEALTH_OW_CALLBACK:false}" == "true"
 	}
+	# Withings sends HEAD to the callback when its redirect URI is registered.
+	@ow_probe {
+		method HEAD
+		path_regexp owp ^/ow/api/v1/oauth/(oura|polar|whoop|withings)/callback$
+		expression "{$OWNHEALTH_OW_CALLBACK:false}" == "true"
+	}
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
@@ -73,6 +79,10 @@ http://:8090 {
 	}
 	handle @ow_callback {
 		rewrite * /ow/api/v1/oauth/{re.ow.1}
+		reverse_proxy app:8080
+	}
+	handle @ow_probe {
+		rewrite * /ow/api/v1/oauth/{re.owp.1}/callback
 		reverse_proxy app:8080
 	}
 	handle {

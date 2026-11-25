@@ -85,12 +85,19 @@ async fn forward(upstream: Option<Upstream>, method: Method, uri: Uri) -> Respon
     if provider.is_none() && !matches!(path, SUCCESS | ERROR) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if method != Method::GET {
-        return (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "GET")]).into_response();
+    // Withings sends HEAD to the callback when it is registered (OW 0.11 answers it in oauth.py).
+    // The probe carries no code or state, so it is answered here and never reaches the sidecar.
+    let probe = method == Method::HEAD && provider.is_some();
+    if method != Method::GET && !probe {
+        let allow = if provider.is_some() { "GET, HEAD" } else { "GET" };
+        return (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response();
     }
     let Some(upstream) = upstream else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if probe {
+        return StatusCode::OK.into_response();
+    }
     let url = upstream.url(path, uri.query());
     if provider.is_none() && !result_allowed(&url, None) {
         return StatusCode::NOT_FOUND.into_response();

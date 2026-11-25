@@ -1691,8 +1691,14 @@ fn the_public_wearables_callback_needs_the_literal_true_switch() -> R {
                 assert_eq!(code, 404, "{value:?} {path}: {body}");
             }
         }
+        // Withings probes its callback with HEAD when it is registered; only the callback answers it
+        let (code, head) = fetch(&addr, "HEAD", callback)?;
+        let want = if value == Some("true") { 200 } else { 404 };
+        assert_eq!(code, want, "{value:?} HEAD {callback}: {head}");
         for (method, path) in [
-            ("HEAD", callback),
+            ("HEAD", success),
+            ("HEAD", error),
+            ("HEAD", "/ow/api/v1/oauth/strava/callback"),
             ("POST", callback),
             ("OPTIONS", success),
             ("GET", "/ow/api/v1/oauth/strava/callback"),
