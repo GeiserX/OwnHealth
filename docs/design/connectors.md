@@ -100,9 +100,9 @@ Email-in and the watched folder carry the highest prompt-injection exposure: any
 
 In [Google Takeout](https://support.google.com/googlehealth/answer/14236615), select Fitbit or Google Health and request a ZIP. In OwnHealth, select the profile that owns the Fitbit history, then upload the ZIP in **Import review**. OwnHealth reads legacy JSON files in `Global Export Data` and the accompanying Fitbit HRV and SpO2 CSVs. It also reads the newer CSVs in `Physical Activity_GoogleData` or `Google Data`. Readings appear in **Wearables** under Fitbit.
 
-For a timestamp without a UTC offset, OwnHealth uses the IANA time zone in the Fitbit `Profile.json` in the same ZIP. It refuses the import if the zone is missing or invalid, or when a clock change leaves the time ambiguous or nonexistent. An explicit UTC offset is used as written. A date-only CSV summary uses midnight UTC for that calendar date.
+Times follow what the exports write. The `Global Export Data` JSON files hold UTC times without saying so, and the Google Data CSVs write UTC with `Z`. OwnHealth stores them as UTC and takes the local offset from the time zone in `Your Profile/Profile.csv`. An offset written in the file is kept. The legacy HRV detail CSVs hold local times with no offset, so OwnHealth places them in that zone. A row it cannot place (the ZIP has no profile, or the time falls in a clock change) is left out and counted in the result. The rest of the ZIP still imports. A daily value, such as resting heart rate or a daily SpO2 or HRV summary, keeps its calendar day.
 
-A ZIP with no supported files or usable readings shows an import error. Each ZIP may contain up to 500,000 readings. For larger exports, use smaller ZIPs that preserve the Fitbit or Google Health folder. Include the Fitbit profile file in each part that has timestamps without offsets. OwnHealth keeps a readings document with the source member names and releases the original ZIP.
+A ZIP with no supported files or usable readings shows an import error. Each ZIP may contain up to 500,000 readings. For larger exports, use smaller ZIPs that preserve the Fitbit or Google Health folder. Keep `Your Profile/Profile.csv` in each part, so its local times can be placed. OwnHealth keeps a readings document with the source member names and releases the original ZIP.
 
 ### 2.3 T2: live APIs a self-hoster can register for
 

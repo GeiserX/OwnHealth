@@ -1,5 +1,15 @@
 //! Fitbit and Google Health Takeout archives. The original ZIP and account profile do not become
 //! documents. The retained JSON lines name each member that supplied readings.
+//!
+//! Times, as public exports show them (the fixtures README names the sources):
+//! - `Global Export Data` JSON times carry no zone and are UTC;
+//! - Google Data CSVs write UTC with `Z`; the legacy HRV detail CSVs write local time with no zone;
+//! - a daily value (resting heart rate, a daily SpO2 or HRV summary) names its calendar day, even when
+//!   written as midnight UTC.
+//!
+//! The zone in `Your Profile/Profile.csv` gives a UTC time its local offset and places a local time.
+//! A row whose time cannot be read or placed (no zone, or a clock change) is left out and counted;
+//! the rest of the archive still imports.
 
 use std::io::{Read, Seek};
 
@@ -24,8 +34,6 @@ pub const PROVIDER: &str = "fitbit_takeout";
 
 const UNKNOWN: &str = "fitbit_takeout_unknown_layout";
 const UNREADABLE: &str = "fitbit_takeout_unreadable";
-const TIMEZONE: &str = "fitbit_takeout_timezone_required";
-const LOCAL_TIME: &str = "fitbit_takeout_local_time";
 const LIMIT: &str = "fitbit_takeout_limit";
 const NO_READINGS: &str = "fitbit_takeout_no_readings";
 
@@ -37,7 +45,7 @@ const IMPORT: ArchiveImport = ArchiveImport {
     label: "Fitbit",
     unreadable: UNREADABLE,
     scan: scan_archive,
-    details: Report::file_count,
+    details: Report::archive_details,
 };
 
 pub fn register() {
@@ -117,10 +125,26 @@ impl Metric {
     }
 }
 
+/// A file of readings: its metric, whether it is Global Export Data JSON, and whether each row is one
+/// day's value.
+#[derive(Clone, Copy)]
+struct Member {
+    metric: Metric,
+    json: bool,
+    daily: bool,
+}
+
 enum MemberKind {
     Profile,
-    Json(Metric),
-    Csv(Metric),
+    Readings(Member),
+}
+
+fn readings(metric: Metric, json: bool, daily: bool) -> Option<MemberKind> {
+    Some(MemberKind::Readings(Member {
+        metric,
+        json,
+        daily: daily || matches!(metric, Metric::Resting),
+    }))
 }
 
 /// Turn the export's separators and optional unit punctuation into spaces. We match complete
@@ -147,7 +171,7 @@ fn member_kind(path: &str) -> Option<MemberKind> {
     let (stem, extension) = base.rsplit_once('.')?;
     let stem = words(stem);
     let extension = extension.to_ascii_lowercase();
-    if stem == "profile" && extension == "json" {
+    if stem == "profile" && extension == "csv" && words(parent) == "your profile" {
         return Some(MemberKind::Profile);
     }
     if extension == "json" && parent.eq_ignore_ascii_case("Global Export Data") {
@@ -160,7 +184,7 @@ fn member_kind(path: &str) -> Option<MemberKind> {
             ("oxygen saturation", Metric::Spo2),
         ] {
             if named(&stem, label) {
-                return Some(MemberKind::Json(metric));
+                return readings(metric, true, false);
             }
         }
     }
@@ -183,7 +207,7 @@ fn member_kind(path: &str) -> Option<MemberKind> {
             if (series.is_empty() && named(&stem, label))
                 || (words(series) == label && (date_filename || named(&stem, label)))
             {
-                return Some(MemberKind::Csv(metric));
+                return readings(metric, false, label.starts_with("daily"));
             }
         }
     }
@@ -195,7 +219,7 @@ fn member_kind(path: &str) -> Option<MemberKind> {
             "daily heart rate variability summary",
         ] {
             if named(&stem, label) {
-                return Some(MemberKind::Csv(Metric::Rmssd));
+                return readings(Metric::Rmssd, false, label != "heart rate variability details");
             }
         }
     }
@@ -207,7 +231,7 @@ fn member_kind(path: &str) -> Option<MemberKind> {
             .iter()
             .any(|label| named(&stem, label))
     {
-        return Some(MemberKind::Csv(Metric::Spo2));
+        return readings(Metric::Spo2, false, true);
     }
     None
 }
@@ -216,55 +240,72 @@ fn numeric(value: &Value) -> Option<f64> {
     value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())
 }
 
-fn profile_zone(bytes: &[u8]) -> Result<Tz> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| refuse(TIMEZONE))?;
-    let row = value.get("profile").unwrap_or(&value);
-    row.get("timezone")
-        .or_else(|| row.get("timeZone"))
-        .and_then(Value::as_str)
-        .and_then(|zone| zone.trim().parse().ok())
-        .ok_or_else(|| refuse(TIMEZONE))
+/// The `timezone` column of the account profile; None when it is missing or not a zone name.
+fn profile_zone(bytes: &[u8]) -> Option<Tz> {
+    let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).from_reader(bytes);
+    let column = reader.headers().ok()?.iter().position(|h| words(h) == "timezone")?;
+    let record = reader.records().next()?.ok()?;
+    record.get(column)?.parse().ok()
 }
 
-fn timestamp(raw: &str, zone: Option<Tz>, legacy_json: bool) -> Result<(DateTime<Utc>, i16)> {
+/// A UTC instant with the offset the profile zone had then (0 without a zone).
+fn utc(t: DateTime<Utc>, zone: Option<Tz>) -> (DateTime<Utc>, i16) {
+    let offset = zone.map_or(0, |z| {
+        z.offset_from_utc_datetime(&t.naive_utc()).fix().local_minus_utc()
+    });
+    (t, (offset / 60) as i16)
+}
+
+/// When a row's reading was taken: UTC and the local offset in minutes. None when the time cannot be
+/// read, or is a local time with no zone or in a clock change.
+fn when(raw: &str, member: Member, zone: Option<Tz>) -> Option<(DateTime<Utc>, i16)> {
     let raw = raw.trim();
-    if let Ok(t) = DateTime::parse_from_rfc3339(raw) {
-        return Ok((t.to_utc(), (t.offset().local_minus_utc() / 60) as i16));
+    let written = DateTime::parse_from_rfc3339(raw).ok();
+    let naive = || {
+        ["%m/%d/%y %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
+            .iter()
+            .find_map(|format| NaiveDateTime::parse_from_str(raw, format).ok())
+    };
+    let date = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
+    if member.daily || date.is_some() {
+        // A day's value keeps its calendar day: midnight UTC, the day rollup's own convention.
+        let day = date
+            .or_else(|| written.map(|t| t.naive_local().date()))
+            .or_else(|| naive().map(|t| t.date()))?;
+        return Some((crate::day_start(day), 0));
     }
-    let day = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok();
-    if !legacy_json && let Some(day) = day {
-        // Google CSV daily summaries give a calendar day. Preserve its rollup day at UTC midnight.
-        return Ok((day.and_hms_opt(0, 0, 0).expect("midnight").and_utc(), 0));
+    if let Some(t) = written {
+        let offset = t.offset().local_minus_utc();
+        return Some(if offset == 0 {
+            utc(t.to_utc(), zone)
+        } else {
+            (t.to_utc(), (offset / 60) as i16)
+        });
     }
-    let local = ["%m/%d/%y %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
-        .iter()
-        .find_map(|format| NaiveDateTime::parse_from_str(raw, format).ok())
-        .or_else(|| day.and_then(|d| d.and_hms_opt(0, 0, 0)))
-        .ok_or_else(|| refuse(UNREADABLE))?;
-    let t = zone
-        .ok_or_else(|| refuse(TIMEZONE))?
-        .from_local_datetime(&local)
-        .single()
-        .ok_or_else(|| refuse(LOCAL_TIME))?;
-    Ok((t.to_utc(), (t.offset().fix().local_minus_utc() / 60) as i16))
+    let local = naive()?;
+    if member.json {
+        return Some(utc(local.and_utc(), zone));
+    }
+    let t = zone?.from_local_datetime(&local).single()?;
+    Some((t.to_utc(), (t.offset().fix().local_minus_utc() / 60) as i16))
 }
 
-fn json_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(&str, f64) -> Result<()>) -> Result<()> {
+/// Each row with a value: its raw time (None when the row has none) and the value.
+fn json_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64) -> Result<()>) -> Result<()> {
     let rows: Vec<Value> = serde_json::from_slice(bytes).map_err(|_| refuse(UNREADABLE))?;
     for row in rows {
         if let Some(v) = metric.json_value(&row) {
             let time = row["dateTime"]
                 .as_str()
                 .or_else(|| row["timestamp"].as_str())
-                .or_else(|| row["date"].as_str())
-                .ok_or_else(|| refuse(UNREADABLE))?;
+                .or_else(|| row["date"].as_str());
             push(time, v)?;
         }
     }
     Ok(())
 }
 
-fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(&str, f64) -> Result<()>) -> Result<()> {
+fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(Option<&str>, f64) -> Result<()>) -> Result<()> {
     let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).from_reader(bytes);
     let headers: Vec<_> = reader
         .headers()
@@ -282,7 +323,7 @@ fn csv_rows(bytes: &[u8], metric: Metric, mut push: impl FnMut(&str, f64) -> Res
     for record in reader.records() {
         let record = record.map_err(|_| refuse(UNREADABLE))?;
         if let Some(v) = record.get(value).and_then(|v| v.parse().ok()) {
-            push(record.get(time).ok_or_else(|| refuse(UNREADABLE))?, v)?;
+            push(record.get(time), v)?;
         }
     }
     Ok(())
@@ -305,7 +346,7 @@ fn member_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, index: usize, expanded:
 fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report> {
     let mut zip = open_archive(ctx.blobs.open_seek(owner, sha)?, UNREADABLE, LIMIT)?;
     let mut root = None;
-    let mut profile = None;
+    let mut profiles = Vec::new();
     let mut members = Vec::new();
     let mut names = 0;
     let mut files = 0;
@@ -330,9 +371,8 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             return Err(refuse(UNKNOWN));
         }
         match kind {
-            MemberKind::Profile if profile.replace(index).is_some() => return Err(refuse(TIMEZONE)),
-            MemberKind::Profile => {}
-            _ => members.push((index, hide_email(&name), kind)),
+            MemberKind::Profile => profiles.push(index),
+            MemberKind::Readings(member) => members.push((index, hide_email(&name), member)),
         }
     }
     if members.is_empty() {
@@ -340,33 +380,31 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
     }
 
     let mut expanded = 0;
-    let zone = profile
-        .map(|index| {
-            member_bytes(&mut zip, index, &mut expanded)
-                .and_then(|bytes| profile_zone(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)))
-        })
-        .transpose();
-    // CSVs with explicit offsets and calendar-only dates do not need a profile.
-    let zone = match zone {
-        Ok(zone) => zone,
-        Err(Error::Upload(code)) if code == TIMEZONE => None,
-        Err(error) => return Err(error),
-    };
+    // Two profiles that name different zones place nothing.
+    let mut zones = Vec::new();
+    for index in profiles {
+        let bytes = member_bytes(&mut zip, index, &mut expanded)?;
+        zones.push(profile_zone(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes)));
+    }
+    let zone = zones
+        .first()
+        .copied()
+        .flatten()
+        .filter(|z| zones.iter().all(|o| *o == Some(*z)));
     let latest = Utc::now() + Duration::days(1);
     let mut report = Report::default();
     let mut count = 0;
-    for (index, name, kind) in members {
-        let (metric, legacy) = match kind {
-            MemberKind::Json(metric) => (metric, true),
-            MemberKind::Csv(metric) => (metric, false),
-            MemberKind::Profile => unreachable!("only readings members are collected"),
-        };
+    for (index, name, member) in members {
         let bytes = member_bytes(&mut zip, index, &mut expanded)?;
         let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
         let mut samples = Vec::new();
-        let push = |raw: &str, v| {
-            let (t, offset) = timestamp(raw, zone, legacy)?;
-            if let Some(sample) = metric.sample(t, offset, v, latest) {
+        let mut left_out = 0;
+        let push = |raw: Option<&str>, v| {
+            let Some((t, offset)) = raw.and_then(|raw| when(raw, member, zone)) else {
+                left_out += 1;
+                return Ok(());
+            };
+            if let Some(sample) = member.metric.sample(t, offset, v, latest) {
                 count += 1;
                 if count > MAX_READINGS {
                     return Err(refuse(LIMIT));
@@ -375,11 +413,12 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             }
             Ok(())
         };
-        if legacy {
-            json_rows(bytes, metric, push)?;
+        if member.json {
+            json_rows(bytes, member.metric, push)?;
         } else {
-            csv_rows(bytes, metric, push)?;
+            csv_rows(bytes, member.metric, push)?;
         }
+        report.rows_left_out += left_out;
         if !samples.is_empty() {
             report.add_member(name, samples);
         }

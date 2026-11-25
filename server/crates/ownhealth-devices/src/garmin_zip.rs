@@ -115,11 +115,18 @@ pub(crate) struct Report {
     not_imported: Vec<Omission>,
     gps_left_out: bool,
     readings: Vec<Readings>,
+    /// Rows of a read file whose time could not be read or placed (Fitbit Takeout).
+    pub(crate) rows_left_out: usize,
 }
 
 impl Report {
-    pub(crate) fn file_count(&self) -> Value {
-        json!({"files_imported": self.files_imported})
+    /// The details of an archive whose files hold rows of readings (Fitbit Takeout).
+    pub(crate) fn archive_details(&self) -> Value {
+        json!({
+            "files_imported": self.files_imported,
+            "not_imported": self.not_imported,
+            "rows_left_out": self.rows_left_out,
+        })
     }
 
     pub(crate) fn add_member(&mut self, member: String, samples: Vec<Sample>) {
