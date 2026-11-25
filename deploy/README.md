@@ -109,6 +109,53 @@ The one-shot `ow-db-init` creates the `openwearables` database and role, then OW
 
 **Restore.** `ownhealth backup` leaves OW's database out, because it is a cache of vendor data. After a restore onto new volumes, `docker compose up -d` with the profile on creates an empty one, and every vendor has to be connected again: the logins were only in that database.
 
+## Large wearable histories
+
+A watch that records every heartbeat adds millions of samples a year. Once the samples table holds more than `OWNHEALTH_PARTITION_ROWS` rows (default 50,000,000), a job splits it. All samples dated before a cutoff stay together in one historical partition, and one partition a month follows from the cutoff on. A query over a few days after the cutoff then reads only the months it needs. A query before the cutoff reads the historical partition through its indexes.
+
+The job changes tables, so it runs as the database owner, in the `admin` service. The app's own role cannot run it. The app checks every hour. When the table is past the threshold, it logs a warning that the job is due, and repeats it once a day until the job runs. If the app connects as the database owner (an install with one database role), it runs the job itself every hour. Run the job from cron once a day:
+
+```cron
+30 3 * * *  cd /opt/ownhealth && docker compose run --rm -T admin ownhealth partition >> partition.log 2>&1
+```
+
+Before a cutoff exists, a run below the threshold reads the table's row estimate and stops. The first run past the threshold has three steps.
+
+1. It builds two indexes on the table. The app keeps reading and writing.
+2. It checks every sample once against a cutoff date. The app keeps reading and writing.
+3. It attaches the old table as the historical partition without copying or scanning its rows. The switch takes an exclusive lock while it attaches the table and restores any samples set aside. If another session holds a lock the switch needs, the switch waits up to 2 seconds per lock attempt. After several attempts it leaves the switch to the next run.
+
+The cutoff is the first day of a month, at least 7 days ahead. Between steps 2 and 3, a new sample dated on or after the cutoff is refused. A device with a correct clock sends none. An import that holds such a sample waits: it runs again every hour, and it does not use up its retries, so it lands after step 3. When step 3 is left to the next run, that wait lasts until the next run, so keep the daily cron. Samples that a device with a wrong clock dated after the cutoff are set aside during that time. They come back in step 3, unless their file was retracted or moved to another person meanwhile.
+
+Every later run makes next month's partition ahead of time. A sample dated after every month lands in a default partition. It moves into its month when a run makes that month.
+
+You can stop the job at any time and run it again. It prints a JSON report and exits 1 when work remains.
+
+- **`busy`** means another session held a lock the job needed.
+- **`needs_owner`** means the app's role cannot continue or clear a cutoff. Run the command as the database owner.
+- **`needs_maintenance`** means a device with a wrong clock dated too many samples in the future. The job would have to move them under its exclusive lock, and the limit is 50,000. The note gives the count and the date. The limit is fixed, so every run stops here until those samples are gone. The app logs this warning once a day while it lasts. To fix it:
+  1. Find the files or pushes that hold the samples. Put the date from the note in this query. The query reads it as a day in UTC, as the note means it:
+
+     ```sh
+     docker compose exec db psql -U ownhealth -d ownhealth -c "select d.id, d.filename, p.display_name, count(*), min(s.t), max(s.t) from wearable_sample s join profile p on p.id = s.profile_id left join document d on d.id = s.document_id where s.t >= timestamptz 'YYYY-MM-DD 00:00+00' group by d.id, d.filename, p.display_name order by count(*) desc"
+     ```
+
+     If the report also has a `cutoff`, the samples are already set aside. Query `wearable_sample_ahead` instead of `wearable_sample`.
+  2. Retract each file on its profile's Documents page. This removes its samples from the table, the set-aside samples and the rollups. To keep the data, set the device clock right, export again, upload the new file, and then retract the old one.
+
+     A row with an empty `id` and `filename` holds samples that an inbox pushed without a file, such as Health Auto Export. There is no file to retract. Set the phone's clock right first, or the next push brings the samples back. Then delete those samples. Put the date from the note in the command:
+
+     ```sh
+     docker compose run --rm -T admin ownhealth partition --drop-pushed-from YYYY-MM-DD
+     ```
+
+     It deletes the samples that inboxes pushed without a file, dated on or after the start of that day in UTC, also those set aside. Then it rebuilds the rollups of those inboxes from the samples that stay. Files and devices with no inbox keep their samples. It prints what it removed. It refuses a date that is not ahead of now, because a correct clock has samples from today on. Run it before you delete that inbox. Once the inbox is deleted, the command can no longer tell its samples from a device's, and leaves them.
+  3. Run `ownhealth partition` again.
+
+  While the report has a `cutoff`, imports of samples dated on or after it wait. They go on after step 3.
+
+When the report includes a `cutoff`, new samples on or after it wait until the owner completes the switch or clears the cutoff. Backups, restores, export, and profile deletion work on the split table. Set `OWNHEALTH_PARTITION_ROWS` in `.env` to change the threshold.
+
 ## Monitoring the inboxes
 
 `GET /api/inboxes/health` lists every inbox you can see with its last run, its last successful sync, its last error, the failed runs in a row, and `stale`: switched on, polled, and no success for three poll intervals. `last_run_status` is `ok`, `partial` (some items were skipped or failed) or `error`, with `last_run_problems` and the first problem as `last_run_problem` (a code and a short message, never the content of a mail or document). A run in which every item failed counts as an error: the failed-runs count goes up and the last successful sync stays where it was. For a person, each row says `can_manage`: the Connections screen (v1.0) lists and reconnects only those rows. Only those rows also carry `created_at`, `poll_seconds`, `reconsent_needed_at` (the vendor refused the token, so someone must sign in again), `grant_expires_at`, `access_expires_at`, the connection's `server`, `open_gaps`, the open sync-gap alerts filed on the source's profile, and for a Medicare (Blue Button) connection `claim_count`, the distinct claims its latest pull read (absent when that pull failed or its claim search did not answer). A viewer and a source token get none of them. Add `?format=prometheus` for the Prometheus text format. Labels carry the source id and kind only, never names or error text:

@@ -134,7 +134,7 @@
 		<button class="btn pri" onclick={() => fileEl?.click()} disabled={busy}>{t('i2_up_files')}</button>
 		<button class="btn" onclick={() => dirEl?.click()} disabled={busy}>{t('i2_up_folder')}</button>
 		<span class="muted" style="font-size:12px">{t('i2_up_drop')}</span>
-		<input bind:this={fileEl} type="file" multiple hidden accept=".pdf,image/*,.heic,.zip,.json,.ndjson,.fit,.gz,.bgz,.tbi,.db,.sqlite,.sqlite3,.csv,text/csv,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" onchange={(e) => send(files(e))} />
+		<input bind:this={fileEl} type="file" multiple hidden accept=".pdf,image/*,.heic,.zip,.json,.ndjson,.fit,.gz,.bgz,.tbi,.db,.sqlite,.sqlite3,.csv,text/csv,.xml,text/xml,application/xml,application/vnd.sqlite3,application/x-sqlite3,application/octet-stream" onchange={(e) => send(files(e))} />
 		<input bind:this={dirEl} type="file" hidden {...{ webkitdirectory: true }} onchange={(e) => send(files(e), true)} />
 	</div>
 	<div class="note" style="margin-top:8px">

@@ -85,6 +85,10 @@ RUN groupadd --system --gid 10001 ownhealth \
  && mkdir -p /data && chown ownhealth:ownhealth /data
 COPY --from=sources /out/libpdfium.so /usr/local/lib/libpdfium.so
 COPY --from=sources /out/pdfium-LICENSE /usr/share/doc/pdfium/LICENSE
+# the licence, the third-party notices (Medplum, Apache-2.0 section 4(d)) and the third-party licence
+# texts NOTICE names (Apache-2.0 section 4(a)) ship with the binary
+COPY LICENSE NOTICE /usr/share/doc/ownhealth/
+COPY LICENSES/ /usr/share/doc/ownhealth/LICENSES/
 RUN ldconfig
 # The admin service runs these after migrating; baked in so a stack needs no checkout.
 COPY deploy/db/ /opt/ownhealth-db/
