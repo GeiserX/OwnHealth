@@ -664,7 +664,7 @@ async fn each_vendor_is_read_by_day_for_mapped_series_and_lands_with_its_hrv_win
 }
 
 #[tokio::test]
-async fn a_poll_reads_seven_days_again_but_stores_only_rows_never_seen() -> anyhow::Result<()> {
+async fn a_poll_reads_seven_days_again_without_rewriting_identical_rows() -> anyhow::Result<()> {
     let env = Env::new().await?;
     let id = env.seed_source().await?;
     poll(&env.ctx, &env.base, id).await?;
@@ -672,6 +672,9 @@ async fn a_poll_reads_seven_days_again_but_stores_only_rows_never_seen() -> anyh
     let items = "select count(*) from source_item where profile_id = $1";
     let blobs = "select count(distinct blob_sha256) from source_item where profile_id = $1";
     let (stored, bundles) = (env.count(items).await?, env.count(blobs).await?);
+    let rollup_write = "select max(xmin::text::bigint) from wearable_rollup \
+        where profile_id = $1 and metric <> 'hr'";
+    let rolled_up = env.count(rollup_write).await?;
 
     let asked = env.fake().asked.len();
     let rerun = poll(&env.ctx, &env.base, id).await?;
@@ -682,6 +685,7 @@ async fn a_poll_reads_seven_days_again_but_stores_only_rows_never_seen() -> anyh
     assert_eq!(rerun.new, 0);
     assert!(rerun.duplicate >= 4, "{rerun:?}");
     assert_eq!((env.count(items).await?, env.count(blobs).await?), (stored, bundles));
+    assert_eq!(env.count(rollup_write).await?, rolled_up);
 
     let late = Utc::now() - Duration::minutes(10);
     env.fake()
@@ -689,6 +693,7 @@ async fn a_poll_reads_seven_days_again_but_stores_only_rows_never_seen() -> anyh
         .push(sample("raw", "polar", "heart_rate", 61., "bpm", late));
     let next = poll(&env.ctx, &env.base, id).await?;
     assert_eq!(next.new, 1);
+    assert_eq!(env.count(rollup_write).await?, rolled_up);
     assert_eq!(
         (env.count(items).await?, env.count(blobs).await?),
         (stored + 1, bundles + 1)
@@ -995,6 +1000,55 @@ async fn setup_names_the_step_whose_answer_does_not_read() -> anyhow::Result<()>
 }
 
 #[tokio::test]
+async fn a_sample_can_return_to_a_previous_value() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    let t = env.fake().t;
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["polar", "active"]]);
+        fake.rows = vec![sample("raw", "polar", "heart_rate", 61., "bpm", t)];
+        fake.scores.clear();
+    }
+    let value = "select v::int8 from wearable_sample where profile_id = $1 and metric = 'hr'";
+    let average = "select v_avg::int8 from wearable_rollup where profile_id = $1 and metric = 'hr' and bucket = 'day'";
+    for expected in [61, 64, 61] {
+        env.fake().rows[0]["value"] = json!(expected);
+        poll(&env.ctx, &env.base, id).await?;
+        assert_eq!(env.count(value).await?, expected);
+        assert_eq!(env.count(average).await?, expected);
+    }
+    assert_eq!(
+        env.count("select count(*) from source_item where profile_id = $1")
+            .await?,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_vendor_score_can_return_to_a_previous_value() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    let id = env.seed_source().await?;
+    let t = env.fake().t;
+    {
+        let mut fake = env.fake();
+        fake.connections = json!([["oura", "active"]]);
+        fake.rows.clear();
+        fake.scores = vec![score(json!({
+            "provider": "oura", "category": "recovery", "recorded_at": t, "value": 80
+        }))];
+    }
+    let value = "select value::int8 from vendor_score where profile_id = $1";
+    for expected in [80, 87, 80] {
+        env.fake().scores[0]["value"] = json!(expected);
+        poll(&env.ctx, &env.base, id).await?;
+        assert_eq!(env.count(value).await?, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_corrected_zone_offset_replaces_the_stored_one() -> anyhow::Result<()> {
     let env = Env::new().await?;
     let id = env.seed_source().await?;
@@ -1012,6 +1066,9 @@ async fn a_corrected_zone_offset_replaces_the_stored_one() -> anyhow::Result<()>
     env.fake().rows[0]["zone_offset"] = json!("+01:00");
     poll(&env.ctx, &env.base, id).await?;
     assert_eq!(env.count(tz).await?, 60);
+    env.fake().rows[0]["zone_offset"] = json!("-03:30");
+    poll(&env.ctx, &env.base, id).await?;
+    assert_eq!(env.count(tz).await?, -210);
     let rows = "select count(*) from wearable_sample where profile_id = $1";
     assert_eq!(env.count(rows).await?, 1);
     Ok(())

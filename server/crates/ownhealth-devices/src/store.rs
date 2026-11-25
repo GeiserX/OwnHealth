@@ -178,7 +178,7 @@ pub async fn insert(
         "insert into wearable_sample (profile_id, metric, t, t_end, v, tz_offset_min, source_id, document_id) \
          select $1, x.m, x.t, x.te, x.v, x.tz, x.s, $2 from unnest(cast($3 as text[]), cast($4 as timestamptz[]), \
          cast($5 as timestamptz[]), cast($6 as real[]), cast($7 as smallint[]), cast($8 as smallint[])) \
-         as x(m, t, te, v, tz, s) {on_conflict} returning (xmax = 0) as inserted"
+         as x(m, t, te, v, tz, s) {on_conflict} returning (xmax = 0) as inserted, metric, source_id, t"
     );
     for chunk in rows.chunks(CHUNK) {
         let metrics: Vec<&str> = chunk.iter().map(|s| s.metric).collect();
@@ -187,7 +187,7 @@ pub async fn insert(
         let vs: Vec<f32> = chunk.iter().map(|s| s.v as f32).collect();
         let tzs: Vec<Option<i16>> = chunk.iter().map(|s| s.tz).collect();
         let srcs: Vec<i16> = chunk.iter().map(|s| s.source).collect();
-        let flags: Vec<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
+        let changed: Vec<(bool, String, i16, DateTime<Utc>)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(profile_id)
             .bind(document_id)
             .bind(&metrics)
@@ -198,18 +198,14 @@ pub async fn insert(
             .bind(&srcs)
             .fetch_all(&mut *conn)
             .await?;
-        if flags.is_empty() {
-            continue;
-        }
-        out.new += flags.iter().filter(|f| **f).count() as i64;
-        out.refreshed += flags.iter().filter(|f| !**f).count() as i64;
-        // a chunk that wrote anything may have touched any of its metrics and sources
-        touched.metrics.extend(chunk.iter().map(|s| s.metric.to_string()));
-        touched.sources.extend(chunk.iter().map(|s| s.source));
-        for s in chunk {
-            let (lo, hi) = touched.span.get_or_insert((s.t, s.t));
-            *lo = (*lo).min(s.t);
-            *hi = (*hi).max(s.t);
+        for (inserted, metric, source, t) in changed {
+            out.new += i64::from(inserted);
+            out.refreshed += i64::from(!inserted);
+            touched.metrics.insert(metric);
+            touched.sources.insert(source);
+            let (lo, hi) = touched.span.get_or_insert((t, t));
+            *lo = (*lo).min(t);
+            *hi = (*hi).max(t);
         }
     }
     Ok(out)

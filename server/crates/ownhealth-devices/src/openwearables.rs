@@ -6,9 +6,9 @@
 //! the next one is read, and it moves that vendor's own cursor. So a long window or a later failure
 //! keeps what already arrived, and a vendor whose connection ended or whose answers do not read never
 //! holds the others back; a row that does not read is counted and left out. A poll reads the 7 days
-//! before a vendor's cursor again, for late uploads, but its bundle keeps only the rows this source
-//! never brought: `source_item` knows each row by its content. A re-read of those days that fails is
-//! named and skipped, so it never holds the vendor's newer days back; the next poll tries it again.
+//! before a vendor's cursor again for late uploads and corrections. `source_item` archives each
+//! distinct payload once. The sample and score stores compare incoming rows with their current
+//! values. A failed re-read is named and skipped so the vendor's newer days can still be stored.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -641,14 +641,14 @@ impl Pull<'_> {
     }
 }
 
-#[derive(Serialize, Default)]
-struct Bundle {
-    daily: Vec<Sample>,
-    raw: Vec<Sample>,
-    scores: Vec<Score>,
+#[derive(Serialize)]
+struct Bundle<S = Sample, V = Score> {
+    daily: Vec<S>,
+    raw: Vec<S>,
+    scores: Vec<V>,
 }
 
-impl Bundle {
+impl<S, V> Bundle<S, V> {
     fn is_empty(&self) -> bool {
         self.daily.is_empty() && self.raw.is_empty() && self.scores.is_empty()
     }
@@ -811,8 +811,8 @@ async fn store_day(
     if !live {
         return Ok(None);
     }
-    let fresh = keep_new_rows(ctx, &mut tx, source, binding.profile, bundle, out).await?;
-    write(&mut tx, source, binding.profile, fresh, out).await?;
+    archive_new_rows(ctx, &mut tx, source, binding.profile, &bundle).await?;
+    write(&mut tx, source, binding.profile, bundle, out).await?;
     let mut next = cursor.cloned().unwrap_or_else(|| json!({}));
     if mark(cursor, provider).is_none_or(|t| t < to) {
         next["providers"][provider] = json!(to);
@@ -826,8 +826,7 @@ async fn store_day(
     Ok(Some(next))
 }
 
-/// A row's `source_item` id: what it is and the sha256 of its content (128 bits), so a value the
-/// vendor revises arrives again, and a row read again does not.
+/// A row's archive key: its kind and the first 128 bits of the SHA-256 of its content.
 fn row_key<T: Serialize>(kind: &str, row: &T) -> Result<String> {
     let bytes = serde_json::to_vec(row).map_err(ownhealth_core::Error::from)?;
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
@@ -835,49 +834,41 @@ fn row_key<T: Serialize>(kind: &str, row: &T) -> Result<String> {
     Ok(format!("ow{kind}:{}", &digest[..32]))
 }
 
-/// Keep the rows this source never brought, store them as one bundle (bytes first), and remember
-/// each row. Every other row counts as a duplicate.
-async fn keep_new_rows(
+/// Archive each distinct payload once, before projecting the day's samples and scores.
+async fn archive_new_rows(
     ctx: &JobContext,
     conn: &mut PgConnection,
     source: Uuid,
     profile: Uuid,
-    bundle: Bundle,
-    out: &mut RunOutcome,
-) -> Result<Bundle> {
-    fn keyed<T: Serialize>(kind: &str, rows: Vec<T>) -> Result<Vec<(String, T)>> {
-        rows.into_iter().map(|row| Ok((row_key(kind, &row)?, row))).collect()
+    bundle: &Bundle,
+) -> Result<()> {
+    fn keyed<'a, T: Serialize>(kind: &str, rows: &'a [T]) -> Result<Vec<(String, &'a T)>> {
+        rows.iter().map(|row| Ok((row_key(kind, row)?, row))).collect()
     }
-    // A row is new when no earlier pull and no earlier row of this day had its key.
-    fn split<T>(
-        rows: Vec<(String, T)>,
-        seen: &mut HashSet<String>,
-        new_keys: &mut Vec<String>,
-        out: &mut RunOutcome,
-    ) -> Vec<T> {
+
+    fn unseen<T>(rows: Vec<(String, T)>, seen: &mut HashSet<String>, new_keys: &mut Vec<String>) -> Vec<T> {
         let mut kept = Vec::new();
         for (key, row) in rows {
             if seen.insert(key.clone()) {
                 new_keys.push(key);
                 kept.push(row);
-            } else {
-                out.duplicate += 1;
             }
         }
         kept
     }
-    let daily = keyed("d", bundle.daily)?;
-    let raw = keyed("r", bundle.raw)?;
-    let scores = keyed("s", bundle.scores)?;
+
+    if bundle.is_empty() {
+        return Ok(());
+    }
+    let daily = keyed("d", &bundle.daily)?;
+    let raw = keyed("r", &bundle.raw)?;
+    let scores = keyed("s", &bundle.scores)?;
     let keys: Vec<&str> = daily
         .iter()
+        .chain(raw.iter())
         .map(|r| r.0.as_str())
-        .chain(raw.iter().map(|r| r.0.as_str()))
         .chain(scores.iter().map(|r| r.0.as_str()))
         .collect();
-    if keys.is_empty() {
-        return Ok(Bundle::default());
-    }
     let mut seen: HashSet<String> =
         sqlx::query_scalar("select external_id from source_item where source_id = $1 and external_id = any($2)")
             .bind(source)
@@ -887,14 +878,15 @@ async fn keep_new_rows(
             .into_iter()
             .collect();
     let mut new_keys = Vec::new();
-    let daily = split(daily, &mut seen, &mut new_keys, out);
-    let raw = split(raw, &mut seen, &mut new_keys, out);
-    let scores = split(scores, &mut seen, &mut new_keys, out);
-    let kept = Bundle { daily, raw, scores };
-    if kept.is_empty() {
-        return Ok(kept);
+    let fresh = Bundle {
+        daily: unseen(daily, &mut seen, &mut new_keys),
+        raw: unseen(raw, &mut seen, &mut new_keys),
+        scores: unseen(scores, &mut seen, &mut new_keys),
+    };
+    if fresh.is_empty() {
+        return Ok(());
     }
-    let bytes = serde_json::to_vec(&kept).map_err(ownhealth_core::Error::from)?;
+    let bytes = serde_json::to_vec(&fresh).map_err(ownhealth_core::Error::from)?;
     let (stored, _) = store_bytes(&ctx.blobs, BlobOwner::Profile(profile), bytes).await?;
     sqlx::query(
         "insert into source_item (source_id, external_id, blob_sha256, profile_id)
@@ -906,7 +898,7 @@ async fn keep_new_rows(
     .bind(profile)
     .execute(&mut *conn)
     .await?;
-    Ok(kept)
+    Ok(())
 }
 
 fn metric(series: &str, unit: &str, value: f64) -> Option<(&'static str, f64)> {
