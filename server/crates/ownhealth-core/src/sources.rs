@@ -751,6 +751,20 @@ async fn reconcile_gap(
     let Some(source) = source else {
         return Ok(());
     };
+    // Passes can reach the row out of order. Every evaluation stamps the alert it keeps, so a pass whose
+    // clock is older than the newest evaluation of this source leaves the alerts to that one.
+    let newest: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select max(greatest(created_at, (payload->>'evaluated_at')::timestamptz, \
+         (payload->>'ended_at')::timestamptz)) from review_item \
+         where household_id = $2 and kind = 'source_gap' and ref_table = 'source' and ref_id = $1",
+    )
+    .bind(id)
+    .bind(source.household_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if newest.is_some_and(|newest| newest > now) {
+        return Ok(());
+    }
     let payload = match (checks.get(&source.kind), source.enabled, source.profile_id) {
         (Some(check), true, Some(_)) => {
             let failed = pull_failed_for_interval(&mut tx, id, &source, now).await?;
@@ -781,8 +795,8 @@ async fn reconcile_gap(
     .await?;
 
     if let Some(payload) = payload {
-        let current: Option<(Uuid, bool, Value)> = sqlx::query_as(
-            "select id, status = 'open', payload from review_item where household_id = $1 and profile_id = $2 \
+        let current: Option<Uuid> = sqlx::query_scalar(
+            "select id from review_item where household_id = $1 and profile_id = $2 \
              and kind = 'source_gap' and ref_table = 'source' and ref_id = $3 and payload->>'ended_at' is null \
              and (status = 'open' or decided_by is not null) order by created_at desc, id desc limit 1",
         )
@@ -791,28 +805,34 @@ async fn reconcile_gap(
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?;
+        let stamp = json!({ "evaluated_at": now });
         match current {
-            Some((item, true, previous)) if previous != payload => {
-                sqlx::query("update review_item set payload = $2 where id = $1 and status = 'open'")
-                    .bind(item)
-                    .bind(payload)
-                    .execute(&mut *tx)
-                    .await?;
+            // An open alert takes the current text; a decided one keeps the text the person saw.
+            Some(item) => {
+                sqlx::query(
+                    "update review_item set payload = case when status = 'open' then $2 else payload end || $3 \
+                     where id = $1",
+                )
+                .bind(item)
+                .bind(payload)
+                .bind(stamp)
+                .execute(&mut *tx)
+                .await?;
             }
             None => {
                 sqlx::query(
                     "insert into review_item (household_id, profile_id, kind, ref_table, ref_id, payload, created_at) \
-                     values ($1, $2, 'source_gap', 'source', $3, $4, $5)",
+                     values ($1, $2, 'source_gap', 'source', $3, $4 || $5, $6)",
                 )
                 .bind(source.household_id)
                 .bind(source.profile_id)
                 .bind(id)
                 .bind(payload)
+                .bind(stamp)
                 .bind(now)
                 .execute(&mut *tx)
                 .await?;
             }
-            _ => {}
         }
     }
     tx.commit().await?;

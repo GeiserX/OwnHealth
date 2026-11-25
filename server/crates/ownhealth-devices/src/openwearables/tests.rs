@@ -1732,3 +1732,41 @@ async fn a_connection_that_never_synced_alerts_once_its_window_passes() -> anyho
     );
     Ok(())
 }
+
+/// Scheduler passes can reach the source row out of order: a pass that read its clock earlier can get
+/// the row after a later pass. The earlier evaluation must not close an alert the later one kept open.
+#[tokio::test]
+async fn an_older_scheduler_pass_cannot_close_an_alert_a_newer_pass_kept() -> anyhow::Result<()> {
+    let env = Env::new().await?;
+    gaps::register();
+    let id = env.seed_source().await?;
+    let synced = |at: DateTime<Utc>| {
+        let pool = env.ctx.pool.clone();
+        async move {
+            sqlx::query(
+                "update source set cursor = jsonb_build_object('connections', jsonb_build_object('polar', \
+                 jsonb_build_object('status', 'active', 'last_synced_at', $2::timestamptz))) where id = $1",
+            )
+            .bind(id)
+            .bind(at)
+            .execute(&pool)
+            .await
+        }
+    };
+    let a = instant("2026-01-01T00:00:00Z");
+    synced(a).await?;
+    sources::scheduler_tick_at(&env.ctx, a + Duration::hours(21)).await?;
+    let open = open_gaps(&env, id).await?;
+    let [item] = open[..] else {
+        anyhow::bail!("one alert expected");
+    };
+    // ten more hours arrive, then sync stops again: a gap again from +30 h
+    synced(a + Duration::hours(10)).await?;
+    sources::scheduler_tick_at(&env.ctx, a + Duration::hours(31)).await?;
+    // a pass that read its clock at +29 h gets the row only now; at +29 h the sync was 19 h old
+    sources::scheduler_tick_at(&env.ctx, a + Duration::hours(29)).await?;
+    assert_eq!(open_gaps(&env, id).await?, [item], "an older pass closed the alert");
+    sources::scheduler_tick_at(&env.ctx, a + Duration::hours(32)).await?;
+    assert_eq!(open_gaps(&env, id).await?, [item], "the gap opened a second item");
+    Ok(())
+}
