@@ -243,11 +243,14 @@ async fn sweep(ctx: &JobContext, orthanc: &Orthanc, held: &[String], failed: &mu
     let mut rebuild: BTreeSet<Uuid> = BTreeSet::new();
     for (id, study) in &named {
         match check_recorded(ctx, orthanc, held.contains(id), id, study).await {
-            Ok((lacking, removed)) => {
+            Ok((lacking, removed, delete_failure)) => {
                 if lacking {
                     rebuild.insert(study.profile_id);
                 }
                 removed_series += removed;
+                if let Some(error) = delete_failure {
+                    failed.note(error)?;
+                }
             }
             Err(e) => failed.note(e)?,
         }
@@ -292,28 +295,28 @@ async fn remove_unnamed(ctx: &JobContext, orthanc: &Orthanc, id: &str) -> Result
 }
 
 /// A recorded study: whether Orthanc lacks it, or a series or an instance its record counts (so its
-/// profile needs a rebuild), and how many series no record counts it deleted.
+/// profile needs a rebuild), how many uncounted series it deleted, and the first DELETE failure.
 async fn check_recorded(
     ctx: &JobContext,
     orthanc: &Orthanc,
     listed: bool,
     id: &str,
     study: &Named,
-) -> Result<(bool, usize), JobError> {
+) -> Result<(bool, usize, Option<JobError>), JobError> {
     let series = if listed {
         orthanc.series_ids(id).await.map_err(retry)?
     } else {
         None
     };
     let Some(series) = series else {
-        return Ok((true, 0));
+        return Ok((true, 0, None));
     };
     let uids: BTreeSet<&String> = series.iter().map(|(_, uid)| uid).collect();
     // a counted series Orthanc lacks, or one that holds fewer instances than the record counts
     let lacking = study.series.iter().any(|s| !uids.contains(s))
         || !crate::rebuild::covers(&crate::rebuild::held_counts(orthanc, id).await?, &study.fhir);
     if series.iter().all(|(_, uid)| study.series.contains(uid)) {
-        return Ok((lacking, 0));
+        return Ok((lacking, 0, None));
     }
     // read the record again under the lock: an import may have just counted the series
     let mut tx = ctx.pool.begin().await?;
@@ -340,8 +343,5 @@ async fn check_recorded(
         }
     }
     tx.commit().await?;
-    if let Some(e) = first_failure {
-        return Err(e);
-    }
-    Ok((lacking, removed))
+    Ok((lacking, removed, first_failure))
 }

@@ -1608,8 +1608,17 @@ async fn one_series_orthanc_cannot_delete_neither_keeps_the_next_one_nor_passes_
     };
     e.upload("alex", &series_files(&three, &[0], "DICOM")).await?;
     e.import().await?;
-    // two series under the recorded study that no record counts
     let client = Orthanc::new(e.orthanc.config())?;
+    let lost = e
+        .orthanc
+        .held()
+        .instances
+        .keys()
+        .next()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no counted instance"))?;
+    client.delete_instance(&lost).await?;
+    // two series under the recorded study that no record counts
     client.store(support::image(&three, 1, 0, EXPLICIT_LE)).await?;
     client.store(support::image(&three, 2, 0, EXPLICIT_LE)).await?;
     let id = e
@@ -1640,6 +1649,14 @@ async fn one_series_orthanc_cannot_delete_neither_keeps_the_next_one_nor_passes_
         [counted, failing].into_iter().collect(),
         "one failing series kept the next one"
     );
+    assert_eq!(
+        e.run(rebuild::JOB).await?,
+        1,
+        "the failed DELETE kept the counted series from rebuilding"
+    );
+    let (rebuild_state, rebuilt) = e.result(rebuild::JOB).await?;
+    assert_eq!(rebuild_state, "done", "{rebuilt}");
+    assert_eq!(rebuilt["rebuilt"], 1, "{rebuilt}");
     let (state, error): (String, Option<String>) =
         sqlx::query_as("select state, last_error from job where kind = $1 order by id desc limit 1")
             .bind(sweep::JOB)
