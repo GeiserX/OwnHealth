@@ -3,7 +3,7 @@
 // member who may not see Wearables. A cut-short ZIP reads as its own sentence, not as an unknown file.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { garminNothing, garminReadings, garminSummary } from '../src/lib/logic/garmin_import.ts';
+import { garminNothing, garminReadings, garminSummary, rowsLeftOut } from '../src/lib/logic/garmin_import.ts';
 import { fitHidden } from '../src/lib/logic/fit_import.ts';
 import { errKey } from '../src/lib/logic/errors.ts';
 import { dict } from '../src/lib/i18n/dict.ts';
@@ -44,4 +44,17 @@ test('a ZIP whose member list cannot be read is no unknown file', () => {
 	assert.equal(errKey(null, 'garmin.zip: this ZIP could not be read; it may be incomplete', has), 'err_zip_unreadable');
 	assert.equal(errKey(null, 'garmin.zip: this ZIP holds too many files to import', has), 'err_zip_too_many');
 	assert.equal(errKey(null, 'x.zip: not a PDF, image, Apple Health export, FHIR bundle or genome facts file', has), 'err_unsupported_file');
+});
+
+test('a Fitbit Takeout result reads as an archive summary and counts the rows it left out', () => {
+	const fitbit = { files_imported: 2, not_imported: [{ member: 'Takeout/Fitbit/Oxygen Saturation (SpO2)/Minute SpO2 - 2024-07-04.csv', reason: 'unsupported' }], rows_left_out: 3 };
+	assert.deepEqual(garminSummary(fitbit), { files_imported: 2, gps_left_out: false, not_imported: fitbit.not_imported });
+	assert.equal(rowsLeftOut(fitbit), 3);
+	for (const v of [null, undefined, {}, { rows_left_out: 'x' }, { rows_left_out: Number.NaN }]) assert.equal(rowsLeftOut(v), 0, JSON.stringify(v));
+	for (const lang of ['en', 'es'] as const) {
+		for (const key of ['i2_fitbit_rows_left_out', 'i2_fitbit_rows_left_out_one', 'i2_garmin_reason_invalid_csv', 'fu_k_fitbit_takeout']) {
+			assert.ok(key in dict[lang], `${lang} ${key}`);
+		}
+		assert.match(dict[lang].err_unsupported_file, /Fitbit Takeout/);
+	}
 });

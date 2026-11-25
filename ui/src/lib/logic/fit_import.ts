@@ -59,10 +59,10 @@ export function fitDocLines(flags: unknown): FitLine[] | null {
 }
 
 /** The imports whose result the panel explains as shared only with people who can see Wearables. */
-const HIDDEN_LINE_KINDS = ['import.fit', 'import.garmin_zip'];
+const HIDDEN_LINE_KINDS = ['import.fit', 'import.garmin_zip', 'import.fitbit_takeout'];
 
-/** An import.fit or import.garmin_zip job that ended with its result hidden from this member (no
- * read:wearables there). */
+/** An import.fit, import.garmin_zip or import.fitbit_takeout job that ended with its result hidden from
+ * this member (no read:wearables there). */
 export function fitHidden(job: { kind?: string; state?: string; result?: unknown } | undefined): boolean {
 	return !!job && HIDDEN_LINE_KINDS.includes(job.kind ?? '') && job.state === 'done' && (job.result === null || job.result === undefined);
 }

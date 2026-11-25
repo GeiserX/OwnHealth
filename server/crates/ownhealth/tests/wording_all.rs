@@ -84,7 +84,9 @@ fn fitbit_takeout_words() -> anyhow::Result<Vec<Value>> {
     dict.lines()
         .filter_map(|line| {
             let (key, value) = line.trim_start().split_once(':')?;
-            (key == "i2_ik_fitbit_takeout" || key.starts_with("err_fitbit_takeout_"))
+            (["i2_ik_fitbit_takeout", "fu_k_fitbit_takeout"].contains(&key)
+                || key.starts_with("err_fitbit_takeout_")
+                || key.starts_with("i2_fitbit_"))
                 .then(|| serde_json::from_str(value.trim().trim_end_matches(',')).map_err(anyhow::Error::from))
         })
         .collect()

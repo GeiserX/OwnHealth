@@ -21,6 +21,12 @@ export function garminSummary(value: unknown): GarminSummary | null {
 
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
+/** The rows a Fitbit Takeout import left out because their time could not be read or placed
+ * (`rows_left_out` of its details); 0 for anything else. */
+export function rowsLeftOut(details: unknown): number {
+	return num((details as Record<string, unknown> | null | undefined)?.rows_left_out);
+}
+
 /** What an import added: the new readings, or that every reading was already there (the same export
  * sent again). Null when the result counts no reading (a document's flags, or nothing usable). */
 export function garminReadings(result: unknown): { key: string; n: number } | null {

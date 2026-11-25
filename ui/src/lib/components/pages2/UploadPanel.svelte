@@ -12,7 +12,7 @@
 	import { fitDocId, fitHidden, fitLines } from '#lib/logic/fit_import';
 	import FitResult from './FitResult.svelte';
 	import GarminResult from './GarminResult.svelte';
-	import { garminNothing, garminReadings as archiveReadings, garminSummary } from '#lib/logic/garmin_import';
+	import { garminNothing, garminReadings as archiveReadings, garminSummary, rowsLeftOut } from '#lib/logic/garmin_import';
 
 	// ondone gets the documents the finished jobs made, in upload order; rowsOf counts a document's rows to review.
 	let {
@@ -155,6 +155,7 @@
 					{@const cgm = j?.state === 'done' ? cgmLines(j.result) : null}
 					{@const fit = j?.state === 'done' ? fitLines(j.result) : null}
 					{@const garmin = j?.state === 'done' ? garminSummary(j.result?.garmin) : null}
+					{@const fitbit = j?.kind === 'import.fitbit_takeout' && j.state === 'done' ? garminSummary(j.result?.fitbit_takeout) : null}
 					<tr>
 						<td class="fname">{#if d && (j?.state === 'done' || i.duplicate)}<a href="?doc={d}">{i.filename}</a>{:else}{i.filename}{/if}</td>
 						<td class="dim" title={i.kind}>{t('i2_ik_' + i.kind) !== 'i2_ik_' + i.kind ? t('i2_ik_' + i.kind) : i.kind}</td>
@@ -164,10 +165,7 @@
 					{#if fit}<tr><td colspan="4"><FitResult lines={fit} label={i.filename} /></td></tr>
 					{:else if fitHidden(j)}<tr><td colspan="4" class="dim" style="font-size:12px">{t('i2_fit_hidden')}</td></tr>{/if}
 					{#if garmin}<tr><td colspan="4"><GarminResult summary={garmin} readings={archiveReadings(j?.result)} /></td></tr>{/if}
-					{#if j?.kind === 'import.fitbit_takeout' && j.state === 'done'}
-						{@const readings = archiveReadings(j.result)}
-						{#if readings}<tr><td colspan="4" class="dim">{lineText(readings)}</td></tr>{/if}
-					{/if}
+					{#if fitbit}<tr><td colspan="4"><GarminResult summary={fitbit} readings={archiveReadings(j?.result)} leftOut={rowsLeftOut(j?.result?.fitbit_takeout)} /></td></tr>{/if}
 					{#if cgm}
 						<tr>
 							<td colspan="4">

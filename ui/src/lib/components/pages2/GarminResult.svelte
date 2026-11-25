@@ -4,7 +4,8 @@
 	import { tp } from '#lib/components/pages1/util.svelte';
 	import type { GarminSummary } from '#lib/logic/garmin_import';
 
-	let { summary, readings = null }: { summary: GarminSummary; readings?: { key: string; n: number } | null } = $props();
+	// leftOut: rows of a Fitbit Takeout import whose time could not be read or placed
+	let { summary, readings = null, leftOut = 0 }: { summary: GarminSummary; readings?: { key: string; n: number } | null; leftOut?: number } = $props();
 	const pageSize = 50;
 	let shown = $state(pageSize);
 	let list = $state<HTMLUListElement>();
@@ -22,6 +23,7 @@
 	<div>{tp('i2_garmin_imported', summary.files_imported)}</div>
 	{#if readings}<div>{tp(readings.key, readings.n)}</div>{/if}
 	{#if summary.gps_left_out}<div class="dim">{t('i2_garmin_gps')}</div>{/if}
+	{#if leftOut}<div class="dim">{tp('i2_fitbit_rows_left_out', leftOut)}</div>{/if}
 	{#if summary.not_imported.length}
 		<details>
 			<summary>{tp('i2_garmin_omitted', summary.not_imported.length)}</summary>
