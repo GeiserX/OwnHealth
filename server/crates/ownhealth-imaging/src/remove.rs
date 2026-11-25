@@ -4,8 +4,10 @@
 //! in review and none of them reaches the record. Its zip stays a blob of that profile until the upload
 //! is removed: when the person closes (dismisses or rejects) the last held study of it, or through
 //! `DELETE /api/imaging/imports/{id}`. Either way the removal refuses while a study of the upload is
-//! on the record (`imaging_import_study`), or while its import is queued or running; a close that
-//! found the import running is settled again when that import ends ([`settle_after_import`]). The upload row
+//! on the record (`imaging_import_study`; for an upload from before that table, while its profile has
+//! any recorded study), or while its import is queued or running. A close that found the import
+//! running is settled again when that import ends ([`settle_after_import`]), and the hourly sweep
+//! settles any upload such a close left ([`settle_left_behind`]). The upload row
 //! goes at once; the `imaging.release_upload` job then removes the zip, once no row of the profile
 //! names those bytes (and the plain copy once no row names them at all: the same check as a profile
 //! delete, `household::BLOB_COLUMNS`), waiting while a backup copies the files
@@ -27,7 +29,7 @@ use ownhealth_core::jobs::{EnqueueOptions, HandlerResult, Job, JobContext, JobEr
 use ownhealth_core::review::ReviewItem;
 use ownhealth_core::{Error, Result};
 use serde_json::json;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::import::{JOB as IMPORT_JOB, REVIEW_KIND};
@@ -92,9 +94,13 @@ async fn remove_except(
     if locked.is_none() {
         return Ok(Removal::Gone);
     }
+    // An upload from before `imaging_import_study` (migration 1234) can hold part of a recorded study
+    // with no link (a second disc that added a series): it stays while its profile has one.
     let recorded: bool = sqlx::query_scalar(
         "select exists (select 1 from imaging_import_study where import_id = $1) \
-         or exists (select 1 from imaging_study where import_id = $1)",
+         or exists (select 1 from imaging_study where import_id = $1) \
+         or exists (select 1 from imaging_import i join imaging_study s on s.profile_id = i.profile_id \
+         where i.id = $1 and not i.links_complete)",
     )
     .bind(import_id)
     .fetch_one(&mut *conn)
@@ -135,13 +141,20 @@ async fn remove_except(
         .execute(&mut *conn)
         .await?;
     let key = format!("{RELEASE_JOB}:{profile_id}:{sha}");
-    enqueue(
-        &mut *conn,
-        RELEASE_JOB,
-        &json!({"profile_id": profile_id.to_string(), "zip_sha256": sha}),
-        EnqueueOptions::dedupe(&key),
-    )
-    .await?;
+    let payload = json!({"profile_id": profile_id.to_string(), "zip_sha256": sha});
+    if enqueue(&mut *conn, RELEASE_JOB, &payload, EnqueueOptions::dedupe(&key))
+        .await?
+        .is_none()
+    {
+        // A release of the same zip that is still marked running may have read the rows already (and
+        // found this upload naming the bytes): it would end without seeing this removal. Free its key,
+        // so this removal queues a release of its own. A queued one reads the rows later, and is enough.
+        sqlx::query("update job set dedupe_key = null where dedupe_key = $1 and state = 'running'")
+            .bind(&key)
+            .execute(&mut *conn)
+            .await?;
+        enqueue(&mut *conn, RELEASE_JOB, &payload, EnqueueOptions::dedupe(&key)).await?;
+    }
     Ok(Removal::Removed { dismissed: open.len() })
 }
 
@@ -182,6 +195,32 @@ pub async fn settle_after_import(conn: &mut PgConnection, import_id: Uuid, own_j
         remove_except(conn, import_id, None, false, Some(own_job)).await?,
         Removal::Removed { .. }
     ))
+}
+
+/// For the hourly sweep: removes, each in a transaction of its own, every upload a close left behind.
+/// A close that found the upload's import running leaves the upload to that import
+/// ([`settle_after_import`]); when the import then fails for good, or its check ran before the close
+/// committed, nothing else would remove it. Each upload with a closed held study and none open is
+/// settled as that close would have settled it. The number removed.
+pub async fn settle_left_behind(pool: &PgPool) -> Result<usize> {
+    let left: Vec<Uuid> = sqlx::query_scalar(
+        "select i.id from imaging_import i where exists (select 1 from review_item r where r.kind = $1 \
+         and r.ref_table = 'imaging_import' and r.ref_id = i.id and r.status in ('dismissed', 'rejected')) \
+         and not exists (select 1 from review_item r where r.kind = $1 and r.ref_table = 'imaging_import' \
+         and r.ref_id = i.id and r.status = 'open') order by i.created_at, i.id",
+    )
+    .bind(REVIEW_KIND)
+    .fetch_all(pool)
+    .await?;
+    let mut removed = 0;
+    for import_id in left {
+        let mut tx = pool.begin().await?;
+        if matches!(remove(&mut tx, import_id, None, false).await?, Removal::Removed { .. }) {
+            removed += 1;
+        }
+        tx.commit().await?;
+    }
+    Ok(removed)
 }
 
 /// After a held study was dismissed or rejected, in the same transaction: removes its upload when

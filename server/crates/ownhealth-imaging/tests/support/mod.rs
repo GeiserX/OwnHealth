@@ -368,6 +368,8 @@ pub struct FakeOrthanc {
     pub down: Arc<AtomicBool>,
     /// A delete of this study answers 500 every time, as an Orthanc that cannot remove one resource.
     pub fail_study_delete: Arc<Mutex<Option<String>>>,
+    /// A delete of the series with this SeriesInstanceUID answers 500 every time.
+    pub fail_series_delete: Arc<Mutex<Option<String>>>,
 }
 
 fn json_answer(status: StatusCode, v: Value) -> Response {
@@ -402,6 +404,7 @@ impl FakeOrthanc {
             after_store: Arc::default(),
             down: Arc::default(),
             fail_study_delete: Arc::default(),
+            fail_series_delete: Arc::default(),
         };
         let me = fake.clone();
         let app = Router::new().fallback(move |req: Request| {
@@ -654,8 +657,19 @@ impl FakeOrthanc {
             }
             (Method::DELETE, p) if p.starts_with("/series/") => {
                 let id = p.trim_start_matches("/series/");
+                let fail = self.fail_series_delete.lock().ok().and_then(|f| f.clone());
                 if let Ok(mut h) = self.held.lock() {
                     let studies = h.studies.clone();
+                    if let Some(fail) = fail
+                        && h.instances.values().any(|(study, series)| {
+                            *series == fail
+                                && studies
+                                    .get(study)
+                                    .is_some_and(|(uid, patient)| orthanc_id(&[patient, uid, series]) == id)
+                        })
+                    {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
                     let gone: Vec<(String, String)> = h
                         .instances
                         .iter()

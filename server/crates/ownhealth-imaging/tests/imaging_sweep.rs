@@ -1001,10 +1001,7 @@ async fn a_study_recorded_before_the_upload_links_rebuilds_from_every_upload_tha
     let (later, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
     e.import().await?;
     // as migration 1234 left a study recorded before it: linked to its first upload only
-    sqlx::query("delete from imaging_import_study where import_id = $1")
-        .bind(later.import_id)
-        .execute(&e.rt.pool)
-        .await?;
+    as_before_the_links(&e, &[later.import_id]).await?;
     let link = format!(
         "select count(*) from imaging_import_study where study_instance_uid = '{U1}' and import_id = '{}'",
         later.import_id
@@ -1070,6 +1067,7 @@ async fn an_upload_replayed_for_one_study_is_read_again_for_another_study_it_hol
     let (x, _) = e.upload("alex", &disc).await?;
     e.import().await?;
     // as migration 1234 left it: the disc is linked to U1 only
+    as_before_the_links(&e, &[]).await?;
     sqlx::query("delete from imaging_import_study where import_id = $1 and study_instance_uid = $2")
         .bind(x.import_id)
         .bind(U2)
@@ -1165,10 +1163,7 @@ async fn a_rebuild_sends_nothing_from_an_upload_removed_while_it_waited() -> R {
     let (later, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
     e.import().await?;
     // a study recorded before the links: none at all, and the study names the first upload only
-    sqlx::query("delete from imaging_import_study where study_instance_uid = $1")
-        .bind(U1)
-        .execute(&e.rt.pool)
-        .await?;
+    as_before_the_links(&e, &[first.import_id, later.import_id]).await?;
     e.orthanc.wipe();
     let mut conn = e.rt.pool.acquire().await?;
     assert!(rebuild::enqueue(&mut conn, e.fam.profile("alex")).await?.is_some());
@@ -1181,10 +1176,12 @@ async fn a_rebuild_sends_nothing_from_an_upload_removed_while_it_waited() -> R {
         until_waiting(&e, &rebuilding).await?,
         "the rebuild did not wait for the UID lock"
     );
-    let mut tx = e.rt.pool.begin().await?;
-    let removed = remove::remove(&mut tx, later.import_id, Some(e.fam.user("alex")), false).await?;
-    assert_eq!(removed, Removal::Removed { dismissed: 0 });
-    tx.commit().await?;
+    // the later upload's row goes (a removal refuses an upload from before the links while its
+    // profile has a recorded study, so this stands for any delete of the row)
+    sqlx::query("delete from imaging_import where id = $1")
+        .bind(later.import_id)
+        .execute(&e.rt.pool)
+        .await?;
     hold.commit().await?;
     assert_eq!(rebuilding.await??, 1);
     let (state, rebuilt) = e.result(rebuild::JOB).await?;
@@ -1317,11 +1314,229 @@ async fn an_upload_whose_stored_zip_went_before_it_was_recorded_records_nothing(
             panic!("an upload whose zip is gone was recorded: {other:?}");
         }
     }
+    // nothing was written before the refusal: the rollback below would hide it
+    let uploads: i64 = sqlx::query_scalar("select count(*) from imaging_import")
+        .fetch_one(&mut *tx)
+        .await?;
+    let imports: i64 = sqlx::query_scalar("select count(*) from job where kind = 'import.dicom'")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!((uploads, imports), (0, 0), "the refused upload wrote first");
     tx.rollback().await?;
     assert_eq!(e.count("select count(*) from imaging_import").await?, 0);
     assert_eq!(
         e.count("select count(*) from job where kind = 'import.dicom'").await?,
         0
     );
+    Ok(())
+}
+
+/// As migration 1234 leaves an install: every upload from before it is marked as not linking all its
+/// studies, and `unlinked` ones (a second disc that added a series) have no link at all.
+async fn as_before_the_links(e: &Env, unlinked: &[Uuid]) -> R {
+    sqlx::query("update imaging_import set links_complete = false")
+        .execute(&e.rt.pool)
+        .await?;
+    sqlx::query("delete from imaging_import_study where import_id = any($1)")
+        .bind(unlinked)
+        .execute(&e.rt.pool)
+        .await?;
+    Ok(())
+}
+
+/// `DELETE /api/imaging/imports/{id}` as Alex, in a transaction of its own.
+async fn remove_now(e: &Env, import_id: Uuid) -> anyhow::Result<Removal> {
+    let mut tx = e.rt.pool.begin().await?;
+    let r = remove::remove(&mut tx, import_id, Some(e.fam.user("alex")), true).await?;
+    tx.commit().await?;
+    Ok(r)
+}
+
+#[tokio::test]
+async fn an_upload_from_before_the_links_is_kept_while_its_profile_has_a_recorded_study() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&three, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (later, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
+    e.import().await?;
+    // a disc to the wrong profile, on a profile with no recorded study
+    let (stray, _) = e
+        .upload("lucia", &study_files(&Study::new(U3, CARMEN), "DICOM"))
+        .await?;
+    e.import().await?;
+    // the later disc added a series before migration 1234: nothing links it to U1
+    as_before_the_links(&e, &[later.import_id]).await?;
+    assert_eq!(remove_now(&e, later.import_id).await?, Removal::Recorded);
+    assert_eq!(
+        uploads_left(&e, &later).await?,
+        1,
+        "the upload of a recorded series went"
+    );
+    // where no study is recorded, an upload from before the links still goes
+    assert!(matches!(
+        remove_now(&e, stray.import_id).await?,
+        Removal::Removed { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_upload_a_close_left_while_its_import_ran_goes_at_the_next_sweep() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    let (up, sha) = e.upload("alex", &study_files(&Study::new(U3, CARMEN), "DICOM")).await?;
+    e.import().await?;
+    let held = e.in_review("alex").await?;
+    assert_eq!(held.len(), 1, "{held:?}");
+    let set_import = |state: &'static str| {
+        sqlx::query("update job set state = $3 where kind = $1 and payload->>'import_id' = $2")
+            .bind(JOB)
+            .bind(up.import_id.to_string())
+            .bind(state)
+    };
+    // a replay of the import runs when the person closes the study: the upload stays for it
+    set_import("running").execute(&e.rt.pool).await?;
+    let mut tx = e.rt.pool.begin().await?;
+    review::dismiss(&mut tx, held[0].0, e.fam.user("alex"), None).await?;
+    let it = item(&mut tx, held[0].0).await?;
+    assert!(
+        !remove::settle(&mut tx, &it).await?,
+        "the upload went while its import ran"
+    );
+    tx.commit().await?;
+    // that import then fails for good, so it never settles the upload itself
+    set_import("dead").execute(&e.rt.pool).await?;
+    let swept = e.sweep().await?;
+    assert_eq!(swept["settled_uploads"], 1, "{swept}");
+    assert_eq!(uploads_left(&e, &up).await?, 0);
+    assert_eq!(e.run(RELEASE_JOB).await?, 1);
+    assert!(!e.rt.blobs.exists(BlobOwner::Profile(alex), &sha), "the zip stayed");
+    // nothing more to settle at the next sweep
+    assert_eq!(e.sweep().await?["settled_uploads"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_rebuild_leaves_out_an_upload_whose_import_has_not_run() -> R {
+    let e = env().await?;
+    let four = Study {
+        series: 4,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&four, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (later, _) = e.upload("alex", &series_files(&four, &[2], "DICOM")).await?;
+    e.import().await?;
+    as_before_the_links(&e, &[later.import_id]).await?;
+    // a disc uploaded since, with a fourth series of the study: its import has not checked it yet
+    let (fresh, _) = e.upload("alex", &series_files(&four, &[3], "DICOM")).await?;
+
+    e.orthanc.wipe();
+    let rebuilt = sweep_and_rebuild(&e).await?;
+    assert_eq!(
+        (rebuilt["rebuilt"].clone(), rebuilt["missing"].clone()),
+        (1.into(), 0.into()),
+        "{rebuilt}"
+    );
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        (0..3).map(|s| four.series_uid(s)).collect(),
+        "a series from an upload whose import has not run reached Orthanc"
+    );
+    assert_eq!(links(&e, fresh.import_id, U1).await?, 0);
+    assert_eq!(links(&e, later.import_id, U1).await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_removal_while_a_release_of_the_same_zip_runs_queues_a_release_of_its_own() -> R {
+    let e = env().await?;
+    let alex = e.fam.profile("alex");
+    let files = study_files(&Study::new(U3, CARMEN), "DICOM");
+    let (first, sha) = e.upload("alex", &files).await?;
+    e.import().await?;
+    assert!(matches!(
+        remove_now(&e, first.import_id).await?,
+        Removal::Removed { .. }
+    ));
+    // the same disc again, then the first removal's release runs: the new upload names the bytes
+    let (again, same) = e.upload("alex", &files).await?;
+    assert_eq!(same, sha);
+    e.import().await?;
+    let kinds = [RELEASE_JOB.to_string()];
+    let claimed = jobs::claim(&e.rt.pool, "core", "release-test", Some(&kinds))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no release queued"))?;
+    let release_id = claimed.id;
+    let kept = remove::release(e.ctx.clone(), claimed).await?;
+    assert_eq!(kept, Some(serde_json::json!({"released": false})));
+    // before that release is marked done, the new upload is removed too
+    assert!(matches!(
+        remove_now(&e, again.import_id).await?,
+        Removal::Removed { .. }
+    ));
+    let queued = format!("select count(*) from job where kind = '{RELEASE_JOB}' and state = 'queued'");
+    assert_eq!(e.count(&queued).await?, 1, "the removal queued no release of the zip");
+    sqlx::query("update job set state = 'done', finished_at = now() where id = $1")
+        .bind(release_id)
+        .execute(&e.rt.pool)
+        .await?;
+    assert_eq!(e.run(RELEASE_JOB).await?, 1);
+    assert!(!e.rt.blobs.exists(BlobOwner::Profile(alex), &sha), "the zip stayed");
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_series_orthanc_cannot_delete_neither_keeps_the_next_one_nor_passes_unseen() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    e.upload("alex", &series_files(&three, &[0], "DICOM")).await?;
+    e.import().await?;
+    // two series under the recorded study that no record counts
+    let client = Orthanc::new(e.orthanc.config())?;
+    client.store(support::image(&three, 1, 0, EXPLICIT_LE)).await?;
+    client.store(support::image(&three, 2, 0, EXPLICIT_LE)).await?;
+    let id = e
+        .recorded(U1)
+        .await?
+        .and_then(|r| r.1)
+        .ok_or_else(|| anyhow::anyhow!("not recorded"))?;
+    let listed = client
+        .series_ids(&id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Orthanc lacks the study"))?;
+    // the first of them the sweep reaches always fails to go
+    let counted = three.series_uid(0);
+    let failing = listed
+        .into_iter()
+        .map(|(_, uid)| uid)
+        .find(|uid| *uid != counted)
+        .ok_or_else(|| anyhow::anyhow!("no uncounted series"))?;
+    if let Ok(mut f) = e.orthanc.fail_series_delete.lock() {
+        *f = Some(failing.clone());
+    }
+    let mut conn = e.rt.pool.acquire().await?;
+    sweep::enqueue(&mut conn).await?;
+    drop(conn);
+    assert_eq!(e.run(sweep::JOB).await?, 1);
+    assert_eq!(
+        e.orthanc.series_under(U1),
+        [counted, failing].into_iter().collect(),
+        "one failing series kept the next one"
+    );
+    let (state, error): (String, Option<String>) =
+        sqlx::query_as("select state, last_error from job where kind = $1 order by id desc limit 1")
+            .bind(sweep::JOB)
+            .fetch_one(&e.rt.pool)
+            .await?;
+    assert_eq!(state, "queued", "{error:?}");
+    assert!(error.is_some(), "no error recorded");
     Ok(())
 }

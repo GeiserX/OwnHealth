@@ -4,6 +4,9 @@
 //! it. This job brings Orthanc back to the record instead, at every start of the app, every hour, and
 //! right after a profile delete. It works whether Orthanc was down at the delete or not:
 //!
+//! 0. An upload whose last held study a person closed while its import ran, and which that import did
+//!    not remove (it failed for good, or its check came first), is removed as the close would have
+//!    ([`crate::remove::settle_left_behind`]). This needs no Orthanc.
 //! 1. The POST journal of an upload that is gone (its profile was purged while an Orthanc POST lost
 //!    its reply, and no job of it runs again) is drained: its new instances are taken back.
 //! 2. Every Orthanc study that no `imaging_study.orthanc_id` names is deleted. A retracted study keeps
@@ -98,17 +101,24 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         return Ok(Some(json!({"skipped": "imaging_off"})));
     };
     let orthanc = Orthanc::new(config).map_err(retry)?;
+    // 0. the uploads a close left behind
+    let settled = crate::remove::settle_left_behind(&ctx.pool).await?;
     let held = match orthanc.study_ids().await {
         Ok(held) => held,
         Err(e) => {
             tracing::warn!(error = %e, "the imaging sweep stopped: Orthanc did not answer");
             // a sweep that was itself the retry leaves the rest to the hourly one
             let again = job.payload.get("retry") != Some(&Value::Bool(true)) && retry_later(&ctx).await?;
-            return Ok(Some(json!({"skipped": "orthanc_unreachable", "retry_queued": again})));
+            return Ok(Some(json!({
+                "skipped": "orthanc_unreachable",
+                "retry_queued": again,
+                "settled_uploads": settled,
+            })));
         }
     };
     let mut failed = Failed::default();
-    let done = sweep(&ctx, &orthanc, &held, &mut failed).await?;
+    let mut done = sweep(&ctx, &orthanc, &held, &mut failed).await?;
+    done["settled_uploads"] = json!(settled);
     match failed.first {
         None => Ok(Some(done)),
         Some(first) => Err(JobError::typed(
@@ -307,15 +317,25 @@ async fn check_recorded(
         .fetch_optional(&mut *tx)
         .await?;
     let mut removed = 0;
+    // one series Orthanc cannot delete does not keep the others: each is tried, then the first
+    // failure fails this study's step, so the job retries
+    let mut first_failure = None;
     if let Some(fhir) = fhir {
         let counted = recorded_series(&fhir);
         for (series_id, uid) in &series {
             if !counted.contains(uid) {
-                orthanc.delete_series(series_id).await.map_err(retry)?;
-                removed += 1;
+                match orthanc.delete_series(series_id).await.map_err(retry) {
+                    Ok(_) => removed += 1,
+                    Err(e) => {
+                        first_failure.get_or_insert(e);
+                    }
+                }
             }
         }
     }
     tx.commit().await?;
+    if let Some(e) = first_failure {
+        return Err(e);
+    }
     Ok((lacking, removed))
 }

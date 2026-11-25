@@ -9,10 +9,12 @@
 //! The job replays, for each such study, every upload that holds it (`imaging_import_study`): a
 //! second disc can add series to a recorded study, so the first upload alone is not enough. A study
 //! recorded before that table names only its first upload; when one is still short after those
-//! replays, every upload of the profile not yet replayed for it is read for its UID too, and each one
-//! that holds it is linked. An upload whose part of the study waits in review, or was dismissed or
-//! rejected there, sends nothing of it. It sends
-//! each file of the study under the one StudyInstanceUID lock every Orthanc writer takes
+//! replays, every upload of the profile from before that table (`links_complete` false) whose import
+//! is not queued or running, and that was not yet replayed for it, is read for its UID too, and each
+//! one that holds it is linked. A later upload is linked by its own import, so an unlinked one (its
+//! import has not run yet) is never read for a study. An upload whose part of the study waits in
+//! review, or was dismissed or rejected there, sends nothing of it. It sends each file of the study
+//! under the one StudyInstanceUID lock every Orthanc writer takes
 //! ([`ownhealth_core::orthanc::lock_study`]), after it reads the record again under that lock.
 //! Orthanc files a study by PatientID and UID, so the rebuilt study gets the id the record names; a
 //! file Orthanc files under another study is taken back at once. A retracted study is rebuilt too:
@@ -152,9 +154,10 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     }
     // A study recorded before `imaging_import_study` existed names only its first upload (migration
     // 1234 copied `imaging_study.import_id`), so a series a later upload added is not replayed above.
-    // When a study is still short, every upload of the profile is read for its UID too (an upload
-    // replayed above for one study can hold an unlinked part of another), skipping only the pairs
-    // already replayed, and each one that held it is linked to it.
+    // When a study is still short, every upload of the profile from before that table is read for its
+    // UID too (an upload replayed above for one study can hold an unlinked part of another), skipping
+    // the pairs already replayed and an upload whose import is queued or running, and each one that
+    // held it is linked to it. A later upload holds no study its import did not link.
     let mut short: BTreeSet<String> = BTreeSet::new();
     for (uid, (id, fhir)) in &needed {
         if !complete(&orthanc, id, fhir).await? {
@@ -162,11 +165,15 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         }
     }
     if !short.is_empty() {
-        let all: Vec<(Uuid, Vec<u8>)> =
-            sqlx::query_as("select id, zip_blob from imaging_import where profile_id = $1 order by created_at, id")
-                .bind(profile_id)
-                .fetch_all(&ctx.pool)
-                .await?;
+        let all: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+            "select i.id, i.zip_blob from imaging_import i where i.profile_id = $1 and not i.links_complete \
+             and not exists (select 1 from job j where j.kind = $2 and j.state in ('queued', 'running') \
+             and j.payload->>'import_id' = i.id::text) order by i.created_at, i.id",
+        )
+        .bind(profile_id)
+        .bind(crate::import::JOB)
+        .fetch_all(&ctx.pool)
+        .await?;
         for (import_id, zip) in all {
             let holds: BTreeSet<String> = match replayed.get(&import_id) {
                 Some(done) => short.difference(done).cloned().collect(),

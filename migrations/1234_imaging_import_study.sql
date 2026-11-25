@@ -16,6 +16,13 @@ create index on imaging_import_study (import_id);
 insert into imaging_import_study (import_id, study_instance_uid)
   select import_id, study_instance_uid from imaging_study where import_id is not null;
 
+-- Whether this upload's import linked every recorded study it holds. An upload from before this table
+-- (false) can hold part of a recorded study with no row above: a second disc that added a series. Its
+-- removal is refused while its profile has a recorded study, and only such an upload is read for an
+-- unlinked part when a rebuild comes up short. Every later upload is linked by its own import.
+alter table imaging_import add column links_complete boolean not null default false;
+alter table imaging_import alter column links_complete set default true;
+
 -- A study retracted with its report document keeps the status it had (current or provisional), so
 -- reactivating that document gives it back (core documents::create_document) instead of making a
 -- provisional study current.
