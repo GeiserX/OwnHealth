@@ -152,7 +152,10 @@ fn quoted(msg: &str) -> Option<&str> {
 /// An https address with a host and no user name or password.
 fn https(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|u| {
-        u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty()) && u.username().is_empty() && u.password().is_none()
+        u.scheme() == "https"
+            && u.host_str().is_some_and(|h| !h.is_empty())
+            && u.username().is_empty()
+            && u.password().is_none()
     })
 }
 
@@ -182,8 +185,7 @@ fn launch_scopes(kind: &str) -> Vec<Vec<String>> {
 fn check_vendor(v: &Vendor) -> Result<(), (&'static str, String)> {
     let key_ok = !v.key.is_empty()
         && v.key.len() <= 40
-        && v
-            .key
+        && v.key
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     if !key_ok {
@@ -194,10 +196,16 @@ fn check_vendor(v: &Vendor) -> Result<(), (&'static str, String)> {
         return Err(("name:", "name must have 1 to 60 characters and no outer spaces".into()));
     }
     if oauth::kind_spec(&v.kind).is_none() {
-        return Err(("kind:", format!("{:?} is not a connection kind (smart, bluebutton)", v.kind)));
+        return Err((
+            "kind:",
+            format!("{:?} is not a connection kind (smart, bluebutton)", v.kind),
+        ));
     }
     if !oauth::client_fits(&v.kind, &v.key) {
-        return Err(("kind:", format!("a {} connection cannot use a {:?} client", v.kind, v.key)));
+        return Err((
+            "kind:",
+            format!("a {} connection cannot use a {:?} client", v.kind, v.key),
+        ));
     }
     if v.kind == "bluebutton" && v.client_type != ClientType::Confidential {
         return Err(("client_type:", "Blue Button takes only a confidential client".into()));
@@ -227,7 +235,10 @@ fn check_vendor(v: &Vendor) -> Result<(), (&'static str, String)> {
         return Err(("unused_expiry_days", "unused_expiry_days must be 1 to 3650".into()));
     }
     if v.access_token_seconds.is_some_and(|s| !(60..=86_400).contains(&s)) {
-        return Err(("access_token_seconds:", "access_token_seconds must be 60 to 86400".into()));
+        return Err((
+            "access_token_seconds:",
+            "access_token_seconds must be 60 to 86400".into(),
+        ));
     }
     let documented = v.refresh.rotation != Rotation::Unknown
         || v.refresh.unused_expiry_days.is_some()
@@ -300,7 +311,16 @@ mod tests {
         let keys: Vec<&str> = p.vendors.iter().map(|v| v.key.as_str()).collect();
         assert_eq!(
             keys,
-            ["epic", "oracle", "athena", "healow", "nextgen", "meditech", "va", "bluebutton"]
+            [
+                "epic",
+                "oracle",
+                "athena",
+                "healow",
+                "nextgen",
+                "meditech",
+                "va",
+                "bluebutton"
+            ]
         );
         assert!(p.vendors.iter().all(|v| !v.verified_live));
         assert!(check().is_ok());
@@ -341,11 +361,31 @@ mod tests {
     fn a_bad_file_names_its_line() {
         // a value of the wrong kind, an unknown field, a bad URL, a write scope, a wrong number
         let cases = [
-            ("refresh: {rotation: none, unused_expiry_days: 90}", "refresh: {rotation: sometimes, unused_expiry_days: 90}", "sometimes"),
-            ("access_token_seconds: 570", "access_token_seconds: 570\n    colour: red", "colour"),
-            ("registration: https://code-console.cerner.com/", "registration: http://code-console.cerner.com/", "http://code-console"),
-            ("servers: [https://api.va.gov/services/fhir/v0/r4]", "servers: [ftp://api.va.gov/fhir]", "ftp://"),
-            ("refresh: {rotation: unknown, unused_expiry_days: 42}", "refresh: {rotation: unknown, unused_expiry_days: 0}", "unused_expiry_days: 0"),
+            (
+                "refresh: {rotation: none, unused_expiry_days: 90}",
+                "refresh: {rotation: sometimes, unused_expiry_days: 90}",
+                "sometimes",
+            ),
+            (
+                "access_token_seconds: 570",
+                "access_token_seconds: 570\n    colour: red",
+                "colour",
+            ),
+            (
+                "registration: https://code-console.cerner.com/",
+                "registration: http://code-console.cerner.com/",
+                "http://code-console",
+            ),
+            (
+                "servers: [https://api.va.gov/services/fhir/v0/r4]",
+                "servers: [ftp://api.va.gov/fhir]",
+                "ftp://",
+            ),
+            (
+                "refresh: {rotation: unknown, unused_expiry_days: 42}",
+                "refresh: {rotation: unknown, unused_expiry_days: 0}",
+                "unused_expiry_days: 0",
+            ),
             ("    kind: bluebutton\n", "    kind: dexcom\n", "kind: dexcom"),
         ];
         for (from, to, needle) in cases {
@@ -358,7 +398,10 @@ mod tests {
         let text = edit("patient/Observation.rs,", "patient/Observation.cud,");
         let err = parse(&text).expect_err("a write scope");
         assert!(err.contains("not a read-only scope"), "{err}");
-        assert!(err.starts_with(&format!("{FILE} line {}:", line_holding(&text, "Observation.cud"))), "{err}");
+        assert!(
+            err.starts_with(&format!("{FILE} line {}:", line_holding(&text, "Observation.cud"))),
+            "{err}"
+        );
         // a broken document: serde_yaml's own line
         let text = SHIPPED.replacen("vendors:\n", "vendors:\n  - [\n", 1);
         let err = parse(&text).expect_err("broken yaml");
@@ -368,9 +411,15 @@ mod tests {
     #[test]
     fn the_scopes_must_be_the_ones_the_launch_asks_for() {
         // one type missing: the person would register less than the launch asks
-        let text = edit(" patient/Procedure.rs]\n    refresh: {rotation: unknown, unused_expiry_days: null}\n    access_token_seconds: null\n    verified_live: false\n  oracle:", " patient/Observation.rs]\n    refresh: {rotation: unknown, unused_expiry_days: null}\n    access_token_seconds: null\n    verified_live: false\n  oracle:");
+        let text = edit(
+            " patient/Procedure.rs]\n    refresh: {rotation: unknown, unused_expiry_days: null}\n    access_token_seconds: null\n    verified_live: false\n  oracle:",
+            " patient/Observation.rs]\n    refresh: {rotation: unknown, unused_expiry_days: null}\n    access_token_seconds: null\n    verified_live: false\n  oracle:",
+        );
         let err = parse(&text).expect_err("a scope left out");
-        assert!(err.contains("epic: ") && err.contains("exactly the ones the launch asks for"), "{err}");
+        assert!(
+            err.contains("epic: ") && err.contains("exactly the ones the launch asks for"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -380,8 +429,14 @@ mod tests {
             "",
         );
         let err = parse(&text).expect_err("no source");
-        assert!(err.contains("va: a vendor with token values names its sources"), "{err}");
-        let text = edit("    kind: bluebutton\n    client_type: confidential", "    kind: bluebutton\n    client_type: public");
+        assert!(
+            err.contains("va: a vendor with token values names its sources"),
+            "{err}"
+        );
+        let text = edit(
+            "    kind: bluebutton\n    client_type: confidential",
+            "    kind: bluebutton\n    client_type: public",
+        );
         assert!(parse(&text).expect_err("public bb").contains("confidential"));
     }
 }

@@ -25,7 +25,9 @@ fn the_directory_and_the_profiles_name_the_same_vendors() {
     for (vendor, _, endpoint) in SINGLES {
         let v = file.get(vendor).unwrap_or_else(|| panic!("{vendor} has no profile"));
         assert!(
-            v.servers.iter().any(|s| s.trim_end_matches('/') == endpoint.trim_end_matches('/')),
+            v.servers
+                .iter()
+                .any(|s| s.trim_end_matches('/') == endpoint.trim_end_matches('/')),
             "{vendor}: the directory's {endpoint} is not among {:?}",
             v.servers
         );

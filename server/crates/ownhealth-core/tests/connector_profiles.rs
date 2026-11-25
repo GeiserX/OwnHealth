@@ -210,7 +210,11 @@ async fn every_recorded_vendor_connects_and_refreshes_the_way_its_profile_says()
         let (access, grant) = v.dates(id).await?;
         let lasts = v.expires_in("code").expect("the recorded answer names expires_in");
         assert_eq!(access, Some(t0() + Duration::seconds(lasts)), "{key}: access token");
-        assert_eq!(grant, v.grant_after(t0()), "{key}: the sign-in ends as the profile says");
+        assert_eq!(
+            grant,
+            v.grant_after(t0()),
+            "{key}: the sign-in ends as the profile says"
+        );
 
         // two days later the access token is long gone: a refresh
         let t1 = t0() + Duration::days(2);
@@ -225,7 +229,11 @@ async fn every_recorded_vendor_connects_and_refreshes_the_way_its_profile_says()
             assert!(v.fake.book().live.contains(&first), "{key}");
         }
         let (_, grant) = v.dates(id).await?;
-        assert_eq!(grant, v.grant_after(t1), "{key}: each refresh starts the unused count again");
+        assert_eq!(
+            grant,
+            v.grant_after(t1),
+            "{key}: each refresh starts the unused count again"
+        );
 
         // and the next day's refresh works with whatever is held
         v.refresh(id, t1 + Duration::days(1)).await?;

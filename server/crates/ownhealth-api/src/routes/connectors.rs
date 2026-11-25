@@ -647,8 +647,12 @@ async fn save_client(
     let vendor = file
         .get(b.vendor.trim())
         .ok_or_else(|| unfit("unknown_vendor", "OwnHealth has no profile for this vendor."))?;
-    let client_id = pasted(&b.client_id, 200)
-        .ok_or_else(|| unfit("bad_client_id", "The client id must have 1 to 200 characters, on one line."))?;
+    let client_id = pasted(&b.client_id, 200).ok_or_else(|| {
+        unfit(
+            "bad_client_id",
+            "The client id must have 1 to 200 characters, on one line.",
+        )
+    })?;
     let secret = match b.client_secret.as_deref().filter(|s| !s.trim().is_empty()) {
         None => None,
         Some(s) => Some(pasted(s, 1000).ok_or_else(|| {
@@ -682,16 +686,25 @@ async fn save_client(
         .map(String::from);
     let issuer = if vendor.kind == "bluebutton" {
         // production unless the sandbox (or a test's loopback v3 base) is named
-        let spec = oauth::kind_spec("bluebutton").ok_or_else(|| Error::NotFound("Blue Button is not available.".into()))?;
-        let base = given.or_else(|| spec.default_issuer.map(String::from)).unwrap_or_default();
+        let spec =
+            oauth::kind_spec("bluebutton").ok_or_else(|| Error::NotFound("Blue Button is not available.".into()))?;
+        let base = given
+            .or_else(|| spec.default_issuer.map(String::from))
+            .unwrap_or_default();
         if !oauth::bluebutton_base(&base, &egress) {
-            return Err(unfit("bad_issuer", "Choose the CMS Blue Button v3 production or sandbox server."));
+            return Err(unfit(
+                "bad_issuer",
+                "Choose the CMS Blue Button v3 production or sandbox server.",
+            ));
         }
         Some(base)
     } else {
         match given {
             Some(i) if oauth::authority(&i).is_none() || !oauth::safe_endpoint(&i, &egress) => {
-                return Err(unfit("bad_issuer", "The server address is not a secure web address (https)."));
+                return Err(unfit(
+                    "bad_issuer",
+                    "The server address is not a secure web address (https).",
+                ));
             }
             None if vendor.client_type == ClientType::Confidential => {
                 return Err(unfit(

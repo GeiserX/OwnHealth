@@ -69,18 +69,37 @@ async fn the_wizard_reads_every_vendor_profile_with_this_instances_redirect_uri(
     let keys: Vec<&str> = vendors.iter().filter_map(|v| v["key"].as_str()).collect();
     assert_eq!(
         keys,
-        ["epic", "oracle", "athena", "healow", "nextgen", "meditech", "va", "bluebutton"]
+        [
+            "epic",
+            "oracle",
+            "athena",
+            "healow",
+            "nextgen",
+            "meditech",
+            "va",
+            "bluebutton"
+        ]
     );
     for v in &vendors {
         assert_eq!(v["verified_live"], false, "{v}");
         assert!(v["scopes"].as_array().is_some_and(|s| !s.is_empty()), "{v}");
-        assert!(v["registration"].as_str().is_some_and(|u| u.starts_with("https://")), "{v}");
+        assert!(
+            v["registration"].as_str().is_some_and(|u| u.starts_with("https://")),
+            "{v}"
+        );
     }
     let va = vendors.iter().find(|v| v["key"] == "va").cloned().unwrap_or_default();
     assert_eq!(va["refresh"]["unused_expiry_days"], 42);
     assert_eq!(va["client_type"], "confidential");
-    let oracle = vendors.iter().find(|v| v["key"] == "oracle").cloned().unwrap_or_default();
-    assert_eq!((oracle["client_type"].as_str(), oracle["refresh"]["rotation"].as_str()), (Some("public"), Some("none")));
+    let oracle = vendors
+        .iter()
+        .find(|v| v["key"] == "oracle")
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        (oracle["client_type"].as_str(), oracle["refresh"]["rotation"].as_str()),
+        (Some("public"), Some("none"))
+    );
 
     // a person who manages no profile reads no profile, lists no client and saves none
     sqlx::query("update profile_grant set role = 'viewer' where user_id = $1 and role in ('owner', 'guardian')")
@@ -128,7 +147,13 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
             client["confidential"].as_bool(),
             client["redirect_uri"].as_str()
         ),
-        (Some("healow"), Some(fake.issuer().as_str()), Some(CLIENT_ID), Some(true), Some(REDIRECT)),
+        (
+            Some("healow"),
+            Some(fake.issuer().as_str()),
+            Some(CLIENT_ID),
+            Some(true),
+            Some(REDIRECT)
+        ),
         "{client}"
     );
     let id: Uuid = client["id"].as_str().unwrap_or_default().parse()?;
@@ -142,16 +167,33 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
     .fetch_one(env.pool())
     .await?;
     assert_eq!(purpose, "connector_client_secret");
-    assert!(!sealed.windows(CLIENT_SECRET.len()).any(|w| w == CLIENT_SECRET.as_bytes()));
+    assert!(
+        !sealed
+            .windows(CLIENT_SECRET.len())
+            .any(|w| w == CLIENT_SECRET.as_bytes())
+    );
     let listed = c.get("/api/connectors/clients").await?;
     assert_eq!(listed.status, StatusCode::OK);
-    assert_eq!(listed.json["clients"].as_array().map(Vec::len), Some(1), "{}", listed.json);
+    assert_eq!(
+        listed.json["clients"].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        listed.json
+    );
     no_secret("list", &listed.json.to_string(), &[CLIENT_SECRET]);
     assert_eq!(
-        count(&env, "select count(*) from audit_event where action = 'connector.client'").await?,
+        count(
+            &env,
+            "select count(*) from audit_event where action = 'connector.client'"
+        )
+        .await?,
         1
     );
-    no_secret("audit", &c.get("/api/audit?limit=200").await?.json.to_string(), &[CLIENT_SECRET]);
+    no_secret(
+        "audit",
+        &c.get("/api/audit?limit=200").await?.json.to_string(),
+        &[CLIENT_SECRET],
+    );
 
     // the launch takes it, and the fake vendor accepts the secret at its token endpoint
     let launch = c
@@ -162,15 +204,32 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
         .await?;
     assert_eq!(launch.status, StatusCode::OK, "{}", launch.json);
     let url = launch.json["authorize_url"].as_str().unwrap_or_default().to_string();
-    assert_eq!(param(&url, "redirect_uri").map(|r| r.contains("ownhealth.rivera.example")), Some(true), "{url}");
+    assert_eq!(
+        param(&url, "redirect_uri").map(|r| r.contains("ownhealth.rivera.example")),
+        Some(true),
+        "{url}"
+    );
     let code = fake.consent(&url);
     let state = param(&url, "state").unwrap_or_default();
-    let back = c.get(&format!("/api/connectors/callback?state={state}&code={code}")).await?;
-    let connected = back.location().strip_prefix("/connections?connected=").map(String::from);
+    let back = c
+        .get(&format!("/api/connectors/callback?state={state}&code={code}"))
+        .await?;
+    let connected = back
+        .location()
+        .strip_prefix("/connections?connected=")
+        .map(String::from);
     assert!(connected.is_some(), "{}", back.location());
-    assert_eq!(fake.book().auth_seen, ["basic"], "a confidential client sends its secret");
     assert_eq!(
-        count(&env, &format!("select count(*) from source where connector_client_id = '{id}' and kind = 'smart'")).await?,
+        fake.book().auth_seen,
+        ["basic"],
+        "a confidential client sends its secret"
+    );
+    assert_eq!(
+        count(
+            &env,
+            &format!("select count(*) from source where connector_client_id = '{id}' and kind = 'smart'")
+        )
+        .await?,
         1
     );
 
@@ -187,11 +246,21 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
         )
         .await?;
     assert_eq!(again.status, StatusCode::OK, "{}", again.json);
-    assert_eq!((again.json["replaced"].as_bool(), again.json["client"]["id"].as_str()), (Some(true), Some(id.to_string().as_str())));
-    assert_eq!(again.json["client"]["client_id"], "fake-client-id-2");
-    assert_eq!(count(&env, &format!("select count(*) from secret where id = '{old}'")).await?, 0);
     assert_eq!(
-        count(&env, "select count(*) from secret where purpose = 'connector_client_secret'").await?,
+        (again.json["replaced"].as_bool(), again.json["client"]["id"].as_str()),
+        (Some(true), Some(id.to_string().as_str()))
+    );
+    assert_eq!(again.json["client"]["client_id"], "fake-client-id-2");
+    assert_eq!(
+        count(&env, &format!("select count(*) from secret where id = '{old}'")).await?,
+        0
+    );
+    assert_eq!(
+        count(
+            &env,
+            "select count(*) from secret where purpose = 'connector_client_secret'"
+        )
+        .await?,
         1
     );
     Ok(())
@@ -199,7 +268,11 @@ async fn a_confidential_client_is_saved_sealed_and_the_launch_connects_with_it()
 
 /// The code of a refused save.
 fn refusal(r: &support::Resp) -> String {
-    format!("{} {}", r.status.as_u16(), r.json["detail"]["code"].as_str().unwrap_or("-"))
+    format!(
+        "{} {}",
+        r.status.as_u16(),
+        r.json["detail"]["code"].as_str().unwrap_or("-")
+    )
 }
 
 #[tokio::test]
@@ -209,10 +282,19 @@ async fn each_vendor_takes_the_credential_and_the_server_its_profile_names() -> 
     let secret = "s3cret-pasted-by-mistake-not-real";
     let cases: [(Value, &str); 10] = [
         // Oracle's apps are public: a pasted secret is refused, never stored
-        (json!({"vendor": "oracle", "client_id": CLIENT_ID, "client_secret": secret}), "422 client_secret_unexpected"),
+        (
+            json!({"vendor": "oracle", "client_id": CLIENT_ID, "client_secret": secret}),
+            "422 client_secret_unexpected",
+        ),
         // healow's are confidential, each for one server
-        (json!({"vendor": "healow", "client_id": CLIENT_ID}), "422 client_secret_missing"),
-        (json!({"vendor": "healow", "client_id": CLIENT_ID, "client_secret": secret}), "422 issuer_required"),
+        (
+            json!({"vendor": "healow", "client_id": CLIENT_ID}),
+            "422 client_secret_missing",
+        ),
+        (
+            json!({"vendor": "healow", "client_id": CLIENT_ID, "client_secret": secret}),
+            "422 issuer_required",
+        ),
         (
             json!({"vendor": "healow", "client_id": CLIENT_ID, "client_secret": secret, "issuer": "http://fhir.labnorte.example/r4"}),
             "422 bad_issuer",
@@ -221,34 +303,59 @@ async fn each_vendor_takes_the_credential_and_the_server_its_profile_names() -> 
             json!({"vendor": "healow", "client_id": CLIENT_ID, "client_secret": secret, "issuer": "javascript:alert(1)"}),
             "422 bad_issuer",
         ),
-        (json!({"vendor": "labnorte-ehr", "client_id": CLIENT_ID}), "422 unknown_vendor"),
+        (
+            json!({"vendor": "labnorte-ehr", "client_id": CLIENT_ID}),
+            "422 unknown_vendor",
+        ),
         (json!({"vendor": "oracle", "client_id": "  "}), "422 bad_client_id"),
-        (json!({"vendor": "oracle", "client_id": "two\nlines"}), "422 bad_client_id"),
+        (
+            json!({"vendor": "oracle", "client_id": "two\nlines"}),
+            "422 bad_client_id",
+        ),
         (
             json!({"vendor": "bluebutton", "client_id": CLIENT_ID, "client_secret": secret, "issuer": "https://bluebutton.labnorte.example/v3/fhir"}),
             "422 bad_issuer",
         ),
         // a body of the wrong shape answers 422 without repeating the secret it carried
-        (json!({"vendor": "healow", "client_id": 7, "client_secret": secret}), "422 -"),
+        (
+            json!({"vendor": "healow", "client_id": 7, "client_secret": secret}),
+            "422 -",
+        ),
     ];
     for (body, want) in cases {
         let r = c.post("/api/connectors/clients", &body).await?;
         assert_eq!(refusal(&r), want, "{body}: {}", r.json);
         no_secret("a refusal", &r.json.to_string(), &[secret]);
     }
-    assert_eq!(count(&env, "select count(*) from secret").await?, 0, "no refusal kept a secret");
+    assert_eq!(
+        count(&env, "select count(*) from secret").await?,
+        0,
+        "no refusal kept a secret"
+    );
     assert_eq!(count(&env, "select count(*) from connector_client").await?, 0);
 
     // Oracle with no server: one client id for every Oracle server
     let r = c
-        .post("/api/connectors/clients", &json!({"vendor": "oracle", "client_id": CLIENT_ID}))
+        .post(
+            "/api/connectors/clients",
+            &json!({"vendor": "oracle", "client_id": CLIENT_ID}),
+        )
         .await?;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.json);
-    assert_eq!((r.json["client"]["issuer"].clone(), r.json["client"]["confidential"].clone()), (Value::Null, json!(false)));
+    assert_eq!(
+        (
+            r.json["client"]["issuer"].clone(),
+            r.json["client"]["confidential"].clone()
+        ),
+        (Value::Null, json!(false))
+    );
     // Blue Button: production unless the sandbox is named
     for (issuer, want) in [
         (Value::Null, "https://api.bluebutton.cms.gov/v3/fhir"),
-        (json!("https://sandbox.bluebutton.cms.gov/v3/fhir/"), "https://sandbox.bluebutton.cms.gov/v3/fhir"),
+        (
+            json!("https://sandbox.bluebutton.cms.gov/v3/fhir/"),
+            "https://sandbox.bluebutton.cms.gov/v3/fhir",
+        ),
     ] {
         let r = c
             .post(
