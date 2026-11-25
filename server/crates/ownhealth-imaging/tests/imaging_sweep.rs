@@ -1436,6 +1436,43 @@ async fn an_upload_from_before_the_links_is_kept_while_its_profile_has_a_recorde
 }
 
 #[tokio::test]
+async fn the_sweep_links_an_upload_from_before_the_links_so_one_with_no_recorded_part_can_go() -> R {
+    let e = env().await?;
+    let three = Study {
+        series: 3,
+        ..Study::new(U1, ALEX)
+    };
+    let (first, _) = e.upload("alex", &series_files(&three, &[0, 1], "DICOM")).await?;
+    e.import().await?;
+    let (later, _) = e.upload("alex", &series_files(&three, &[2], "DICOM")).await?;
+    e.import().await?;
+    // a disc to the wrong profile, on the profile that records U1: its study waits in review
+    let (stray, _) = e.upload("alex", &study_files(&Study::new(U3, CARMEN), "DICOM")).await?;
+    e.import().await?;
+    assert_eq!(e.in_review("alex").await?.len(), 1);
+    as_before_the_links(&e, &[later.import_id]).await?;
+    assert_eq!(remove_now(&e, stray.import_id).await?, Removal::Recorded);
+
+    // the sweep reads each upload from before the links and links the recorded studies it holds
+    let swept = e.sweep().await?;
+    assert!(
+        matches!(remove_now(&e, stray.import_id).await?, Removal::Removed { .. }),
+        "an upload with no recorded study still cannot go"
+    );
+    // the upload of a recorded series is linked to it now, and stays
+    assert_eq!(links(&e, later.import_id, U1).await?, 1);
+    assert_eq!(links(&e, first.import_id, U1).await?, 1);
+    assert_eq!(remove_now(&e, later.import_id).await?, Removal::Recorded);
+    assert_eq!(uploads_left(&e, &later).await?, 1);
+    assert_eq!(swept["links_completed"], 3, "{swept}");
+    let open = "select count(*) from imaging_import where not links_complete";
+    assert_eq!(e.count(open).await?, 0);
+    // nothing left to read at the next sweep
+    assert_eq!(e.sweep().await?["links_completed"], 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_upload_a_close_left_while_its_import_ran_goes_at_the_next_sweep() -> R {
     let e = env().await?;
     let alex = e.fam.profile("alex");

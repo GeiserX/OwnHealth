@@ -4,9 +4,12 @@
 //! it. This job brings Orthanc back to the record instead, at every start of the app, every hour, and
 //! right after a profile delete. It works whether Orthanc was down at the delete or not:
 //!
-//! 0. An upload whose last held study a person closed while its import ran, and which that import did
-//!    not remove (it failed for good, or its check came first), is removed as the close would have
-//!    ([`crate::remove::settle_left_behind`]). This needs no Orthanc.
+//! 0. Each upload from before `imaging_import_study` gets the links its import would have made, read
+//!    from its zip, and from then on is removed by the rules of a later upload
+//!    ([`crate::rebuild::complete_links`]). Then an upload whose last held study a person closed while
+//!    its import ran, and which that import did not remove (it failed for good, or its check came
+//!    first), is removed as the close would have ([`crate::remove::settle_left_behind`]). This needs
+//!    no Orthanc.
 //! 1. The POST journal of an upload that is gone (its profile was purged while an Orthanc POST lost
 //!    its reply, and no job of it runs again) is drained: its new instances are taken back.
 //! 2. Every Orthanc study that no `imaging_study.orthanc_id` names is deleted. A retracted study keeps
@@ -101,7 +104,8 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
         return Ok(Some(json!({"skipped": "imaging_off"})));
     };
     let orthanc = Orthanc::new(config).map_err(retry)?;
-    // 0. the uploads a close left behind
+    // 0. the links of the uploads from before them, then the uploads a close left behind
+    let links = crate::rebuild::complete_links(&ctx).await?;
     let settled = crate::remove::settle_left_behind(&ctx.pool).await?;
     let held = match orthanc.study_ids().await {
         Ok(held) => held,
@@ -112,12 +116,14 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
             return Ok(Some(json!({
                 "skipped": "orthanc_unreachable",
                 "retry_queued": again,
+                "links_completed": links,
                 "settled_uploads": settled,
             })));
         }
     };
     let mut failed = Failed::default();
     let mut done = sweep(&ctx, &orthanc, &held, &mut failed).await?;
+    done["links_completed"] = json!(links);
     done["settled_uploads"] = json!(settled);
     match failed.first {
         None => Ok(Some(done)),

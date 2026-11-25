@@ -212,6 +212,71 @@ pub async fn run(ctx: JobContext, job: Job) -> HandlerResult {
     })))
 }
 
+/// For the sweep: gives each upload from before `imaging_import_study` (`links_complete` false) whose
+/// import is not queued or running the links its import would have made, then marks its links
+/// complete, so its removal follows the rules of a later upload. Its zip is read for the studies it
+/// holds, and each one its profile records is linked, unless the upload's part of it waits in review
+/// or was dismissed or rejected there (the import did not record that part). It runs under the UID
+/// lock of each of those studies, so a study being recorded right now is counted. An upload whose zip
+/// does not open keeps its flag and is tried again at the next sweep. The number of uploads it
+/// completed.
+pub(crate) async fn complete_links(ctx: &JobContext) -> Result<usize, JobError> {
+    let legacy: Vec<(Uuid, Uuid, Vec<u8>)> = sqlx::query_as(
+        "select i.id, i.profile_id, i.zip_blob from imaging_import i where not i.links_complete \
+         and not exists (select 1 from job j where j.kind = $1 and j.state in ('queued', 'running') \
+         and j.payload->>'import_id' = i.id::text) order by i.created_at, i.id",
+    )
+    .bind(crate::import::JOB)
+    .fetch_all(&ctx.pool)
+    .await?;
+    let mut completed = 0;
+    for (import_id, profile_id, zip) in legacy {
+        let scan = match StudyFiles::open(&ctx.blobs, BlobOwner::Profile(profile_id), &hex::encode(&zip)).await {
+            Ok((_, scan)) => scan,
+            Err(e) => {
+                tracing::warn!(%import_id, error = %e.message, "an imaging upload does not open: its links stay incomplete");
+                continue;
+            }
+        };
+        let uids: Vec<String> = scan.studies.keys().cloned().collect();
+        let mut tx = ctx.pool.begin().await?;
+        for uid in &uids {
+            lock_study(&mut tx, uid).await?;
+        }
+        // a removal (`for update`) waits, then sees the links
+        let open: Option<bool> =
+            sqlx::query_scalar("select not links_complete from imaging_import where id = $1 for no key update")
+                .bind(import_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if open != Some(true) {
+            tx.commit().await?;
+            continue;
+        }
+        sqlx::query(
+            "insert into imaging_import_study (import_id, study_instance_uid) \
+             select $1, s.study_instance_uid from imaging_study s where s.profile_id = $2 \
+             and s.study_instance_uid = any($3) and not exists (select 1 from review_item r \
+             where r.kind = $4 and r.ref_table = 'imaging_import' and r.ref_id = $1 \
+             and r.payload->>'study_uid' = s.study_instance_uid and r.status <> 'accepted') \
+             on conflict do nothing",
+        )
+        .bind(import_id)
+        .bind(profile_id)
+        .bind(&uids)
+        .bind(REVIEW_KIND)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("update imaging_import set links_complete = true where id = $1")
+            .bind(import_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        completed += 1;
+    }
+    Ok(completed)
+}
+
 /// What the replays of one rebuild did.
 #[derive(Default)]
 struct Tally {

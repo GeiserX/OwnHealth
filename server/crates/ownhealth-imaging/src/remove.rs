@@ -5,7 +5,8 @@
 //! is removed: when the person closes (dismisses or rejects) the last held study of it, or through
 //! `DELETE /api/imaging/imports/{id}`. Either way the removal refuses while a study of the upload is
 //! on the record (`imaging_import_study`; for an upload from before that table, while its profile has
-//! any recorded study), or while its import is queued or running. A close that found the import
+//! any recorded study, until the sweep gives it its links: [`crate::rebuild::complete_links`]), or
+//! while its import is queued or running. A close that found the import
 //! running is settled again when that import ends ([`settle_after_import`]), and the hourly sweep
 //! settles any upload such a close left ([`settle_left_behind`]). The upload row
 //! goes at once; the `imaging.release_upload` job then removes the zip, once no row of the profile
@@ -95,7 +96,8 @@ async fn remove_except(
         return Ok(Removal::Gone);
     }
     // An upload from before `imaging_import_study` (migration 1234) can hold part of a recorded study
-    // with no link (a second disc that added a series): it stays while its profile has one.
+    // with no link (a second disc that added a series): it stays while its profile has one, until the
+    // sweep gives it its links (rebuild::complete_links).
     let recorded: bool = sqlx::query_scalar(
         "select exists (select 1 from imaging_import_study where import_id = $1) \
          or exists (select 1 from imaging_study where import_id = $1) \
