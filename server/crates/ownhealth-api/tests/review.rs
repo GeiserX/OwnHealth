@@ -531,3 +531,40 @@ async fn test_the_newest_fhir_import_is_named_however_many_dated_documents_come_
     assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
     Ok(())
 }
+
+/// A sync-gap alert names the vendor (a Dexcom alert says the person wears a CGM) and is closed for the
+/// whole household by a dismissal. Only who manages the profile, and so its connections, sees it.
+#[tokio::test]
+async fn test_a_sync_gap_alert_shows_only_to_who_manages_the_connection() -> R {
+    let a = app().await?;
+    let message = json!({"message": {"en": "Sync has stopped for Dexcom.", "es": "Se ha interrumpido la sincronización de Dexcom."}});
+    // alex is a caregiver on carmen: reads and reviews, never manages
+    let carmen = item(&a, "carmen", "source_gap", Some(message.clone()), json!({})).await?;
+    // alex guards lucía, who has no login: alex manages her connections
+    let lucia = item(&a, "lucia", "source_gap", Some(message), json!({})).await?;
+    let listed = |v: &Value, id: Uuid| {
+        v["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|i| i["id"] == json!(id))
+    };
+    let (s, v) = a.get("alex", "/review?profile=carmen").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!listed(&v, carmen), "{v}");
+    assert_eq!(
+        a.get("alex", &format!("/review/{carmen}")).await?.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        a.post("alex", &format!("/review/{carmen}/dismiss"), None).await?.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(status_of(&a, carmen).await?, "open");
+    let (s, v) = a.get("alex", "/review?profile=lucia").await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(listed(&v, lucia), "{v}");
+    let (s, v) = a.post("alex", &format!("/review/{lucia}/dismiss"), None).await?;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    Ok(())
+}

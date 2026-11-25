@@ -12,7 +12,7 @@
 //!
 //! An item on a profile the caller cannot review, whose held values the caller's scopes would not
 //! show, or whose document the caller could not open (a pull's grouped item), answers 404 like an
-//! unknown id.
+//! unknown id. So does a sync-gap alert on a profile the caller does not manage.
 
 use std::collections::HashMap;
 
@@ -21,6 +21,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ownhealth_auth::household::can_manage;
 use ownhealth_core::access::{Permission, Principal, accessible_profiles, effective_permission};
 use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::review::{self, ItemQuery, ReviewItem};
@@ -102,8 +103,13 @@ fn truthy(v: Option<&Value>) -> bool {
 /// A held payload carries the values it would write: show it only to someone whose scopes would
 /// show the committed fact (its category scope, and read:sensitive for a sensitive one). A held
 /// imaging study names the patient and the study, which the timeline and the viewer show only with
-/// read:records, and a proposed relative is family history, which needs read:records too.
+/// read:records, and a proposed relative is family history, which needs read:records too. A sync-gap
+/// alert names the device's vendor, and a dismissal closes it for the whole household, so it shows
+/// only to who manages the profile and its connections, as the Connections screen does.
 fn visible(item: &ReviewItem, perm: &Permission) -> bool {
+    if item.kind == "source_gap" && !can_manage(perm) {
+        return false;
+    }
     if item.kind == ownhealth_imaging::import::REVIEW_KIND && !perm.has("read:records") {
         return false;
     }
