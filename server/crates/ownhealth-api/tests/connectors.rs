@@ -953,5 +953,13 @@ async fn only_an_owner_or_guardian_reads_the_wearables_setup_guide() -> R {
         env.anon().get("/api/wearables/setup").await?.status,
         StatusCode::UNAUTHORIZED
     );
+    let reads: Vec<(Option<Uuid>, String, String, String)> =
+        sqlx::query_as("select actor_id, actor_kind, via, action from audit_event where tool = 'wearables_setup'")
+            .fetch_all(env.pool())
+            .await?;
+    assert_eq!(
+        reads,
+        vec![(Some(env.user("alex")), "user".into(), "ui".into(), "read".into())]
+    );
     Ok(())
 }

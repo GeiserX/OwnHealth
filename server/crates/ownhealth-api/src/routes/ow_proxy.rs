@@ -8,6 +8,7 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
+use ownhealth_core::audit::{AuditEvent, write_audit};
 use ownhealth_core::config::Settings;
 use ownhealth_core::{Runtime, providers};
 use ownhealth_devices::openwearables::PROVIDERS;
@@ -185,9 +186,18 @@ pub fn setup_router() -> Router<Runtime> {
 }
 
 async fn setup(State(rt): State<Runtime>, SessionCaller(p): SessionCaller) -> R<Json<Setup>> {
-    let mut conn = rt.pool.acquire().await?;
-    manager(&mut conn, &p).await?;
-    drop(conn);
+    let mut tx = rt.pool.begin().await?;
+    manager(&mut tx, &p).await?;
+    write_audit(
+        &mut tx,
+        &AuditEvent {
+            actor_id: p.user_id,
+            tool: Some("wearables_setup".into()),
+            ..AuditEvent::new("user", "ui", "read")
+        },
+    )
+    .await?;
+    tx.commit().await?;
     let origin = rt.settings.ow_public_url.as_deref().unwrap_or(&rt.settings.base_url);
     let api_base_url = format!("{}{PREFIX}", origin.trim_end_matches('/'));
     let providers = PROVIDERS
