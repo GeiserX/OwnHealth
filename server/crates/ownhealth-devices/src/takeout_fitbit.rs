@@ -484,7 +484,7 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
             continue;
         }
         match member_kind(relative) {
-            Some(MemberKind::Profile) => profiles.push((index, root.to_ascii_lowercase())),
+            Some(MemberKind::Profile) => profiles.push((index, root.to_ascii_lowercase(), shown())),
             Some(MemberKind::Readings(kind)) => members.push(ReadingFile {
                 index,
                 root: root.to_ascii_lowercase(),
@@ -500,14 +500,17 @@ fn scan_archive(ctx: &JobContext, owner: BlobOwner, sha: &str) -> Result<Report>
 
     let mut expanded = 0;
     let mut zones = BTreeMap::new();
-    for (index, root) in profiles {
+    for (index, root, name) in profiles {
         let zone = zip
             .by_index(index)
             .map_err(|e| archive_error(e, UNREADABLE, LIMIT))
             .and_then(|file| read_zone(file, &mut expanded));
         let zone = match zone {
             Ok(zone) => zone,
-            Err(Error::Upload(code)) if code == UNREADABLE => None,
+            Err(Error::Upload(code)) if code == UNREADABLE => {
+                report.omit(name, DAMAGED);
+                None
+            }
             Err(error) => return Err(error),
         };
         // A malformed profile or conflicting profiles within this folder leave its zone unknown.

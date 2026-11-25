@@ -1028,3 +1028,21 @@ async fn a_damaged_member_is_listed_and_the_other_members_import() -> R {
     );
     assert_readings(&env, result, &[("hr", 70.0, "2024-07-12T09:00:00Z", 0)]).await
 }
+
+#[tokio::test]
+async fn a_damaged_profile_is_listed_and_utc_readings_still_import() -> R {
+    let env = Env::new().await?;
+    let path = "Takeout/Fitbit/Your Profile/Profile.csv";
+    let mut bytes = stored_archive(&[
+        (path, &profile("Europe/Madrid")),
+        (
+            "Takeout/Fitbit/Google Data/Heart Rate/2024-07.csv",
+            "timestamp,bpm\n2024-07-12T08:00:05Z,70\n",
+        ),
+    ])?;
+    damage(&mut bytes, "Europe/Madrid", "Europe/Madrix");
+    let (state, error, result) = upload_bytes(&env, &bytes).await?;
+    assert_eq!(state, "done", "{error}");
+    assert_eq!(omitted(&result), [(path.to_string(), "invalid_member".to_string())]);
+    assert_readings(&env, result, &[("hr", 70.0, "2024-07-12T08:00:00Z", 0)]).await
+}
