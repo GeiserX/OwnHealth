@@ -207,10 +207,12 @@ const LANG_WORDS: [(&str, &[&str]); 4] = [
     ),
 ];
 
-const LABELS: [(&str, &[&str]); 5] = [
+const LABELS: [(&str, &[&str]); 8] = [
     (
         "name",
         &[
+            "apellidos y nombre",
+            "nombre y apellidos",
             "paciente",
             "nombre",
             "patient(in)",
@@ -221,13 +223,22 @@ const LABELS: [(&str, &[&str]); 5] = [
             "nom",
         ],
     ),
+    // Spanish public health labs print the surnames apart from the given name; `classify` joins them
+    ("surname", &["apellidos", "apellido", "primer apellido"]),
+    ("surname2", &["segundo apellido"]),
     (
         "birth",
         &[
             "f. nacimiento",
+            "f.nacimiento",
             "fecha de nacimiento",
+            "fecha nacimiento",
             "f. nac.",
+            "f. nac",
+            "f.nac.",
+            "f.nac",
             "fecha nac.",
+            "fecha nac",
             "date of birth",
             "dob",
             "born",
@@ -299,7 +310,55 @@ const LABELS: [(&str, &[&str]); 5] = [
             "date du compte rendu",
         ],
     ),
+    // Never read: they end the value of the label before them, so a doctor's name or the cover type
+    // printed after the patient's name on the same line is not taken as part of it.
+    (
+        "other",
+        &[
+            "medico responsable",
+            "medico solicitante",
+            "medico",
+            "medica",
+            "doctor",
+            "doctora",
+            "facultativo",
+            "responsable",
+            "solicitante",
+            "peticionario",
+            "physician",
+            "servicio",
+            "cobertura",
+            "sexo",
+            "edad",
+            "nhc",
+            "dni",
+            "procedencia",
+        ],
+    ),
 ];
+
+/// A name label right after one of these words names the doctor, not the patient (`Médico del paciente:`).
+const STAFF: [&str; 12] = [
+    "medico",
+    "medica",
+    "doctor",
+    "doctora",
+    "dr",
+    "dra",
+    "facultativo",
+    "facultativa",
+    "responsable",
+    "solicitante",
+    "peticionario",
+    "physician",
+];
+
+/// Words that join a label's parts (`Nombre del médico`); a label whose value is only these is part of
+/// a longer label, not a value.
+const CONNECTORS: [&str; 10] = ["de", "del", "la", "el", "y", "e", "of", "the", "and", "du"];
+
+/// The name-like kinds: the patient's name and surnames.
+const NAME_KINDS: [&str; 3] = ["name", "surname", "surname2"];
 
 const STATUS: [(&str, &[&str]); 2] = [
     (
@@ -413,6 +472,8 @@ static TIME: LazyLock<Regex> = LazyLock::new(|| rx(r"\b([01]?\d|2[0-3])[:h]([0-5
 static AZ_RUN: LazyLock<Regex> = LazyLock::new(|| rx(r"[a-z]+"));
 static TWO_LETTERS: LazyLock<Regex> = LazyLock::new(|| rx(r"[A-Za-zÀ-ÿ]{2}"));
 static DIGIT: LazyLock<Regex> = LazyLock::new(|| rx(r"\d"));
+/// A line that opens with a label of its own (`Médico: ...`), known to the table or not.
+static LABELISH: LazyLock<Regex> = LazyLock::new(|| rx(r"^[^\d:]{1,40}:"));
 
 /// Lowercase, strip accents, normalise the ordinal sign: for matching only.
 pub fn fold(s: &str) -> String {
@@ -508,7 +569,28 @@ fn char_at(s: &str, byte: usize) -> usize {
 }
 
 /// `Paciente: RIVERA, ALEX  F. nacimiento: 14/05/1979` -> {name: 'RIVERA, ALEX', birth: '14/05/1979'}.
+/// The first non-empty value of each kind, in line order.
 pub fn label_values(line: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for (kind, value) in scan(line) {
+        if !value.is_empty() && !out.iter().any(|(k, _)| *k == kind) {
+            out.push((kind, value));
+        }
+    }
+    out
+}
+
+/// The last word before a label, connectors skipped, is a doctor's title (`Médico del paciente:`).
+fn after_staff_word(before: &str) -> bool {
+    before
+        .rsplit(|c: char| !c.is_ascii_lowercase())
+        .filter(|w| !w.is_empty())
+        .find(|w| !CONNECTORS.contains(w))
+        .is_some_and(|w| STAFF.contains(&w))
+}
+
+/// Every label on the line with its value, empty values included, in line order.
+fn scan(line: &str) -> Vec<(&'static str, String)> {
     let f = fold(line);
     // (start, end) in characters of the folded line, as Python indexed it
     let mut hits: Vec<(usize, usize, &str)> = Vec::new();
@@ -529,6 +611,17 @@ pub fn label_values(line: &str) -> Vec<(&'static str, String)> {
             let mut end = j + ws;
             if f[end..].starts_with(':') {
                 end += 1;
+            } else if let Some(r) = f[end..].strip_prefix('(')
+                && let Some(close) = r.find(')')
+                && close <= 24
+                && !r[..close].contains([':', '('])
+            {
+                // a short note between the label and its colon: `Fecha de nacimiento (edad): ...`
+                let after = &r[close + 1..];
+                let ws2 = after.len() - after.trim_start_matches(char::is_whitespace).len();
+                if after[ws2..].starts_with(':') {
+                    end += 1 + close + 1 + ws2 + 1;
+                }
             }
             from = end.max(i + 1);
             let (a, b) = (char_at(&f, i), char_at(&f, end));
@@ -540,6 +633,12 @@ pub fn label_values(line: &str) -> Vec<(&'static str, String)> {
                 continue;
             }
             taken.push((a, b));
+            // still taken: a doctor's name label ends the value before it, it is just never read
+            let kind = if NAME_KINDS.contains(kind) && after_staff_word(&f[..i]) {
+                &"other"
+            } else {
+                kind
+            };
             hits.push((a, b, kind));
         }
     }
@@ -555,12 +654,55 @@ pub fn label_values(line: &str) -> Vec<(&'static str, String)> {
             String::new()
         };
         let value = strip_chars(&value, " :|;,\t").to_string();
-        if !value.is_empty() && !out.iter().any(|(k, _)| k == kind) {
-            let kind: &'static str = LABELS.iter().find(|(k, _)| k == kind).map_or("name", |(k, _)| k);
-            out.push((kind, value));
+        // `Nombre del médico:` reads as the label `Nombre` with the value `del`: part of a longer label
+        if !value.is_empty() && fold(&value).split_whitespace().all(|w| CONNECTORS.contains(&w)) {
+            continue;
         }
+        let kind: &'static str = LABELS.iter().find(|(k, _)| k == kind).map_or("name", |(k, _)| k);
+        out.push((kind, value));
     }
     out
+}
+
+/// The value printed on the line after a label that stands alone at the end of its line: only a line
+/// that holds no label itself, and only when it reads as that kind of value.
+fn next_line_value(kind: &str, next: &str) -> Option<String> {
+    let v = strip_chars(next, " :|;,\t");
+    let f = fold(v);
+    if v.is_empty() || !scan(next).is_empty() || LABELISH.is_match(&f) {
+        return None;
+    }
+    let ok = match kind {
+        "name" | "surname" | "surname2" => {
+            // a section heading under the label is not a name; a full name has two words or more
+            !DIGIT.is_match(v)
+                && !TYPE_WORDS
+                    .iter()
+                    .any(|(_, ws)| ws.iter().any(|w| has_bounded(&f, w, az)))
+                && (kind != "name" || name_tokens(v).len() >= 2)
+        }
+        "birth" => parse_date(v).is_some(),
+        "collected" | "reported" => parse_datetime(v).is_some(),
+        "sample" => v.split_whitespace().next().is_some_and(|t| DIGIT.is_match(t)),
+        _ => false,
+    };
+    ok.then(|| v.to_string())
+}
+
+/// The page name: the given name, after the surnames printed under their own labels.
+fn page_name(surnames: &[Option<String>; 2], given: Option<String>) -> Option<String> {
+    let given = given?;
+    let have = name_tokens(&given);
+    let sur: Vec<&str> = surnames
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .filter(|s| !name_tokens(s).is_subset(&have))
+        .collect();
+    if sur.is_empty() {
+        return Some(given);
+    }
+    Some(format!("{}, {given}", sur.join(" ")))
 }
 
 /// Guess type, language, patient block, dates and status from the first pages' text lines.
@@ -596,10 +738,24 @@ pub fn classify(lines: &[String]) -> Classification {
     {
         c.doc_type = t.to_string();
     }
-    for line in lines {
-        for (kind, value) in label_values(line) {
+    let mut given: Option<String> = None;
+    let mut surnames: [Option<String>; 2] = [None, None];
+    for (n, line) in lines.iter().enumerate() {
+        let mut found = label_values(line);
+        // `Nombre:` alone at the end of its line, the value on the next one
+        if let Some((kind, v)) = scan(line).last()
+            && v.is_empty()
+            && !found.iter().any(|(k, _)| k == kind)
+            && let Some(v) = lines.get(n + 1).and_then(|next| next_line_value(kind, next))
+        {
+            found.push((kind, v));
+        }
+        for (kind, value) in found {
+            let name_like = TWO_LETTERS.is_match(&value);
             match kind {
-                "name" if c.patient_name.is_none() && TWO_LETTERS.is_match(&value) => c.patient_name = Some(value),
+                "name" if given.is_none() && name_like => given = Some(value),
+                "surname" if surnames[0].is_none() && name_like => surnames[0] = Some(value),
+                "surname2" if surnames[1].is_none() && name_like => surnames[1] = Some(value),
                 "birth" if c.birth_date.is_none() => c.birth_date = parse_date(&value),
                 "sample" if c.sample_id.is_none() => {
                     let tok = value.split_whitespace().next().unwrap_or("");
@@ -613,6 +769,7 @@ pub fn classify(lines: &[String]) -> Classification {
             }
         }
     }
+    c.patient_name = page_name(&surnames, given);
     for (status, words) in STATUS.iter() {
         if words
             .iter()
@@ -784,6 +941,172 @@ mod tests {
             "hinted"
         );
         assert_eq!(identity_match(None, None, "Lucía Rivera", born), "missing");
+    }
+
+    fn page(lines: &[&str]) -> Classification {
+        classify(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    /// The patient block of a Spanish page against a two-surname profile born 1979-05-14.
+    fn against_full_name(lines: &[&str]) -> &'static str {
+        let c = page(lines);
+        identity_match(
+            c.patient_name.as_deref(),
+            c.birth_date,
+            "Alex Rivera Ortega",
+            Some(d(1979, 5, 14)),
+        )
+    }
+
+    #[test]
+    fn surnames_and_given_name_combine_into_one_page_name() {
+        // Spanish public health lab: one line, or one label per line
+        for lines in [
+            &["Apellidos: RIVERA ORTEGA      Nombre: ALEX"][..],
+            &["Apellidos: RIVERA ORTEGA", "Nombre: ALEX"],
+            &["Nombre: ALEX", "Apellidos: RIVERA ORTEGA"],
+            &["Primer apellido: RIVERA   Segundo apellido: ORTEGA   Nombre: ALEX"],
+        ] {
+            let c = page(lines);
+            assert_eq!(
+                c.patient_name.as_deref().map(name_tokens),
+                Some(name_tokens("Alex Rivera Ortega")),
+                "{lines:?}"
+            );
+        }
+        assert_eq!(
+            page(&["Apellidos: RIVERA ORTEGA      Nombre: ALEX"])
+                .patient_name
+                .as_deref(),
+            Some("RIVERA ORTEGA, ALEX")
+        );
+        // a combined label is one name, not a surname plus a connector
+        for line in [
+            "Apellidos y nombre: RIVERA ORTEGA, ALEX",
+            "Nombre y apellidos: ALEX RIVERA ORTEGA",
+        ] {
+            assert_eq!(
+                page(&[line]).patient_name.as_deref().map(name_tokens),
+                Some(name_tokens("Alex Rivera Ortega")),
+                "{line}"
+            );
+        }
+        // the surnames alone are no page name
+        assert_eq!(page(&["Apellidos: RIVERA ORTEGA"]).patient_name, None);
+    }
+
+    #[test]
+    fn spanish_layouts_match_the_full_name_profile() {
+        for lines in [
+            &[
+                "Apellidos: RIVERA ORTEGA      Nombre: ALEX",
+                "Fecha de nacimiento: 14/05/1979",
+            ][..],
+            &["Apellidos: RIVERA ORTEGA", "Nombre: ALEX", "F. Nac: 14/05/1979"],
+            // private hospital group: an age suffix on the label, after another label on the line
+            &[
+                "Paciente: RIVERA ORTEGA, ALEX",
+                "Cobertura: PRIVADA      Fecha de nacimiento (edad): 14/05/1979 (47 años)",
+            ],
+            &["Paciente: RIVERA ORTEGA, ALEX    F.Nac: 14/05/1979"],
+            &["Paciente: RIVERA ORTEGA, ALEX    Fecha Nac: 14/05/1979"],
+            // label alone on its line, value on the next
+            &["Nombre:", "ALEX RIVERA ORTEGA", "Fecha nacimiento:", "14/05/1979"],
+            &["Paciente: RIVERA ORTEGA, ALEX      F. nacimiento:", "14/05/1979"],
+        ] {
+            assert_eq!(against_full_name(lines), "matched", "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn birth_labels_with_an_age_suffix_or_no_dot() {
+        for line in [
+            "Cobertura: PRIVADA   Fecha de nacimiento (edad): 14/05/1979 (47 años)",
+            "F. Nac: 14/05/1979",
+            "F.Nac: 14/05/1979",
+            "Fecha Nac: 14/05/1979",
+            "Fecha nacimiento: 14/05/1979",
+        ] {
+            assert_eq!(page(&[line]).birth_date, Some(d(1979, 5, 14)), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_matcher_stays_strict() {
+        // another person's surnames and name
+        assert_eq!(
+            against_full_name(&["Apellidos: ORTEGA      Nombre: CARMEN", "F. Nac: 30/01/1955"]),
+            "mismatch"
+        );
+        // the same given name with other surnames
+        assert_eq!(
+            against_full_name(&["Apellidos: RIVERA SANZ      Nombre: ALEX", "F. Nac: 14/05/1979"]),
+            "mismatch"
+        );
+        // the right name, another birth date
+        assert_eq!(
+            against_full_name(&["Apellidos: RIVERA ORTEGA      Nombre: ALEX", "F. Nac: 15/05/1979"]),
+            "mismatch"
+        );
+        assert_eq!(
+            against_full_name(&[
+                "Paciente: RIVERA ORTEGA, ALEX",
+                "Cobertura: PRIVADA   Fecha de nacimiento (edad): 15/05/1979 (47 años)",
+            ]),
+            "mismatch"
+        );
+        // only the given name still is not the full-name profile
+        assert_eq!(against_full_name(&["Nombre: ALEX", "F. Nac: 14/05/1979"]), "mismatch");
+    }
+
+    #[test]
+    fn a_doctor_is_never_read_as_the_patient() {
+        for lines in [
+            &["Médico: ALEX RIVERA ORTEGA"][..],
+            &["Responsable: ALEX RIVERA ORTEGA"],
+            &["Responsable:", "ALEX RIVERA ORTEGA"],
+            &["Nombre del médico: ALEX RIVERA ORTEGA"],
+            &["Médico del paciente: ALEX RIVERA ORTEGA"],
+            &["Doctor name: ALEX RIVERA ORTEGA"],
+            &["Nombre:", "Médico: ALEX RIVERA ORTEGA"],
+            &["Nombre:", "Responsable: ALEX RIVERA ORTEGA"],
+            &["Nombre:", "Médico solicitante: ALEX RIVERA ORTEGA"],
+        ] {
+            assert_eq!(page(lines).patient_name, None, "{lines:?}");
+        }
+        // the doctor's surnames are not the patient's
+        assert_eq!(
+            page(&["Apellidos del médico: RIVERA ORTEGA   Nombre: ALEX"])
+                .patient_name
+                .as_deref(),
+            Some("ALEX")
+        );
+        // a doctor's label after the patient's ends the patient's name
+        assert_eq!(
+            page(&["Paciente: RIVERA ORTEGA, ALEX   Médico: DR. SANZ GIL"])
+                .patient_name
+                .as_deref(),
+            Some("RIVERA ORTEGA, ALEX")
+        );
+    }
+
+    #[test]
+    fn a_next_line_value_is_read_only_when_it_is_not_a_label() {
+        assert_eq!(page(&["Nombre:", "F. Nac: 14/05/1979"]).patient_name, None);
+        assert_eq!(page(&["Fecha nacimiento:", "Nombre: ALEX"]).birth_date, None);
+        // a section heading under a lone label is not a name: one word, or a document-type word
+        assert_eq!(page(&["Paciente:", "ORINA"]).patient_name, None);
+        assert_eq!(page(&["Paciente:", "Bioquímica general"]).patient_name, None);
+        // nor an address line
+        assert_eq!(page(&["Paciente:", "Calle Mayor 12"]).patient_name, None);
+        assert_eq!(page(&["Fecha nacimiento:", "RIVERA ORTEGA"]).birth_date, None);
+        // a lone surname on the next line is read
+        assert_eq!(
+            page(&["Apellidos:", "RIVERA ORTEGA", "Nombre: ALEX"])
+                .patient_name
+                .as_deref(),
+            Some("RIVERA ORTEGA, ALEX")
+        );
     }
 
     #[test]

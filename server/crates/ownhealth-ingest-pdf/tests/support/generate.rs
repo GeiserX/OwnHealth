@@ -231,6 +231,8 @@ pub struct Layout {
     pub meta: Vec<(&'static str, &'static str)>,
     /// analyte -> printed name for this lab
     pub names: Vec<(&'static str, &'static str)>,
+    /// printed lines that replace the default `Paciente: ...  F. nacimiento: ...` line (identity layouts)
+    pub patient_lines: Vec<&'static str>,
 }
 
 impl Layout {
@@ -268,6 +270,7 @@ impl Layout {
             changes: Vec::new(),
             meta: Vec::new(),
             names: Vec::new(),
+            patient_lines: Vec::new(),
         }
     }
 
@@ -632,17 +635,26 @@ impl Writer {
             _ => lab.title.to_string(),
         };
         self.text(50.0, 60.0, &title, false, Some(10.0), None);
+        let patient = if lay.patient_lines.is_empty() {
+            vec![format!(
+                "{}: {who}      {}: {}",
+                lab.patient,
+                lab.birth,
+                date(p.birth, &lay)
+            )]
+        } else {
+            lay.patient_lines.iter().map(|l| l.to_string()).collect()
+        };
+        let mut y = 82.0;
+        for line in &patient {
+            self.text(50.0, y, line, false, Some(9.0), None);
+            y += 14.0;
+        }
+        // the default single patient line keeps the original geometry (96, 110, 140)
+        let y = y - 14.0;
         self.text(
             50.0,
-            82.0,
-            &format!("{}: {who}      {}: {}", lab.patient, lab.birth, date(p.birth, &lay)),
-            false,
-            Some(9.0),
-            None,
-        );
-        self.text(
-            50.0,
-            96.0,
+            y + 14.0,
             &format!(
                 "{}: {} 08:15      {}: {}",
                 lab.collected,
@@ -656,7 +668,7 @@ impl Writer {
         );
         self.text(
             50.0,
-            110.0,
+            y + 28.0,
             &format!(
                 "{}: {} 13:40      {} {page}/{pages}",
                 lab.reported,
@@ -667,7 +679,7 @@ impl Writer {
             Some(9.0),
             None,
         );
-        140.0
+        y + 58.0
     }
 
     fn table_header(&mut self, y: f64, x_off: f64) -> f64 {

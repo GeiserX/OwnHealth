@@ -787,3 +787,115 @@ async fn a_known_value_on_someone_elses_report_is_not_cited_without_review() -> 
     assert_eq!(glucose_rows(&mut c).await?, 1);
     Ok(())
 }
+
+/// One `es-01-basic` slip whose patient block is printed in another Spanish layout.
+fn es_identity_slip(patient_lines: &[&'static str]) -> Vec<u8> {
+    let lay = Layout {
+        patient_lines: patient_lines.to_vec(),
+        ..layout("es-01-basic")
+    };
+    generate::render(&lay, None).0
+}
+
+/// Spanish lab layouts print the patient's identity in shapes other than `Paciente: ... F. nacimiento:`.
+/// Each one must find the person whose profile carries the full name (two surnames), and the rows of a
+/// matched page must auto-accept; a page of someone else, a different birth date or a doctor's name must
+/// not. Alex's profile is renamed to a two-surname name for this test.
+#[tokio::test]
+async fn spanish_identity_layouts_find_the_full_name_profile() -> R {
+    fake_normalizer();
+    let cases: [(&str, &[&'static str], &str); 9] = [
+        // public health lab: surnames and given name on one line
+        (
+            "apellidos-one-line",
+            &[
+                "Apellidos: RIVERA ORTEGA      Nombre: ALEX",
+                "Fecha de nacimiento: 14/05/1979",
+            ],
+            "matched",
+        ),
+        // the same on separate lines, with the short birth label without a dot
+        (
+            "apellidos-two-lines",
+            &["Apellidos: RIVERA ORTEGA", "Nombre: ALEX", "F. Nac: 14/05/1979"],
+            "matched",
+        ),
+        // form layout: first and second surname
+        (
+            "primer-segundo-apellido",
+            &[
+                "Primer apellido: RIVERA      Segundo apellido: ORTEGA      Nombre: ALEX",
+                "F.Nac: 14/05/1979",
+            ],
+            "matched",
+        ),
+        // private hospital group: the birth label carries an age suffix, after another label
+        (
+            "birth-with-age",
+            &[
+                "Paciente: RIVERA ORTEGA, ALEX",
+                "Cobertura: PRIVADA      Fecha de nacimiento (edad): 14/05/1979 (47 años)",
+            ],
+            "matched",
+        ),
+        // labels alone on their line, the values on the next one
+        (
+            "value-on-next-line",
+            &["Nombre:", "ALEX RIVERA ORTEGA", "Fecha nacimiento:", "14/05/1979"],
+            "matched",
+        ),
+        // someone else's page in the same layout
+        (
+            "another-person",
+            &["Apellidos: ORTEGA      Nombre: CARMEN", "F. Nac: 30/01/1955"],
+            "mismatch",
+        ),
+        // the right name with a different birth date
+        (
+            "another-birth-date",
+            &["Apellidos: RIVERA ORTEGA      Nombre: ALEX", "F. Nac: 15/05/1979"],
+            "mismatch",
+        ),
+        // a doctor's name is never the patient's
+        (
+            "doctor-lines",
+            &[
+                "Médico: ALEX RIVERA ORTEGA",
+                "Responsable:",
+                "ALEX RIVERA ORTEGA",
+                "Nombre del médico: ALEX RIVERA ORTEGA",
+                "Fecha de nacimiento: 14/05/1979",
+            ],
+            "hinted",
+        ),
+        // a label alone on its line followed by another label is not given that label as its value
+        (
+            "label-then-label",
+            &[
+                "Nombre:",
+                "Médico: ALEX RIVERA ORTEGA",
+                "Fecha de nacimiento: 14/05/1979",
+            ],
+            "hinted",
+        ),
+    ];
+    for (case, lines, want) in cases {
+        let e = env().await?;
+        let mut c = e.conn().await?;
+        sqlx::query("update profile set display_name = 'Alex Rivera Ortega' where id = $1")
+            .bind(e.fam.profile("alex"))
+            .execute(&mut *c)
+            .await?;
+        let doc = e.store_pdf(&mut c, &es_identity_slip(lines), "report.pdf").await?;
+        let summary = import_pdf(&mut c, &e.blobs, doc, false).await?;
+        let d = document(&mut c, doc).await?;
+        assert_eq!(d["identity_match"], json!(want), "{case}: {d}");
+        if want == "matched" {
+            assert_eq!(summary.accepted, 12, "{case}: {}", summary.to_value());
+        } else {
+            assert_eq!(summary.accepted, 0, "{case}: {}", summary.to_value());
+            assert!(obs(&mut c, doc).await?.is_empty(), "{case}");
+        }
+    }
+    Ok(())
+}
