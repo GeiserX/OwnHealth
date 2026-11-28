@@ -13,6 +13,7 @@
 	import { errText } from '#lib/components/pages1/util.svelte';
 	import { t } from '#lib/i18n/index.svelte';
 	import { decimalText } from '#lib/logic/format';
+	import { fieldNumber, fieldText } from '#lib/logic/manual';
 	import { visitPeriod } from '#lib/logic/visit';
 	import { todayIso } from '#lib/logic/people';
 
@@ -96,10 +97,11 @@
 		f = fresh(k);
 		error = null;
 	}
-	const val = (k: string) => (f[k] ?? '').trim() || null;
+	// a number input binds a number, or null when empty (lib/logic/manual.ts)
+	const val = (k: string) => fieldText(f[k]);
 	function body(): Record<string, unknown> {
 		const out: Record<string, unknown> = {};
-		for (const [k, , type] of FIELDS[kind]) out[k] = type === 'number' ? (val(k) ? Number(val(k)) : null) : val(k);
+		for (const [k, , type] of FIELDS[kind]) out[k] = type === 'number' ? fieldNumber(f[k]) : val(k);
 		if (kind === 'medication') {
 			out.med_status = val('stopped') && val('stopped')! <= today ? 'stopped' : 'active';
 			out.kind = f.kind === 'supplement' ? 'supplement' : 'medication';
