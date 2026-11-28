@@ -407,6 +407,84 @@ async fn reimport_is_idempotent_and_wrong_profile_is_refused() -> R {
     Ok(())
 }
 
+/// A stored zip of `(name, body)` members with the UTF-8 name flag cleared, as an iPhone set to
+/// Spanish writes `exportación.xml` (decomposed: `o` and a combining acute).
+fn unflagged_zip(members: &[(&str, &str)]) -> anyhow::Result<Vec<u8>> {
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, body) in members {
+        z.start_file(*name, opts)?;
+        z.write_all(body.as_bytes())?;
+    }
+    let mut bytes = z.finish()?.into_inner();
+    for (signature, flags) in [(b"PK\x03\x04", 6), (b"PK\x01\x02", 8)] {
+        let starts: Vec<usize> = bytes
+            .windows(4)
+            .enumerate()
+            .filter_map(|(i, w)| (w == signature).then_some(i))
+            .collect();
+        assert_eq!(starts.len(), members.len());
+        for start in starts {
+            bytes[start + flags + 1] &= !0x08;
+        }
+    }
+    Ok(bytes)
+}
+
+#[tokio::test]
+async fn a_spanish_export_imports_and_a_zip_with_two_exports_is_refused() -> R {
+    let env = Env::new().await?;
+    let mut tx = env.tx().await?;
+    let fam = family(&mut tx).await?;
+    let records = rec(
+        "HKQuantityTypeIdentifierStepCount",
+        "2026-11-06 10:00:00 +0100",
+        "2026-11-06 10:05:00 +0100",
+        "420",
+        "count",
+        "iPhone",
+    );
+    let xml = handmade_xml(&records, "1979-05-14");
+    let cda = "<?xml version=\"1.0\"?>\n<ClinicalDocument xmlns=\"urn:hl7-org:v3\"/>\n";
+    let spanish = unflagged_zip(&[
+        ("apple_health_export/exportacio\u{301}n_cda.xml", cda),
+        ("apple_health_export/exportacio\u{301}n.xml", &xml),
+    ])?;
+    let doc = store_doc(&mut tx, &env.blobs, &fam, "alex", &spanish, "exportación.zip", ZIP).await?;
+    let summary = import_apple_health(&mut tx, &env.blobs, doc).await?;
+    assert_eq!(summary.accepted, 1);
+    // the birth date in <Me> is still checked
+    let doc_sam = store_doc(&mut tx, &env.blobs, &fam, "sam", &spanish, "exportación.zip", ZIP).await?;
+    let mut sp = sqlx::Connection::begin(&mut *tx).await?;
+    match import_apple_health(&mut sp, &env.blobs, doc_sam).await {
+        Err(Error::Upload(m)) => assert!(m.contains("birth date"), "{m}"),
+        other => panic!("expected the birth date refusal, got {other:?}"),
+    }
+    sp.rollback().await?;
+    // two exports in one zip: which one is meant is unknown, so neither is read
+    let two = unflagged_zip(&[
+        ("apple_health_export/export.xml", &xml),
+        ("apple_health_export/exportacio\u{301}n.xml", &xml),
+    ])?;
+    let doc_two = store_doc(&mut tx, &env.blobs, &fam, "alex", &two, "two.zip", ZIP).await?;
+    match import_apple_health(&mut tx, &env.blobs, doc_two).await {
+        Err(Error::Upload(m)) => assert_eq!(
+            m,
+            "the zip holds 2 Apple Health exports (apple_health_export/export.xml, \
+             apple_health_export/exportacio\u{301}n.xml): import each export on its own"
+        ),
+        other => panic!("expected the two-exports refusal, got {other:?}"),
+    }
+    // and a zip with only the clinical-document twin has no export
+    let cda_only = unflagged_zip(&[("apple_health_export/exportacio\u{301}n_cda.xml", cda)])?;
+    let doc_cda = store_doc(&mut tx, &env.blobs, &fam, "alex", &cda_only, "cda.zip", ZIP).await?;
+    match import_apple_health(&mut tx, &env.blobs, doc_cda).await {
+        Err(Error::Upload(m)) => assert_eq!(m, "no export.xml in the zip"),
+        other => panic!("expected the missing-export refusal, got {other:?}"),
+    }
+    Ok(())
+}
+
 /// The streaming parser keeps one event in a reused buffer: ten times more records do not grow it.
 /// (Python measured this with tracemalloc; the process-level measurement is `examples/measure_memory.rs`.)
 #[test]

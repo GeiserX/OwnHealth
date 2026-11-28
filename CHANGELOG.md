@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Apple Health in any language.** iOS names the main file of a Health export in the phone's language (`exportación.xml` in Spanish, `Export.xml` in German, `exportar.xml` in Portuguese), and OwnHealth refused those zips as an unknown file. It now finds that file by its content, whatever its name. A zip that holds two exports is refused, and the import says why in the reader language.
+
 ## 1.0.0 (2026-11-26)
 
 Connected: OwnHealth now pulls records from US patient portals and Medicare, reads wearables through their APIs and account exports, opens hospital imaging CDs, shares a summary through a SMART Health Link, and keeps each profile's files under its own key. Upgrade in place. Take a backup first, while the compose file still names 0.4.0. Then set `admin` and `app` to `drumsergio/ownhealth:1.0.0` and `ocr` to `drumsergio/ownhealth:1.0.0-ocr`, and follow the 1.0 steps for the secrets key and the keyring folder ([UPGRADING.md](UPGRADING.md#upgrading-to-10)). Twenty-three new migrations (1200, 1201, 1202, 1203, 1210, 1220, 1221, 1230, 1231, 1232, 1233, 1234, 1249, 1250, 1260, 1270, 1271, 1280, 1290, 1291, 1292, 1298, 1299) apply at start. The rule pack stays at 0.2.0, so on an upgrade from 0.4.0 every profile's `state_hash` stays as it was. From 0.3.0 or earlier it moves once, as the 0.4.0 entry says. Passwords, passkeys, access tokens and OAuth connections keep working.
