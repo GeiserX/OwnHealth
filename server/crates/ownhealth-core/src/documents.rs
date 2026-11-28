@@ -152,22 +152,61 @@ pub async fn lock_exports(conn: &mut PgConnection, profile_id: Uuid, flag: &str)
     Ok(())
 }
 
+/// How much of an XML member is unpacked to read its root element.
+const APPLE_HEALTH_SNIFF_BYTES: u64 = 4096;
+/// How many XML members of one zip are opened to read their root element.
+const APPLE_HEALTH_SNIFF_MEMBERS: usize = 16;
+
+/// The members of a zip that are the main file of an Apple Health export, by index. iOS names that
+/// file in the phone's language: `export.xml`, `Export.xml` in German, `exportar.xml` in Portuguese,
+/// `exportación.xml` in Spanish (decomposed, and without the zip's UTF-8 flag). So a member counts
+/// when its file name is `export.xml` in any case, or when it is another XML file whose root element
+/// is `HealthData`; that test does not depend on how the name was decoded. The clinical-document
+/// twin (`export_cda.xml`, `exportación_cda.xml`) never counts. The importer needs exactly one.
+pub fn apple_health_exports<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut sniffed = 0;
+    for index in 0..archive.len() {
+        let Some(Ok(name)) = archive.name_for_index(index) else {
+            continue;
+        };
+        let base = name.rsplit('/').next().unwrap_or_default().to_lowercase();
+        if base == "export.xml" {
+            found.push(index);
+            continue;
+        }
+        if !base.ends_with(".xml") || base.ends_with("_cda.xml") || sniffed == APPLE_HEALTH_SNIFF_MEMBERS {
+            continue;
+        }
+        sniffed += 1;
+        let mut head = Vec::new();
+        let read = archive
+            .by_index(index)
+            .map_err(std::io::Error::other)
+            .and_then(|member| member.take(APPLE_HEALTH_SNIFF_BYTES).read_to_end(&mut head));
+        if read.is_ok() && is_health_data(&head) {
+            found.push(index);
+        }
+    }
+    found
+}
+
 /// A zip whose member list cannot be read (a download cut short) is `broken_zip`, so the refusal can say so.
 fn classify_zip(reader: impl Read + Seek) -> UploadKind {
-    let archive = match crate::zip_directory::open(reader) {
+    let mut archive = match crate::zip_directory::open(reader) {
         Ok(archive) => archive,
         Err(zip::result::ZipError::UnsupportedArchive(crate::zip_directory::DIRECTORY_LIMIT)) => {
             return "zip_directory_limit";
         }
         Err(_) => return "broken_zip",
     };
+    // Apple Health takes precedence over the other exports.
+    if !apple_health_exports(&mut archive).is_empty() {
+        return "apple_health_zip";
+    }
     let mut kind = "unknown";
     let mut fitbit = false;
     for name in archive.file_names().flatten() {
-        // Preserve Apple Health's existing marker and precedence.
-        if name.ends_with("export.xml") {
-            return "apple_health_zip";
-        }
         fitbit |= fitbit_takeout_path(&name).is_some();
         if GarminMember::from_name(&name).is_some() {
             kind = "garmin_zip";
@@ -327,35 +366,68 @@ fn utf16_text(head: &[u8]) -> Option<String> {
 /// is not read past: when a `ClinicalDocument` follows it anywhere in `head`, the file goes to the
 /// importer, which refuses every DOCTYPE with its reason.
 fn is_clinical_document(head: &[u8]) -> bool {
+    let Some(rest) = xml_after_prolog(head) else {
+        return false;
+    };
+    if rest.starts_with(b"<!DOCTYPE") {
+        // its internal subset may quote `]` and `>`, so it is not parsed here
+        return rest.windows(16).any(|w| w == b"ClinicalDocument");
+    }
+    let Some(name) = rest.strip_prefix(b"<").and_then(xml_name) else {
+        return false;
+    };
+    name.rsplit(|b| *b == b':').next() == Some(b"ClinicalDocument".as_slice())
+}
+
+/// Whether `head` is XML whose root element is `HealthData`, the main file of an Apple Health export:
+/// the name its DOCTYPE declares, or the first element when it has none.
+fn is_health_data(head: &[u8]) -> bool {
+    let Some(rest) = xml_after_prolog(head) else {
+        return false;
+    };
+    let tag = match rest.strip_prefix(b"<!DOCTYPE") {
+        Some(doctype) => trim_xml_space(doctype),
+        None => match rest.strip_prefix(b"<") {
+            Some(tag) => tag,
+            None => return false,
+        },
+    };
+    xml_name(tag) == Some(b"HealthData".as_slice())
+}
+
+/// `head` from its first markup that is not a byte order mark, the XML declaration, a processing
+/// instruction, a comment or white space. None when one of those is cut off at the end of `head`.
+fn xml_after_prolog(head: &[u8]) -> Option<&[u8]> {
     fn after(rest: &[u8], from: usize, end: &[u8]) -> Option<usize> {
         let at = rest.get(from..)?.windows(end.len()).position(|w| w == end)?;
         Some(from + at + end.len())
     }
     let mut rest = head.strip_prefix(b"\xef\xbb\xbf").unwrap_or(head);
     loop {
-        let start = rest.iter().position(|b| !b" \t\r\n".contains(b)).unwrap_or(rest.len());
-        rest = &rest[start..];
+        rest = trim_xml_space(rest);
         let skip = if rest.starts_with(b"<?") {
             after(rest, 2, b"?>")
         } else if rest.starts_with(b"<!--") {
             after(rest, 4, b"-->")
-        } else if rest.starts_with(b"<!DOCTYPE") {
-            // its internal subset may quote `]` and `>`, so it is not parsed here
-            return rest.windows(16).any(|w| w == b"ClinicalDocument");
         } else {
-            break;
+            return Some(rest);
         };
-        let Some(skip) = skip else { return false };
-        rest = &rest[skip..];
+        rest = &rest[skip?..];
     }
-    let Some(tag) = rest.strip_prefix(b"<") else {
-        return false;
-    };
-    let Some(end) = tag.iter().position(|b| b" \t\r\n/>".contains(b)) else {
-        return false;
-    };
-    let name = &tag[..end];
-    name.rsplit(|b| *b == b':').next() == Some(b"ClinicalDocument".as_slice())
+}
+
+fn trim_xml_space(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b" \t\r\n".contains(b))
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+/// The name that starts `tag`, up to white space, `/`, `>` or `[`. None when `tag` ends first.
+fn xml_name(tag: &[u8]) -> Option<&[u8]> {
+    let end = tag.iter().position(|b| b" \t\r\n/>[".contains(b))?;
+    Some(&tag[..end])
 }
 
 /// The header cells that name a CGM export, in English, German and Spanish, as `header_key` writes
@@ -774,7 +846,7 @@ pub async fn dispatch_upload_in_zone(
             f.filename.clone(),
         );
         // Off the runtime: a plain file of an older install is hashed once when it opens.
-        // ZIP classification only needs the central directory, even for a sealed blob.
+        // ZIP classification reads the central directory and the first bytes of a few XML members.
         let kind = tokio::task::spawn_blocking(move || sniff_reader(&name, store.open_seek(owner, &sha)?))
             .await
             .map_err(std::io::Error::other)??;
@@ -1435,6 +1507,144 @@ mod tests {
         let bad = dir.path().join("bad.zip");
         std::fs::write(&bad, b"PK\x03\x04truncated")?;
         assert_eq!(sniff("bad.zip", b"PK\x03\x04", Some(&bad)), "broken_zip");
+        Ok(())
+    }
+
+    /// The start of a main export as iOS writes it: the DTD names the root.
+    const HEALTH_DATA: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE HealthData [\n\
+        <!-- HealthKit Export Version: 14 -->\n<!ELEMENT HealthData (ExportDate,Me,(Record)*)>\n]>\n\
+        <HealthData locale=\"es_ES\">\n <ExportDate value=\"2026-11-07 08:00:00 +0100\"/>\n\
+        <Me HKCharacteristicTypeIdentifierDateOfBirth=\"1979-05-14\"/>\n</HealthData>\n";
+    /// The clinical-document twin iOS writes beside it.
+    const CDA: &str = "<?xml version=\"1.0\"?>\n<?xml-stylesheet type=\"text/xsl\" href=\"CDA.xsl\"?>\n\
+        <ClinicalDocument xmlns=\"urn:hl7-org:v3\"/>\n";
+
+    /// A stored zip of `(name, body)` members. Without `utf8_flag` the UTF-8 name flag (bit 11 of
+    /// the general purpose flags) the writer sets for a non-ASCII name is cleared again, in the local
+    /// and the central headers, as an iPhone leaves it.
+    fn zip_of(members: &[(&str, &str)], utf8_flag: bool) -> anyhow::Result<Vec<u8>> {
+        use std::io::Write;
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in members {
+            z.start_file(*name, opts)?;
+            z.write_all(body.as_bytes())?;
+        }
+        let mut bytes = z.finish()?.into_inner();
+        if !utf8_flag {
+            for (signature, flags) in [(b"PK\x03\x04", 6), (b"PK\x01\x02", 8)] {
+                let starts: Vec<usize> = bytes
+                    .windows(4)
+                    .enumerate()
+                    .filter_map(|(i, w)| (w == signature).then_some(i))
+                    .collect();
+                assert_eq!(starts.len(), members.len(), "one header of each kind per member");
+                for start in starts {
+                    bytes[start + flags + 1] &= !0x08;
+                }
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// The main export's name, as the sniffer and the importer find it.
+    fn exports_in(bytes: &[u8]) -> anyhow::Result<Vec<String>> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+        let found = apple_health_exports(&mut archive);
+        found
+            .into_iter()
+            .map(|i| {
+                Ok(archive
+                    .name_for_index(i)
+                    .ok_or_else(|| anyhow::anyhow!("no member {i}"))??
+                    .into_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_apple_health_export_is_found_whatever_the_phone_language_named_it() -> anyhow::Result<()> {
+        let nfd = "apple_health_export/exportacio\u{301}n.xml";
+        let nfc = "apple_health_export/exportaci\u{f3}n.xml";
+        let cases: [(&str, &str, bool); 6] = [
+            (
+                "apple_health_export/export.xml",
+                "apple_health_export/export_cda.xml",
+                true,
+            ),
+            // German capitalises it, Portuguese translates it and keeps the CDA name
+            (
+                "apple_health_export/Export.xml",
+                "apple_health_export/Export_cda.xml",
+                true,
+            ),
+            (
+                "apple_health_export/exportar.xml",
+                "apple_health_export/export_cda.xml",
+                true,
+            ),
+            // Spanish: decomposed and without the UTF-8 flag, as an iPhone writes it
+            (nfd, "apple_health_export/exportacio\u{301}n_cda.xml", false),
+            (nfd, "apple_health_export/exportacion_cda.xml", false),
+            // the same name composed and flagged, as a zip made again on a computer can hold it
+            (nfc, "apple_health_export/exportaci\u{f3}n_cda.xml", true),
+        ];
+        let dir = tempfile::tempdir()?;
+        for (main, cda, flag) in cases {
+            let bytes = zip_of(&[(cda, CDA), (main, HEALTH_DATA)], flag)?;
+            // the member is read back under its UTF-8 name, the flag or not
+            assert_eq!(exports_in(&bytes)?, [main], "{main}");
+            let path = dir.path().join("exportación.zip");
+            std::fs::write(&path, &bytes)?;
+            // an upload and an arrival in a watched folder take the same rule
+            assert_eq!(
+                sniff("exportación.zip", &bytes, Some(&path)),
+                "apple_health_zip",
+                "{main}"
+            );
+            assert_eq!(
+                sniff_reader("exportación.zip", std::io::Cursor::new(&bytes))?,
+                "apple_health_zip",
+                "{main}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn other_xml_in_a_zip_is_no_apple_health_export() -> anyhow::Result<()> {
+        // the clinical-document twin alone, an unrelated XML file, and an XML that only mentions HealthData
+        let bytes = zip_of(
+            &[
+                ("apple_health_export/exportacio\u{301}n_cda.xml", CDA),
+                ("notes.xml", "<notes>HealthData</notes>"),
+                ("health.xml", "<!-- <HealthData> --><Other/>"),
+            ],
+            false,
+        )?;
+        assert!(exports_in(&bytes)?.is_empty());
+        assert_eq!(sniff_reader("other.zip", std::io::Cursor::new(&bytes))?, "unknown");
+        Ok(())
+    }
+
+    #[test]
+    fn a_zip_with_two_exports_names_both() -> anyhow::Result<()> {
+        let bytes = zip_of(
+            &[
+                ("a/apple_health_export/export.xml", HEALTH_DATA),
+                ("b/apple_health_export/exportar.xml", HEALTH_DATA),
+            ],
+            true,
+        )?;
+        assert_eq!(
+            exports_in(&bytes)?,
+            ["a/apple_health_export/export.xml", "b/apple_health_export/exportar.xml"]
+        );
+        // still an Apple Health upload: the import refuses it and names both
+        assert_eq!(
+            sniff_reader("two.zip", std::io::Cursor::new(&bytes))?,
+            "apple_health_zip"
+        );
         Ok(())
     }
 

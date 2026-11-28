@@ -1,10 +1,12 @@
 //! Apple Health export.zip import (`ingest/apple_health/__init__.py`; connectors.md 2.2 and 4). Job
 //! kind `import.apple_health`.
 //!
-//! - `export.xml` is streamed (`parse::ExportReader`, constant memory) straight from the zip on a
-//!   blocking thread; samples go to `wearable_sample` in batches through COPY, then the hour and day
-//!   rollups of the touched metrics are rebuilt. Every raw sample is kept: the Watch and the iPhone
-//!   both stay, and `wearables::series` picks one per day by source priority.
+//! - `export.xml` (named in the phone's language, `exportación.xml` in Spanish: exactly one member
+//!   that `documents::apple_health_exports` finds) is streamed (`parse::ExportReader`, constant
+//!   memory) straight from the zip on a blocking thread; samples go to `wearable_sample` in batches
+//!   through COPY, then the hour and day rollups of the touched metrics are rebuilt. Every raw sample
+//!   is kept: the Watch and the iPhone both stay, and `wearables::series` picks one per day by
+//!   source priority.
 //! - `clinical-records/*.json` are FHIR R4 resources and go through `fhir::import_resources`.
 //! - `electrocardiograms/*.csv` are stored as documents of type `ecg`.
 //! - The birth date in `<Me>` must match the profile: a different one stops the import (wrong profile).
@@ -57,7 +59,8 @@ fn unreadable(e: impl std::fmt::Display) -> Error {
 }
 
 struct Members {
-    export: Option<String>,
+    /// The index of the main export member.
+    export: usize,
     clinical: Vec<String>,
     ecg: Vec<String>,
 }
@@ -75,8 +78,24 @@ fn members(path: &Path) -> Result<Members> {
             "the zip holds more than {MAX_MEMBERS} files: not an Apple Health export"
         )));
     }
+    let exports = ownhealth_core::documents::apple_health_exports(&mut z);
+    let export = match exports.as_slice() {
+        [export] => *export,
+        [] => return Err(Error::Upload("no export.xml in the zip".into())),
+        several => {
+            let names: Vec<String> = several
+                .iter()
+                .filter_map(|i| z.name_for_index(*i)?.ok().map(|name| name.into_owned()))
+                .collect();
+            return Err(Error::Upload(format!(
+                "the zip holds {} Apple Health exports ({}): import each export on its own",
+                several.len(),
+                names.join(", ")
+            )));
+        }
+    };
     let mut m = Members {
-        export: None,
+        export,
         clinical: Vec::new(),
         ecg: Vec::new(),
     };
@@ -85,11 +104,8 @@ fn members(path: &Path) -> Result<Members> {
         let f = z.by_index_raw(i).map_err(unreadable)?;
         let name = f.name().map_err(unreadable)?.to_string();
         let low = name.to_lowercase();
-        let base = low.rsplit('/').next().unwrap_or_default();
         let rooted = format!("/{low}");
-        if base == "export.xml" {
-            m.export = Some(name.clone());
-        } else if rooted.contains("/clinical-records/") && low.ends_with(".json") {
+        if rooted.contains("/clinical-records/") && low.ends_with(".json") {
             m.clinical.push(name.clone());
         } else if rooted.contains("/electrocardiograms/") && low.ends_with(".csv") {
             m.ecg.push(name.clone());
@@ -168,12 +184,12 @@ struct ReadInfo {
 /// Parse export.xml on a blocking thread and hand the samples over in batches.
 fn spawn_reader(
     path: PathBuf,
-    export: String,
+    export: usize,
     tx: mpsc::Sender<Vec<Sample>>,
 ) -> tokio::task::JoinHandle<Result<ReadInfo>> {
     tokio::task::spawn_blocking(move || {
         let mut z = open_zip(&path)?;
-        let f = z.by_name(&export).map_err(unreadable)?;
+        let f = z.by_index(export).map_err(unreadable)?;
         let mut reader = ExportReader::new(BufReader::with_capacity(64 * 1024, f));
         let mut batch = Vec::with_capacity(BATCH);
         while let Some(s) = reader.next_sample().map_err(unreadable)? {
@@ -225,11 +241,7 @@ pub async fn import_apple_health(
             .await
             .map_err(unreadable)??
     };
-    let Some(export) = m.export.clone() else {
-        return Err(Error::Upload("no export.xml in the zip".into()));
-    };
-
-    let (staged, metrics, sources, info) = stage_samples(&mut *conn, profile.id, &path, export).await?;
+    let (staged, metrics, sources, info) = stage_samples(&mut *conn, profile.id, &path, m.export).await?;
     let dob = info.birth_date;
     if let (Some(d), Some(p)) = (dob, profile.birth_date)
         && d != p
@@ -348,7 +360,7 @@ async fn stage_samples(
     conn: &mut PgConnection,
     profile_id: Uuid,
     path: &Path,
-    export: String,
+    export: usize,
 ) -> Result<(i64, BTreeSet<String>, BTreeMap<String, i16>, ReadInfo)> {
     sqlx::query(
         "create temp table if not exists ah_stage (metric text, t timestamptz, t_end timestamptz, v real, \
