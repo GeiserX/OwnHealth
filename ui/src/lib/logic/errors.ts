@@ -28,6 +28,8 @@ const PATTERNS: [RegExp, string][] = [
 	[/^garmin_zip_unreadable$/i, 'err_garmin_zip_unreadable'],
 	[/ZIP could not be read/i, 'err_zip_unreadable'],
 	[/ZIP holds too many files to import/i, 'err_zip_too_many'],
+	// an Apple Health zip with two main export files (the Spanish one is exportación.xml)
+	[/the zip holds \d+ Apple Health exports/i, 'err_apple_two_exports'],
 	[/^garmin_zip_limit$/i, 'err_garmin_zip_limit'],
 	[/^strava_zip_unreadable$/i, 'err_strava_zip_unreadable'],
 	[/^strava_zip_limit$/i, 'err_strava_zip_limit'],

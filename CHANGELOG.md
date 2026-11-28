@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Apple Health in any language.** iOS names the main file of a Health export in the phone's language (`exportación.xml` in Spanish, `Export.xml` in German, `exportar.xml` in Portuguese), and OwnHealth refused those zips as an unknown file. It now finds that file by its content, whatever its name. A zip that holds two exports is refused, and the message names both.
+- **Apple Health in any language.** iOS names the main file of a Health export in the phone's language (`exportación.xml` in Spanish, `Export.xml` in German, `exportar.xml` in Portuguese), and OwnHealth refused those zips as an unknown file. It now finds that file by its content, whatever its name. A zip that holds two exports is refused, and the import says why in the reader language.
 
 ## 1.0.0 (2026-11-26)
 

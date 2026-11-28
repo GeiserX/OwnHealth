@@ -1369,6 +1369,7 @@ export const de: Table = {
 	err_fitbit_takeout_no_readings: "Dieses Fitbit-ZIP enthält keine verwertbaren Messwerte.",
 	err_zip_unreadable: "Dieses ZIP ließ sich nicht lesen. Es ist vielleicht unvollständig: Lade es erneut herunter.",
 	err_zip_too_many: "Dieses ZIP enthält zu viele Dateien zum Importieren.",
+	err_apple_two_exports: "Dieses ZIP enthält mehr als einen Apple-Health-Export. Importiere jeden Export einzeln.",
 	i2_ik_fhir_json: "FHIR",
 	i2_ik_fhir_ndjson: "FHIR",
 	i2_ik_genome_facts: "OwnGenome",
